@@ -10,6 +10,8 @@ import { Sparkles } from "lucide-react";
 
 type AuthMode = "sign_in" | "sign_up";
 
+const POCKET_ID_ENABLED = import.meta.env.VITE_POCKET_ID_ENABLED === "true";
+
 export function AuthPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -56,6 +58,16 @@ export function AuthPage() {
     },
     onError: (err) => {
       setError(err instanceof Error ? err.message : "Authentication failed");
+    },
+  });
+
+  const pocketIdMutation = useMutation({
+    mutationFn: async () => {
+      const { url } = await authApi.signInOAuth2({ providerId: "pocket-id", callbackURL: nextPath });
+      window.location.href = url;
+    },
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : "Pocket ID sign-in failed");
     },
   });
 
@@ -158,6 +170,28 @@ export function AuthPage() {
                   : "Create Account"}
             </Button>
           </form>
+
+          {POCKET_ID_ENABLED && (
+            <>
+              <div className="my-4 flex items-center gap-3 text-xs text-muted-foreground">
+                <div className="h-px flex-1 bg-border" />
+                <span>or</span>
+                <div className="h-px flex-1 bg-border" />
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                disabled={pocketIdMutation.isPending}
+                onClick={() => {
+                  setError(null);
+                  pocketIdMutation.mutate();
+                }}
+              >
+                {pocketIdMutation.isPending ? "Redirecting…" : "Continue with Pocket ID"}
+              </Button>
+            </>
+          )}
 
           <div className="mt-5 text-sm text-muted-foreground">
             {mode === "sign_in" ? "Need an account?" : "Already have an account?"}{" "}

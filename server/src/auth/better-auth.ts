@@ -3,6 +3,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { toNodeHandler } from "better-auth/node";
+import { genericOAuth } from "better-auth/plugins";
 import type { Db } from "@paperclipai/db";
 import {
   authAccounts,
@@ -102,6 +103,26 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
   const publicUrl = process.env.PAPERCLIP_PUBLIC_URL ?? baseUrl;
   const isHttpOnly = publicUrl ? publicUrl.startsWith("http://") : false;
 
+  const pocketIdIssuer = process.env.POCKET_ID_ISSUER?.replace(/\/$/, "");
+  const pocketIdClientId = process.env.POCKET_ID_CLIENT_ID;
+  const pocketIdClientSecret = process.env.POCKET_ID_CLIENT_SECRET;
+  const pocketIdEnabled = Boolean(pocketIdIssuer && pocketIdClientId && pocketIdClientSecret);
+
+  const plugins: ReturnType<typeof genericOAuth>[] = [];
+  if (pocketIdEnabled) {
+    plugins.push(
+      genericOAuth({
+        config: [{
+          providerId: "pocket-id",
+          clientId: pocketIdClientId!,
+          clientSecret: pocketIdClientSecret!,
+          discoveryUrl: `${pocketIdIssuer}/.well-known/openid-configuration`,
+          scopes: ["openid", "profile", "email"],
+        }],
+      }),
+    );
+  }
+
   const authConfig = {
     baseURL: baseUrl,
     secret,
@@ -120,6 +141,13 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       requireEmailVerification: false,
       disableSignUp: config.authDisableSignUp,
     },
+    account: {
+      accountLinking: {
+        enabled: true,
+        trustedProviders: pocketIdEnabled ? ["pocket-id"] : [],
+      },
+    },
+    plugins,
     advanced: buildBetterAuthAdvancedOptions({ disableSecureCookies: isHttpOnly }),
   };
 

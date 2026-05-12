@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "master"
+      - "feat/pocket-id-oidc"
     tags:
       - "v*"
 
@@ -53,3 +54,5 @@ jobs:
           cache-to: type=gha,mode=max
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VITE_POCKET_ID_ENABLED=true

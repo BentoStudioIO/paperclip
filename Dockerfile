@@ -40,6 +40,8 @@ COPY patches/ patches/
 RUN pnpm install --frozen-lockfile
 
 FROM base AS build
+ARG VITE_POCKET_ID_ENABLED=false
+ENV VITE_POCKET_ID_ENABLED=${VITE_POCKET_ID_ENABLED}
 WORKDIR /app
 COPY --from=deps /app /app
 COPY . .
