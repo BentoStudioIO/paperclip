@@ -18,6 +18,9 @@ import { formatDate } from "../lib/utils";
 type AuthMode = "sign_in" | "sign_up";
 type AuthFeedback = { tone: "error" | "info"; message: string };
 
+const POCKET_ID_ENABLED = import.meta.env.VITE_POCKET_ID_ENABLED === "true";
+const DISABLE_SIGNUP = import.meta.env.VITE_DISABLE_SIGNUP === "true";
+
 const joinAdapterOptions: AgentAdapterType[] = [...AGENT_ADAPTER_TYPES];
 const ENABLED_INVITE_ADAPTERS = new Set([
   "claude_local",
@@ -411,6 +414,23 @@ export function InviteLandingPage() {
     },
   });
 
+  const pocketIdMutation = useMutation({
+    mutationFn: async () => {
+      rememberPendingInviteToken(token);
+      const { url } = await authApi.signInOAuth2({
+        providerId: "pocket-id",
+        callbackURL: `/invite/${token}`,
+      });
+      window.location.href = url;
+    },
+    onError: (err) => {
+      setAuthFeedback({
+        tone: "error",
+        message: err instanceof Error ? err.message : "Pocket ID sign-in failed",
+      });
+    },
+  });
+
   const joinButtonLabel = useMemo(() => {
     if (!invite) return "Continue";
     if (invite.inviteType === "bootstrap_ceo") return "Accept invite";
@@ -654,15 +674,54 @@ export function InviteLandingPage() {
               <div className="space-y-5">
                 <div>
                   <h2 className="text-lg font-semibold">
-                    {authMode === "sign_up" ? "Create your account" : "Sign in to continue"}
+                    {DISABLE_SIGNUP
+                      ? "Sign in to continue"
+                      : authMode === "sign_up" ? "Create your account" : "Sign in to continue"}
                   </h2>
                   <p className="mt-1 text-sm text-zinc-400">
-                    {authMode === "sign_up"
-                      ? `Start with a Paperclip account. After that, you'll come right back here to accept the invite for ${companyDisplayName}.`
-                      : "Use the Paperclip account that already matches this invite. If you do not have one yet, switch back to create account."}
+                    {DISABLE_SIGNUP
+                      ? `Sign in with Pocket ID to accept the invite for ${companyDisplayName}.`
+                      : authMode === "sign_up"
+                        ? `Start with a Paperclip account. After that, you'll come right back here to accept the invite for ${companyDisplayName}.`
+                        : "Use the Paperclip account that already matches this invite. If you do not have one yet, switch back to create account."}
                   </p>
                 </div>
 
+                {POCKET_ID_ENABLED ? (
+                  <>
+                    <Button
+                      type="button"
+                      className="w-full rounded-none"
+                      disabled={pocketIdMutation.isPending}
+                      onClick={() => {
+                        setAuthFeedback(null);
+                        pocketIdMutation.mutate();
+                      }}
+                    >
+                      {pocketIdMutation.isPending ? "Redirecting..." : "Continue with Pocket ID"}
+                    </Button>
+                    {!DISABLE_SIGNUP ? (
+                      <div className="my-1 flex items-center gap-3 text-xs text-zinc-500">
+                        <div className="h-px flex-1 bg-zinc-800" />
+                        <span>or use email & password</span>
+                        <div className="h-px flex-1 bg-zinc-800" />
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
+
+                {DISABLE_SIGNUP ? (
+                  authFeedback ? (
+                    <p
+                      className={`text-xs ${
+                        authFeedback.tone === "info" ? "text-amber-300" : "text-red-400"
+                      }`}
+                    >
+                      {authFeedback.message}
+                    </p>
+                  ) : null
+                ) : (
+                  <>
                 <div className="flex gap-2">
                   <button
                     type="button"
@@ -782,6 +841,8 @@ export function InviteLandingPage() {
                     ? "Already signed up before? Use the existing-account option instead so the invite lands on the right Paperclip user."
                     : "No account yet? Switch back to create account so you can accept the invite with a new login."}
                 </p>
+                  </>
+                )}
               </div>
             ) : (
               <div className="space-y-4">
