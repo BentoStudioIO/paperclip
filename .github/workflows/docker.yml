@@ -7,6 +7,7 @@ on:
       - "feat/pocket-id-oidc"
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
