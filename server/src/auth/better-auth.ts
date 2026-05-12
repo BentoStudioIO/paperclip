@@ -118,7 +118,6 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
           clientSecret: pocketIdClientSecret!,
           discoveryUrl: `${pocketIdIssuer}/.well-known/openid-configuration`,
           scopes: ["openid", "profile", "email"],
-          disableSignUp: config.authDisableSignUp,
         }],
       }),
     );
