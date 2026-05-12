@@ -57,3 +57,4 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VITE_POCKET_ID_ENABLED=true
+            VITE_DISABLE_SIGNUP=true

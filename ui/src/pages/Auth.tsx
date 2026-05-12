@@ -11,12 +11,14 @@ import { Sparkles } from "lucide-react";
 type AuthMode = "sign_in" | "sign_up";
 
 const POCKET_ID_ENABLED = import.meta.env.VITE_POCKET_ID_ENABLED === "true";
+const DISABLE_SIGNUP = import.meta.env.VITE_DISABLE_SIGNUP === "true";
 
 export function AuthPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [mode, setMode] = useState<AuthMode>("sign_in");
+  const signupAvailable = !DISABLE_SIGNUP;
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -193,19 +195,21 @@ export function AuthPage() {
             </>
           )}
 
-          <div className="mt-5 text-sm text-muted-foreground">
-            {mode === "sign_in" ? "Need an account?" : "Already have an account?"}{" "}
-            <button
-              type="button"
-              className="font-medium text-foreground underline underline-offset-2"
-              onClick={() => {
-                setError(null);
-                setMode(mode === "sign_in" ? "sign_up" : "sign_in");
-              }}
-            >
-              {mode === "sign_in" ? "Create one" : "Sign in"}
-            </button>
-          </div>
+          {signupAvailable && (
+            <div className="mt-5 text-sm text-muted-foreground">
+              {mode === "sign_in" ? "Need an account?" : "Already have an account?"}{" "}
+              <button
+                type="button"
+                className="font-medium text-foreground underline underline-offset-2"
+                onClick={() => {
+                  setError(null);
+                  setMode(mode === "sign_in" ? "sign_up" : "sign_in");
+                }}
+              >
+                {mode === "sign_in" ? "Create one" : "Sign in"}
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
