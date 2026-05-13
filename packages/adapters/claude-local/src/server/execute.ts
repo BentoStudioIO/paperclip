@@ -108,6 +108,42 @@ function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean 
   return typeof raw === "string" && raw.trim().length > 0;
 }
 
+const HOST_ENV_DENY_EXACT = new Set([
+  "DATABASE_URL",
+  "DATABASE_URL_MIGRATIONS",
+  "POSTGRES_URL",
+  "POSTGRES_URL_NON_POOLING",
+  "POSTGRES_PRISMA_URL",
+  "POSTGRES_USER",
+  "POSTGRES_PASSWORD",
+  "POSTGRES_DB",
+  "POSTGRES_HOST",
+  "PGUSER",
+  "PGPASSWORD",
+  "PGDATABASE",
+  "PGHOST",
+  "PGPORT",
+  "BETTER_AUTH_SECRET",
+  "PAPERCLIP_AGENT_JWT_SECRET",
+  "POCKET_ID_CLIENT_ID",
+  "POCKET_ID_CLIENT_SECRET",
+  "POCKET_ID_ISSUER",
+]);
+
+// Drop env vars that belong to the paperclip control plane (DB credentials,
+// auth secrets, OIDC client). Agent subprocesses must not inherit them, or a
+// generated app that reads bare DATABASE_URL will end up writing to (and in
+// the worst case dropping tables in) the paperclip Postgres. See
+// docs/INCIDENT-2026-05-13 for the original failure.
+export function sanitizeHostEnvForAgent(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (HOST_ENV_DENY_EXACT.has(key)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 function isBedrockAuth(env: Record<string, string>): boolean {
   return (
     env.CLAUDE_CODE_USE_BEDROCK === "1" ||
@@ -261,7 +297,7 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
   }
 
   const runtimeEnv = Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
+    Object.entries(ensurePathInEnv({ ...sanitizeHostEnvForAgent(process.env), ...env })).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
@@ -418,7 +454,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     asNumber(config.terminalResultCleanupGraceMs, 5_000),
   );
   const effectiveEnv = Object.fromEntries(
-    Object.entries({ ...process.env, ...env }).filter(
+    Object.entries({ ...sanitizeHostEnvForAgent(process.env), ...env }).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
@@ -569,7 +605,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     });
     if (paperclipBridge) {
       Object.assign(env, paperclipBridge.env);
-      const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+      const runtimeEnv = ensurePathInEnv({ ...sanitizeHostEnvForAgent(process.env), ...env });
       loggedEnv = buildInvocationEnvForLogs(env, {
         runtimeEnv,
         includeRuntimeKeys: ["HOME", "CLAUDE_CONFIG_DIR"],

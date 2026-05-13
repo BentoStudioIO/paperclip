@@ -21,6 +21,7 @@ import {
 } from "@paperclipai/adapter-utils/execution-target";
 import path from "node:path";
 import { detectClaudeLoginRequired, parseClaudeStreamJson } from "./parse.js";
+import { sanitizeHostEnvForAgent } from "./execute.js";
 import { isBedrockModelId } from "./models.js";
 import { buildClaudeProbePermissionArgs } from "./permissions.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
@@ -105,7 +106,7 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const runtimeEnv = ensurePathInEnv({ ...sanitizeHostEnvForAgent(process.env), ...env });
   const installCheck = await maybeRunSandboxInstallCommand({
     runId,
     target,
