@@ -1,12 +1,8 @@
 name: Docker
 
+# Dokploy builds the image from docker-compose.yml on push to master, so the
+# ghcr.io image is no longer consumed. Kept as manual-only for ad-hoc/rollback builds.
 on:
-  push:
-    branches:
-      - "master"
-      - "feat/pocket-id-oidc"
-    tags:
-      - "v*"
   workflow_dispatch:
 
 permissions:
