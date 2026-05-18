@@ -9,7 +9,7 @@
 | Content | Count |
 |---------|-------|
 | Agents | 9 |
-| Skills | 34 |
+| Skills | 36 |
 | Tasks | 1 |
 
 ### Agents
@@ -17,8 +17,8 @@
 | Agent | Role | Reports To |
 |-------|------|------------|
 | Bug-Hunter | qa | engineering-lead |
-| Dokploy-Ops | devops | engineering-lead |
-| E2E-Harness | qa | engineering-lead |
+| DevOps | devops | engineering-lead |
+| E2E | qa | engineering-lead |
 | Engineering Lead | CTO | — |
 | Implementer | Engineer | engineering-lead |
 | Planner | pm | engineering-lead |
@@ -44,7 +44,9 @@
 | json-render-shadcn | json-render @json-render/shadcn pre-built shadcn components (Card, Stack, Select, Input, etc.). Reference when consolidating Pharmia's hand-rolled catalog primitives. | catalog |
 | n8n-architect | Expert assistant for n8n workflow development. Use when the user asks about n8n workflows, nodes, automation, or needs help creating/editing n8n JSON configurations. Provides access to complete n8n node documentation and prevents parameter hallucination. | catalog |
 | pharmia-agents | Pharmia agent architecture, model defaults, eval system, and key file paths | catalog |
+| pharmia-app | Pharmia app e2e environment — local dev URLs, dev login, pharmia-navigator dispatch, Playwright manifest, and crawl artifacts. Use when discovering, running, or maintaining e2e tests for the Pharmia frontend. | catalog |
 | pharmia-cli | Pharmia CLI commands: evals, agent testing, tool invocation, workflows, and Outline operations | catalog |
+| pharmia-infra | Pharmia infrastructure environment — Dokploy instances, VPS topology, compose IDs, cfdns/Gatus/PocketID workflows. Use when deploying, managing services, DNS, or tenants on Pharmia/Bento infrastructure. | catalog |
 | pragmatic-programmer | 'Apply meta-principles of software craftsmanship: DRY, orthogonality, tracer bullets, and design by contract. Use when the user mentions "best practices", "pragmatic approach", "broken windows", "tracer bullet", or "software craftsmanship". Covers estimation, domain languages, and reversibility. For code-level quality, see clean-code. For refactoring techniques, see refactoring-patterns.' | catalog |
 | receiving-code-review | Use when receiving code review feedback, before implementing suggestions, especially if feedback seems unclear or technically questionable - requires technical rigor and verification, not performative agreement or blind implementation | catalog |
 | researcher-workflow | Use before building anything new — enforces library doc verification, existing solution search, and capability verification before writing custom code | catalog |

@@ -7,14 +7,14 @@ agents:
         dangerouslySkipPermissions: true
         model: "claude-opus-4-6"
       type: "claude_local"
-  dokploy-ops:
+  devops:
     role: "devops"
     adapter:
       config:
         dangerouslySkipPermissions: true
         model: "claude-sonnet-4-6"
       type: "claude_local"
-  e2e-harness:
+  e2e:
     role: "qa"
     adapter:
       config:
@@ -77,8 +77,8 @@ sidebar:
   agents:
     - "engineering-lead"
     - "bug-hunter"
-    - "dokploy-ops"
-    - "e2e-harness"
+    - "devops"
+    - "e2e"
     - "implementer"
     - "planner"
     - "researcher"

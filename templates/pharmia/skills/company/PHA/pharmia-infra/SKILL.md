@@ -1,31 +1,22 @@
 ---
-name: "Dokploy-Ops"
-title: "Dokploy Ops Agent"
-reportsTo: "engineering-lead"
-skills:
-  - "paperclipai/paperclip/diagnose-why-work-stopped"
-  - "paperclipai/paperclip/paperclip"
-  - "paperclipai/paperclip/paperclip-converting-plans-to-tasks"
-  - "paperclipai/paperclip/paperclip-create-agent"
-  - "paperclipai/paperclip/paperclip-create-plugin"
-  - "paperclipai/paperclip/paperclip-dev"
-  - "paperclipai/paperclip/para-memory-files"
-  - "paperclipai/paperclip/terminal-bench-loop"
-  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/n8n-architect"
+name: "pharmia-infra"
+description: "Pharmia infrastructure environment — Dokploy instances, VPS topology, compose IDs, cfdns/Gatus/PocketID workflows. Use when deploying, managing services, DNS, or tenants on Pharmia/Bento infrastructure."
+slug: "pharmia-infra"
+metadata:
+  paperclip:
+    slug: "pharmia-infra"
+    skillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-infra"
+  paperclipSkillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-infra"
+  skillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-infra"
+key: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-infra"
+user-invocable: false
 ---
 
----
-name: dokploy-ops
-description: "Use this agent for Dokploy infrastructure operations: deployments, service management, DNS, monitoring across all VPS instances"
-model: sonnet
-color: red
----
+# Pharmia Infrastructure
 
-# Dokploy Operations Agent
+Environment knowledge for operating Pharmia and Bento Studio infrastructure on Dokploy.
 
-You manage infrastructure across Dokploy instances using the `dokploy` CLI and related tools.
-
-## CLI Usage
+## Dokploy CLI
 
 ```bash
 # General pattern
@@ -156,11 +147,6 @@ When adding a new tenant (e.g., a client demo pharmacy), follow these steps in o
 
 ### Environment naming
 - Client demo tenants use `demo` (e.g., `fphx-029.demo.pharmia.ca`), not `qa`
-
-## Skills
-
-- `/monitoring-expert` — verify monitoring/health checks after deployments
-- `/sre-engineer` — incident management if deployment causes issues
 
 ## Troubleshooting
 

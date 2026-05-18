@@ -1,0 +1,146 @@
+---
+name: "pharmia-app"
+description: "Pharmia app e2e environment — local dev URLs, dev login, pharmia-navigator dispatch, Playwright manifest, and crawl artifacts. Use when discovering, running, or maintaining e2e tests for the Pharmia frontend."
+slug: "pharmia-app"
+metadata:
+  paperclip:
+    slug: "pharmia-app"
+    skillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-app"
+  paperclipSkillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-app"
+  skillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-app"
+key: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-app"
+user-invocable: false
+---
+
+# Pharmia App E2E Environment
+
+Environment knowledge for running and maintaining Playwright e2e tests against the Pharmia frontend.
+
+## Prerequisites
+
+Before running in any mode, verify:
+
+1. Dev server is running: `curl -s http://tenant.pharmamate.localhost:5173 > /dev/null`
+2. API is running: `curl -s http://api.pharmamate.localhost:3000/api/health > /dev/null`
+3. agent-browser is installed: `agent-browser --version`
+
+If any check fails, report the issue and stop.
+
+## Test Layout
+
+- Manifest: `apps/web/e2e/manifest.json` (~126KB — batch all writes, write once at end of run)
+- Specs: `apps/web/e2e/flows/`
+- Auth states: `apps/web/e2e/auth/{role}-{tenant}.json`
+- Traces: `apps/web/e2e/traces/{date}/`
+- Missing test IDs log: `apps/web/e2e/missing-testids.md`
+- JSON results: `apps/web/e2e/results.json` (reporter configured in `playwright.config.ts`)
+- Changelog: `docs/product-crawl-changelog.md`
+- Product reference: `docs/product.md` — expected flows per role
+- Crawl deltas: `docs/product-crawl-deltas.md`
+
+## Running Playwright
+
+```bash
+cd apps/web && npx playwright test                       # full suite
+cd apps/web && npx playwright test --grep "{flowId1}|{flowId2}"  # subset
+```
+
+For `targeted` runs, match `git diff main --name-only` against manifest `sourceFiles` and `routes` fields.
+
+## Dispatching pharmia-navigator
+
+The `pharmia-navigator` agent crawls the frontend and returns flow traces. Dispatch via the Agent tool with `subagent_type: "pharmia-navigator"`.
+
+- **Max concurrency:** 5 navigators at a time (override via `MAX_CONCURRENT_NAVIGATORS`).
+- **Dispatch cap:** max 10 navigator dispatches per regression/targeted run.
+- In regression/execute mode pass `SCREENSHOTS=off` — screenshots are only needed for discovery.
+
+### Discover-mode prompt template
+
+````
+SESSION_NAME=crawl-{role}-{tenant}
+OUTPUT_MODE=trace
+mode=explore
+
+Log in as {role} on {tenant} using dev login:
+AGENT_BROWSER_SESSION=$SESSION_NAME agent-browser open "http://api.pharmamate.localhost:3000/api/dev/login?role={role}&tenant={tenant}"
+
+Then systematically explore every reachable page and interaction.
+For each distinct user journey you discover, record a flow trace.
+
+Expected pages for this role (from product.md):
+{relevant product.md section}
+
+Remember to:
+- Take screenshots at every step (save to apps/web/e2e/traces/{date}/)
+- Record data-pw attributes found on each page
+- Handle TOS modal and onboarding tour if they appear
+- Switch language to English before exploring
+- Close your session when done
+
+Return your traces as JSON in a ```json code fence as the last thing in your response.
+````
+
+### Execute-mode prompt template (regression/targeted)
+
+````
+SESSION_NAME=crawl-{role}-{tenant}
+OUTPUT_MODE=trace
+mode=execute
+SCREENSHOTS=off
+
+Log in as {role} on {tenant} using dev login:
+AGENT_BROWSER_SESSION=$SESSION_NAME agent-browser open "http://api.pharmamate.localhost:3000/api/dev/login?role={role}&tenant={tenant}"
+
+Execute this specific flow: {flow.id}
+Steps: {JSON.stringify(flow.steps)}
+
+The previous Playwright test failed with: {errorMessage}
+
+Follow each step. If the UI has changed and a step no longer works:
+- Record what you actually see
+- Try to find the new path to complete the flow
+- Record the corrected steps
+
+Skip screenshots — only take one if the flow is blocked and you need to document why.
+
+Return your trace as JSON in a ```json code fence as the last thing in your response.
+````
+
+### Roles and tenants
+
+Discover-mode Phase 1 role-tenant combos: pharmacist, technician, nurse, tenantadministrator × tenant.
+
+## Generating Playwright Specs
+
+When converting a trace to a spec:
+
+1. **Selectors:** Use `getByTestId('value')` when `dataPw` is non-null. Fall back to `getByRole()` or `getByLabel()` otherwise. Log fallbacks to `missing-testids.md`.
+2. **Auth:** Each spec uses `test.use({ storageState: 'e2e/auth/{role}-{tenant}.json' })`.
+3. **Fencing:** Wrap generated code in `// ── BEGIN GENERATED SECTION ──` / `// ── END GENERATED SECTION ──`. On regeneration, only replace fenced content.
+4. **Comments:** Each step gets a comment from the navigator's observation.
+5. **Assertions:** Use Playwright auto-waiting (`expect(...).toBeVisible()`). No manual waits or `waitForTimeout`.
+6. **Header:** Add `// GENERATED by e2e — review before committing` at top.
+
+## Updating the Manifest
+
+**Batch manifest writes.** Collect all updates in memory, then write the manifest once at the end of the run. Do NOT read-modify-write the manifest after each individual flow — the 126KB file is expensive to serialize repeatedly.
+
+For each flow processed, prepare an update with:
+
+- `contentHash`: SHA-256 of the stringified `steps` array
+- `lastCrawl`: current ISO timestamp
+- `lastTestResult`: based on Playwright output
+- `lastTestError`: from Playwright failure message (or null)
+- `specFile`: relative path of the generated spec
+
+Apply all updates to the in-memory manifest object, then write once.
+
+## Discover-mode Artifacts
+
+After a full crawl:
+
+- Generate Playwright specs in `apps/web/e2e/flows/` and add manifest entries.
+- Log elements missing `data-pw` to `apps/web/e2e/missing-testids.md`.
+- Update `docs/product-crawl-changelog.md` with discoveries.
+- Compare observations against `docs/product.md` and write diffs to `docs/product-crawl-deltas.md`.
