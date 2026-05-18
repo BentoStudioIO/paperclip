@@ -90,7 +90,7 @@ When prior knowledge is insufficient, use external sources in priority order:
 4. **Source Cloning** — Clone to `/tmp/` and grep (first-class strategy, not fallback). When cloning, enumerate `skills/`, `AGENTS.md`, `examples/`, and `packages/<name>/src/index.ts` (full export surface) before anything else.
 5. **Web Search** — Last resort only
 
-Priority source code targets: Mastra, Vercel AI SDK, Better Auth, Drizzle.
+Priority source code targets: the project's core frameworks and key dependencies.
 
 ### Phase 3: Library Docs Gate (mandatory for dependencies)
 
@@ -179,7 +179,7 @@ Focus areas:
 - **Library replacement scan** — identify custom code that a well-maintained library could replace. Even 20-line utilities count. For each, evaluate: maintenance activity, edge cases the library handles that we don't, bundle size, API fit.
 - **Capability gaps** — what tools/libraries exist that would give us capabilities we lack entirely? Think observability, testing, DX, automation, security.
 - **Upgrade opportunities** — dependencies where a major version upgrade unlocks features we're currently building by hand.
-- **Ecosystem watch** — new releases or tools in our stack (Mastra, Better Auth, Drizzle, Vite, React) that could simplify or eliminate existing code.
+- **Ecosystem watch** — new releases or tools in the project's core stack that could simplify or eliminate existing code.
 
 Apply the full Library Docs Gate to any recommendation. Output as a ranked list by ROI (value gained / integration effort).
 

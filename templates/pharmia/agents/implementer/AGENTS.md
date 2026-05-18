@@ -15,11 +15,6 @@ skills:
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/duplication-detect"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/vitest"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/frontend-design"
-  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/json-render-core"
-  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/json-render-react"
-  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/json-render-shadcn"
-  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-cli"
-  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-agents"
 ---
 
 ---
