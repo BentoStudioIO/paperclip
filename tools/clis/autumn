@@ -2,30 +2,62 @@
 set -euo pipefail
 
 # Autumn billing CLI
-# Auth: AUTUMN_SECRET_KEY env var or ~/.config/autumn/config
-# Env vars take precedence over config file
-_pre_key="${AUTUMN_SECRET_KEY:-}"
+#
+# Usage: autumn [prod|sandbox] <command> [args]
+#   prod    — use the live key (AUTUMN_SECRET_KEY_PROD). Default.
+#   sandbox — use the test/sandbox key (AUTUMN_SECRET_KEY_SANDBOX).
+#
+# Bare `autumn <cmd>` = `autumn prod <cmd>`.
+#
+# Credential resolution order for each key:
+#   1. AUTUMN_SECRET_KEY_PROD / AUTUMN_SECRET_KEY_SANDBOX env vars
+#   2. ~/.config/autumn/config (AUTUMN_SECRET_KEY for legacy compat)
+#   3. Fail with a clear message
+
+# --- env selector (must happen before any config sourcing) ---
+_AUTUMN_ENV="prod"
+case "${1:-}" in
+  prod|sandbox) _AUTUMN_ENV="$1"; shift ;;
+esac
+
+# Load config file if present (for local dev convenience)
+_pre_prod_key="${AUTUMN_SECRET_KEY_PROD:-}"
+_pre_sand_key="${AUTUMN_SECRET_KEY_SANDBOX:-}"
 _pre_url="${AUTUMN_URL:-}"
-[[ -f "$HOME/.config/autumn/config" ]] && source "$HOME/.config/autumn/config"
-[[ -n "$_pre_key" ]] && AUTUMN_SECRET_KEY="$_pre_key"
-[[ -n "$_pre_url" ]] && AUTUMN_URL="$_pre_url"
-unset _pre_key _pre_url
+
+if [[ -f "$HOME/.config/autumn/config" ]]; then
+  # Source for AUTUMN_URL and the legacy AUTUMN_SECRET_KEY (= sandbox key)
+  source "$HOME/.config/autumn/config"
+fi
+
+# Env vars always win over config file values
+[[ -n "$_pre_prod_key" ]] && AUTUMN_SECRET_KEY_PROD="$_pre_prod_key"
+[[ -n "$_pre_sand_key" ]] && AUTUMN_SECRET_KEY_SANDBOX="$_pre_sand_key"
+[[ -n "$_pre_url" ]]      && AUTUMN_URL="$_pre_url"
+unset _pre_prod_key _pre_sand_key _pre_url
+
+# Derive sandbox key from legacy AUTUMN_SECRET_KEY when the dedicated var is absent
+if [[ -z "${AUTUMN_SECRET_KEY_SANDBOX:-}" && -n "${AUTUMN_SECRET_KEY:-}" ]]; then
+  AUTUMN_SECRET_KEY_SANDBOX="${AUTUMN_SECRET_KEY}"
+fi
+
+# Select the active key based on the resolved env
+case "$_AUTUMN_ENV" in
+  prod)
+    AUTUMN_SECRET_KEY="${AUTUMN_SECRET_KEY_PROD:?Set AUTUMN_SECRET_KEY_PROD}"
+    ;;
+  sandbox)
+    AUTUMN_SECRET_KEY="${AUTUMN_SECRET_KEY_SANDBOX:?Set AUTUMN_SECRET_KEY_SANDBOX}"
+    ;;
+esac
 
 BASE="${AUTUMN_URL:?Set AUTUMN_URL}"
 # Strip trailing /v1 to normalize — we add it per-request
 BASE="${BASE%/v1}"
-AUTH="Authorization: Bearer ${AUTUMN_SECRET_KEY:?Set AUTUMN_SECRET_KEY}"
+AUTH="Authorization: Bearer ${AUTUMN_SECRET_KEY}"
 CT="Content-Type: application/json"
 
-# Env banner derivation: sandbox if key contains `_test_` or URL hints at sandbox
-_env_label() {
-  local key="${AUTUMN_SECRET_KEY:-}"
-  if [[ "$key" == *"_test_"* ]] || [[ "$BASE" == *"sandbox"* ]]; then
-    echo "sandbox"
-  else
-    echo "prod"
-  fi
-}
+_env_label() { echo "$_AUTUMN_ENV"; }
 
 # Banner on every command, suppress with AUTUMN_NO_BANNER=1
 if [[ -z "${AUTUMN_NO_BANNER:-}" ]]; then
@@ -35,7 +67,10 @@ fi
 usage() {
   local code="${1:-0}"
   cat <<'EOF'
-Usage: autumn <command> [args]
+Usage: autumn [prod|sandbox] <command> [args]
+
+  prod    — live key (default)
+  sandbox — test/sandbox key
 
 Customer commands:
   customers [--limit N] [--offset N]     List customers
@@ -726,9 +761,8 @@ case "$1" in
     ;;
 
   push)
-    shift
-    cd ~/Documents/PharmaMate
-    exec npm run autumn:push -- "$@"
+    echo "autumn push: not available in container (requires local PharmaMate checkout)" >&2
+    exit 1
     ;;
 
   *)

@@ -80,8 +80,7 @@ RUN chmod +x /usr/local/bin/loki \
               /usr/local/bin/autumn \
               /usr/local/bin/cfdns \
               /usr/local/bin/ol \
-              /usr/local/bin/shlink \
-              /usr/local/bin/gcal
+              /usr/local/bin/shlink
 
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
