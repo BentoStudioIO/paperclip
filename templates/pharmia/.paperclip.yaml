@@ -1,0 +1,86 @@
+schema: "paperclip/v1"
+agents:
+  bug-hunter:
+    role: "qa"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
+  dokploy-ops:
+    role: "devops"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-sonnet-4-6"
+      type: "claude_local"
+  e2e-harness:
+    role: "qa"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-sonnet-4-6"
+      type: "claude_local"
+  engineering-lead:
+    role: "cto"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
+  implementer:
+    role: "engineer"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-sonnet-4-6"
+      type: "claude_local"
+  planner:
+    role: "pm"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
+  researcher:
+    role: "researcher"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-sonnet-4-6"
+      type: "claude_local"
+  reviewer:
+    role: "qa"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
+  security-agent:
+    role: "security"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-sonnet-4-6"
+      type: "claude_local"
+company:
+  attachmentMaxBytes: 10485760
+routines:
+  code-health:
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "0 9 * * 1"
+        label: "Weekly Monday morning"
+        timezone: "UTC"
+sidebar:
+  agents:
+    - "engineering-lead"
+    - "bug-hunter"
+    - "dokploy-ops"
+    - "e2e-harness"
+    - "implementer"
+    - "planner"
+    - "researcher"
+    - "reviewer"
+    - "security-agent"
