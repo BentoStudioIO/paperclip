@@ -1,0 +1,497 @@
+#!/usr/bin/env bash
+# prom — query Prometheus via Grafana datasource proxy
+# Usage:
+#   prom <env> query <PromQL> [--quiet]
+#   prom <env> query-range <PromQL> [--start ISO] [--end ISO] [--step DURATION] [--format json|tsv]
+#   prom <env> series <selector> [--start ISO] [--end ISO]
+#   prom <env> labels
+#   prom <env> label-values <label>
+#   prom <env> metrics [prefix]
+#   prom <env> targets [--state active|dropped|any] [--all]
+#   prom <env> alerts
+#   prom <env> rules
+#   prom <env> grafana-alerts [--all] [--state STATE]
+#   prom <env> grafana-history [--since DUR] [--limit N] [--rule NAME] [--folder NAME] [--all-folders]
+#   prom <env> status
+#   prom <env> p50|p95|p99 <metric> [window] [--by <label>]
+#   prom <env> rate <counter> [window]
+#   prom <env> top <N> <query>
+#
+# Environments: dev, qa, canary
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: prom <env> <command> [args]
+
+Environments: dev, qa, canary
+
+Commands:
+  query <PromQL>
+      Instant query. Example: prom dev query 'up'
+      If result is empty, suggests closest metric name.
+  query-range <PromQL> [--start ISO] [--end ISO] [--step DURATION] [--format json|tsv]
+      Range query. Default: last 1h, 15s step, JSON output.
+      --format tsv prints `timestamp_iso<TAB>value` for single-series output.
+  series <selector> [--start ISO] [--end ISO]
+      Find series matching selector. Example: prom dev series '{job="api"}'
+  labels
+      List all label names
+  label-values <label>
+      List values for a label. Example: prom dev label-values job
+  metrics [prefix]
+      List metric names, optionally filtered by prefix. Example: prom dev metrics http
+  targets [--state active|dropped|any] [--all]
+      List unhealthy scrape targets (with lastError, scrapeUrl, age).
+      --all includes healthy targets.
+  alerts
+      List active Prometheus-native alerts (usually empty — Pharmia uses Grafana-managed
+      alerts; use `grafana-alerts` instead).
+  rules
+      List alerting/recording rules
+  grafana-alerts [--all] [--state STATE]
+      List Grafana-managed alert rules with their current state. Default hides Normal.
+      --all includes Normal. --state filters to a specific state (Firing|Pending|Normal|...).
+      Example: prom canary grafana-alerts
+  grafana-history [--since DUR] [--limit N] [--rule NAME] [--folder NAME] [--all-folders]
+      List Grafana alert state transitions over a time window.
+      Defaults: --since 24h --limit 100. The `Business` folder (signup /
+      consultation / reaction notifications) is hidden by default since
+      these are event-style and pollute the audit signal — use
+      --folder Business or --all-folders to include them.
+      Example: prom canary grafana-history --since 24h --rule "Runtime Error"
+      Example: prom canary grafana-history --folder Business --since 7d
+  status
+      Show Prometheus build info
+  p50 | p95 | p99 <metric> [window] [--by <label>]
+      Histogram quantile over <metric>_bucket. Default window 5m.
+      Example: prom dev p95 http_server_request_duration_seconds 5m --by route
+  rate <counter> [window]
+      rate(<counter>[<window>]). Default window 5m.
+  top <N> <query>
+      topk(<N>, <query>). Example: prom dev top 5 'up'
+EOF
+  exit 1
+}
+
+case "${1:-}" in
+  -h|--help|help) usage ;;
+esac
+
+[[ $# -lt 2 ]] && usage
+
+ENV="${1^^}"
+CMD="$2"
+shift 2
+
+case "$CMD" in
+  -h|--help|help) usage ;;
+esac
+
+case "$ENV" in
+  DEV|QA|CANARY) ;;
+  *) echo "Unknown env: $ENV (use dev, qa, canary)" >&2; exit 1 ;;
+esac
+
+URL_VAR="GRAFANA_URL_$ENV"
+TOKEN_VAR="GRAFANA_TOKEN_$ENV"
+URL="${!URL_VAR:-}"
+TOKEN="${!TOKEN_VAR:-}"
+if [[ -z "$URL" ]]; then
+  echo "Set $URL_VAR in ~/.zshenv" >&2
+  exit 1
+fi
+if [[ -z "$TOKEN" ]]; then
+  echo "Set $TOKEN_VAR in ~/.zshenv" >&2
+  exit 1
+fi
+
+BASE="$URL/api/datasources/proxy/uid/prometheus/api/v1"
+
+gfetch() {
+  local result
+  result=$(curl -sf -H "Authorization: Bearer $TOKEN" "$@")
+  local status
+  status=$(echo "$result" | jq -r '.status // empty' 2>/dev/null)
+  if [[ "$status" == "error" ]]; then
+    echo "$result" | jq -r '.error // .message // "unknown error"' >&2
+    return 1
+  fi
+  echo "$result"
+}
+
+epoch() {
+  date -u -d "$1" +%s 2>/dev/null || date -u -jf "%Y-%m-%dT%H:%M:%S" "$1" +%s
+}
+
+# Fuzzy match: prints best candidates (substring hits first, then simple distance).
+# Usage: suggest_metric <needle>
+suggest_metric() {
+  local needle="$1"
+  local all
+  all=$(gfetch "$BASE/label/__name__/values" 2>/dev/null | jq -r '.data[]?' 2>/dev/null || true)
+  [[ -z "$all" ]] && return 0
+  # Substring matches (case-insensitive), then prefix of common token.
+  local subs
+  subs=$(echo "$all" | grep -iF -- "$needle" 2>/dev/null | head -5 || true)
+  if [[ -n "$subs" ]]; then
+    echo "$subs"
+    return 0
+  fi
+  # Fallback: awk-based levenshtein, keep top 3 within distance <= 4.
+  echo "$all" | awk -v t="$needle" '
+    function min3(a,b,c){ return (a<b?(a<c?a:c):(b<c?b:c)) }
+    function lev(s1,s2,  i,j,m,n,a,b,prev,curr) {
+      m=length(s1); n=length(s2)
+      if (m==0) return n; if (n==0) return m
+      for (j=0;j<=n;j++) prev[j]=j
+      for (i=1;i<=m;i++) {
+        curr[0]=i
+        for (j=1;j<=n;j++) {
+          a=substr(s1,i,1); b=substr(s2,j,1)
+          curr[j]=min3(prev[j]+1, curr[j-1]+1, prev[j-1]+(a==b?0:1))
+        }
+        for (j=0;j<=n;j++) prev[j]=curr[j]
+      }
+      return prev[n]
+    }
+    { d=lev(tolower(t),tolower($0)); if (d<=4) print d"\t"$0 }
+  ' | sort -n | head -3 | cut -f2-
+}
+
+# Check if a metric name exists at all in the namespace.
+metric_exists() {
+  local m="$1"
+  gfetch "$BASE/label/__name__/values" 2>/dev/null \
+    | jq -e --arg m "$m" '.data | index($m) != null' >/dev/null 2>&1
+}
+
+case "$CMD" in
+  query)
+    [[ $# -lt 1 ]] && { echo "Usage: prom $ENV query <PromQL>" >&2; exit 1; }
+    QUERY="$1"; shift
+    QUIET=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --quiet) QUIET=1; shift ;;
+        *) echo "prom: unknown flag $1" >&2; exit 2 ;;
+      esac
+    done
+    RESP=$(gfetch --data-urlencode "query=$QUERY" "$BASE/query")
+    COUNT=$(echo "$RESP" | jq '.data.result | length')
+    echo "$RESP" | jq '.data.result'
+    if [[ "$COUNT" == "0" && "$QUIET" != "1" ]]; then
+      # Pull a candidate metric name from the query (first identifier).
+      NEEDLE=$(echo "$QUERY" | grep -oE '[a-zA-Z_:][a-zA-Z0-9_:]*' | head -1 || true)
+      if [[ -n "$NEEDLE" ]]; then
+        if metric_exists "$NEEDLE"; then
+          echo "no data — metric '$NEEDLE' exists but returned 0 samples in the last 5m — check scrape health or selector labels" >&2
+        else
+          SUG=$(suggest_metric "$NEEDLE" || true)
+          if [[ -n "$SUG" ]]; then
+            FIRST=$(echo "$SUG" | head -1)
+            echo "no data — did you mean: $FIRST" >&2
+            REST=$(echo "$SUG" | tail -n +2 || true)
+            if [[ -n "$REST" ]]; then
+              echo "  other matches:" >&2
+              echo "$REST" | sed 's/^/    /' >&2
+            fi
+          else
+            echo "no data — metric '$NEEDLE' not scraped recently" >&2
+          fi
+        fi
+      else
+        echo "no data" >&2
+      fi
+    fi
+    ;;
+
+  query-range)
+    [[ $# -lt 1 ]] && { echo "Usage: prom $ENV query-range <PromQL> [--start ISO] [--end ISO] [--step DURATION] [--format json|tsv]" >&2; exit 1; }
+    QUERY="$1"; shift
+    START=$(date -u -d '1 hour ago' +%s 2>/dev/null || date -u -v-1H +%s)
+    END=$(date -u +%s)
+    STEP="15s"
+    FORMAT="json"
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --start) START=$(epoch "$2"); shift 2 ;;
+        --end)   END=$(epoch "$2"); shift 2 ;;
+        --step)  STEP="$2"; shift 2 ;;
+        --format) FORMAT="$2"; shift 2 ;;
+        *) echo "prom: unknown flag $1" >&2; exit 2 ;;
+      esac
+    done
+
+    RESP=$(gfetch --data-urlencode "query=$QUERY" --data-urlencode "start=$START" --data-urlencode "end=$END" --data-urlencode "step=$STEP" "$BASE/query_range")
+    if [[ "$FORMAT" == "tsv" ]]; then
+      SERIES_COUNT=$(echo "$RESP" | jq '.data.result | length')
+      if [[ "$SERIES_COUNT" != "1" ]]; then
+        echo "prom: --format tsv requires single-series output, got $SERIES_COUNT series" >&2
+        exit 2
+      fi
+      echo "$RESP" | jq -r '.data.result[0].values[] | [(.[0] | todateiso8601), .[1]] | @tsv'
+    else
+      echo "$RESP" | jq '.data.result'
+    fi
+    ;;
+
+  series)
+    [[ $# -lt 1 ]] && { echo "Usage: prom $ENV series <selector>" >&2; exit 1; }
+    MATCH="$1"; shift
+    START=$(date -u -d '1 hour ago' +%s 2>/dev/null || date -u -v-1H +%s)
+    END=$(date -u +%s)
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --start) START=$(epoch "$2"); shift 2 ;;
+        --end)   END=$(epoch "$2"); shift 2 ;;
+        *) echo "prom: unknown flag $1" >&2; exit 2 ;;
+      esac
+    done
+
+    RESP=$(gfetch --data-urlencode "match[]=$MATCH" --data-urlencode "start=$START" --data-urlencode "end=$END" "$BASE/series")
+    COUNT=$(echo "$RESP" | jq '.data | length')
+    echo "$RESP" | jq '.data'
+    [[ "$COUNT" == "0" ]] && echo "no matching series" >&2
+    ;;
+
+  labels)
+    gfetch "$BASE/labels" | jq -r '.data[]'
+    ;;
+
+  label-values)
+    [[ $# -lt 1 ]] && { echo "Usage: prom $ENV label-values <label>" >&2; exit 1; }
+    gfetch "$BASE/label/$1/values" | jq -r '.data[]'
+    ;;
+
+  metrics)
+    PREFIX="${1:-}"
+    ALL=$(gfetch "$BASE/label/__name__/values" | jq -r '.data[]')
+    if [[ -n "$PREFIX" ]]; then
+      echo "$ALL" | grep "^$PREFIX" | sort -u
+    else
+      echo "$ALL" | sort -u
+    fi
+    ;;
+
+  targets)
+    STATE="any"
+    ALL_TARGETS=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --state) STATE="$2"; shift 2 ;;
+        --all)   ALL_TARGETS=1; shift ;;
+        *) echo "prom: unknown flag $1" >&2; exit 2 ;;
+      esac
+    done
+    RESP=$(gfetch "$BASE/targets?state=$STATE")
+    NOW=$(date -u +%s)
+    echo "$RESP" | jq --argjson now "$NOW" --argjson all "$ALL_TARGETS" '
+      .data.activeTargets
+      | map({
+          job: .labels.job,
+          instance: .labels.instance,
+          health: .health,
+          scrapeUrl: .scrapeUrl,
+          lastError: .lastError,
+          lastScrape: .lastScrape,
+          ageSeconds: (
+            (.lastScrape | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? ) as $t
+            | if $t == null then null else ($now - $t) end
+          )
+        })
+      | map(. + { stale: (.ageSeconds != null and .ageSeconds > 300) })
+      | if $all == 1 then .
+        else map(select(.health != "up" or .stale or (.lastError // "") != ""))
+        end
+      | map(. + { lastScrape: (if .ageSeconds == null then .lastScrape else ((.ageSeconds | floor | tostring) + "s ago") end) })
+      | map(del(.ageSeconds))
+    '
+    ;;
+
+  alerts)
+    RESP=$(gfetch "$BASE/alerts")
+    COUNT=$(echo "$RESP" | jq '.data.alerts | length')
+    echo "$RESP" | jq '.data.alerts'
+    [[ "$COUNT" == "0" ]] && echo "no active alerts" >&2
+    ;;
+
+  rules)
+    RESP=$(gfetch "$BASE/rules")
+    COUNT=$(echo "$RESP" | jq '.data.groups | length')
+    echo "$RESP" | jq '.data.groups'
+    [[ "$COUNT" == "0" ]] && echo "no rules configured" >&2
+    ;;
+
+  grafana-alerts)
+    # Grafana-managed alert rules + current state. The Alertmanager v2/alerts endpoint
+    # is empty in practice (alerts auto-resolve in seconds), so we use the Grafana
+    # Prometheus-compat alerts endpoint which exposes Normal/Pending/Firing/NoData/Error.
+    SHOW_ALL=0
+    STATE_FILTER=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --all)   SHOW_ALL=1; shift ;;
+        --state) STATE_FILTER="$2"; shift 2 ;;
+        *) echo "prom: unknown flag $1" >&2; exit 2 ;;
+      esac
+    done
+    RESP=$(curl -sf -H "Authorization: Bearer $TOKEN" "$URL/api/prometheus/grafana/api/v1/alerts")
+    NOW=$(date -u +%s)
+    OUT=$(echo "$RESP" | jq -r --argjson now "$NOW" --argjson all "$SHOW_ALL" --arg state "$STATE_FILTER" '
+      .data.alerts
+      | map(. + {
+          activeSeconds: (
+            (.activeAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? ) as $t
+            | if $t == null then null else ($now - $t) end
+          )
+        })
+      | if $state != "" then map(select(.state == $state))
+        elif $all == 1 then .
+        else map(select(.state | startswith("Normal") | not))
+        end
+      | sort_by(.activeSeconds // 0) | reverse
+      | .[]
+      | (
+          (.labels.alertname // "?") + "  " +
+          .state + "  " +
+          "severity=" + (.labels.severity // "?") + "  " +
+          "for=" + (
+            if .activeSeconds == null then "?"
+            elif .activeSeconds < 60 then ((.activeSeconds | tostring) + "s")
+            elif .activeSeconds < 3600 then (((.activeSeconds / 60) | floor | tostring) + "m")
+            elif .activeSeconds < 86400 then (((.activeSeconds / 3600) | floor | tostring) + "h")
+            else (((.activeSeconds / 86400) | floor | tostring) + "d")
+          end) + "  " +
+          (.annotations.summary // .annotations.description // "")
+        )
+    ')
+    if [[ -z "$OUT" ]]; then
+      if [[ "$SHOW_ALL" == "1" || -n "$STATE_FILTER" ]]; then
+        echo "no alerts match" >&2
+      else
+        echo "no firing/pending alerts (use --all to include Normal)" >&2
+      fi
+    else
+      echo "$OUT"
+    fi
+    ;;
+
+  grafana-history)
+    SINCE="24h"
+    LIMIT=100
+    RULE_FILTER=""
+    FOLDER_FILTER=""
+    ALL_FOLDERS=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --since)        SINCE="$2"; shift 2 ;;
+        --limit)        LIMIT="$2"; shift 2 ;;
+        --rule)         RULE_FILTER="$2"; shift 2 ;;
+        --folder)       FOLDER_FILTER="$2"; shift 2 ;;
+        --all-folders)  ALL_FOLDERS=1; shift ;;
+        *) echo "prom: unknown flag $1" >&2; exit 2 ;;
+      esac
+    done
+    # Convert duration like 24h / 7d / 30m to seconds.
+    case "$SINCE" in
+      *s) SECS="${SINCE%s}" ;;
+      *m) SECS=$(( ${SINCE%m} * 60 )) ;;
+      *h) SECS=$(( ${SINCE%h} * 3600 )) ;;
+      *d) SECS=$(( ${SINCE%d} * 86400 )) ;;
+      *)  echo "prom: invalid --since '$SINCE' (use Ns, Nm, Nh, Nd)" >&2; exit 2 ;;
+    esac
+    NOW_MS=$(($(date +%s) * 1000))
+    FROM_MS=$(( NOW_MS - SECS * 1000 ))
+    RESP=$(curl -sf -H "Authorization: Bearer $TOKEN" \
+      "$URL/api/annotations?type=alert&from=$FROM_MS&to=$NOW_MS&limit=$LIMIT")
+    # Folder filtering: Grafana embeds `grafana_folder=<name>` in the
+    # annotation `text` field. Default hides the `Business` folder
+    # (event-style signup/consultation/reaction notifications) so the
+    # audit signal isn't drowned. --folder NAME filters to one folder.
+    # --all-folders includes everything.
+    OUT=$(echo "$RESP" | jq -r \
+      --arg rule "$RULE_FILTER" \
+      --arg folder "$FOLDER_FILTER" \
+      --argjson all_folders "$ALL_FOLDERS" '
+      def folder_of: (.text // "") | capture("grafana_folder=(?<f>[^,}]+)"; "i")? | .f // "";
+      sort_by(.time)
+      | if $rule != "" then map(select(.alertName | test($rule; "i"))) else . end
+      | if $folder != "" then map(select(folder_of == $folder))
+        elif $all_folders == 1 then .
+        else map(select(folder_of != "Business"))
+        end
+      | .[]
+      | (
+          ((.time / 1000) | todateiso8601) + "  " +
+          (.alertName // "?") + "  " +
+          (.prevState // "?") + " -> " + (.newState // "?") + "  " +
+          # `capture` errors when the regex does not match, so without the
+          # `// {}` fallback `?` would emit an empty stream and the entire
+          # row would be silently dropped (e.g. Business folder rules have
+          # no severity label and used to disappear from the output).
+          "severity=" + (
+            ((.text // "") | capture("severity=(?<sev>[a-z]+)"; "i")? // {} | .sev) // "?"
+          )
+        )
+    ')
+    if [[ -z "$OUT" ]]; then
+      echo "no alert history in window" >&2
+    else
+      COUNT=$(echo "$OUT" | wc -l)
+      echo "$OUT"
+      echo "($COUNT transitions, --since $SINCE, --limit $LIMIT)" >&2
+    fi
+    ;;
+
+  status)
+    gfetch "$BASE/status/buildinfo" | jq '.data'
+    ;;
+
+  p50|p95|p99)
+    [[ $# -lt 1 ]] && { echo "Usage: prom $ENV $CMD <metric> [window] [--by <label>]" >&2; exit 1; }
+    METRIC="$1"; shift
+    WINDOW="5m"
+    BY=""
+    # Optional positional window (first non-flag arg).
+    if [[ $# -gt 0 && "$1" != --* ]]; then
+      WINDOW="$1"; shift
+    fi
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --by) BY="$2"; shift 2 ;;
+        *) echo "prom: unknown flag $1" >&2; exit 2 ;;
+      esac
+    done
+    case "$CMD" in p50) Q=0.5;; p95) Q=0.95;; p99) Q=0.99;; esac
+    if [[ -n "$BY" ]]; then
+      EXPR="histogram_quantile($Q, sum by (le, $BY) (rate(${METRIC}_bucket[$WINDOW])))"
+    else
+      EXPR="histogram_quantile($Q, sum by (le) (rate(${METRIC}_bucket[$WINDOW])))"
+    fi
+    gfetch --data-urlencode "query=$EXPR" "$BASE/query" | jq '.data.result'
+    ;;
+
+  rate)
+    [[ $# -lt 1 ]] && { echo "Usage: prom $ENV rate <counter> [window]" >&2; exit 1; }
+    COUNTER="$1"; shift
+    WINDOW="${1:-5m}"
+    EXPR="rate(${COUNTER}[$WINDOW])"
+    gfetch --data-urlencode "query=$EXPR" "$BASE/query" | jq '.data.result'
+    ;;
+
+  top)
+    [[ $# -lt 2 ]] && { echo "Usage: prom $ENV top <N> <query>" >&2; exit 1; }
+    N="$1"; shift
+    QUERY="$*"
+    EXPR="topk($N, $QUERY)"
+    gfetch --data-urlencode "query=$EXPR" "$BASE/query" | jq '.data.result'
+    ;;
+
+  *)
+    echo "Unknown command: $CMD" >&2
+    usage
+    ;;
+esac

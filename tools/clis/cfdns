@@ -1,0 +1,463 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Cloudflare DNS management CLI
+# Auth: CLOUDFLARE_API_TOKEN env var
+API="https://api.cloudflare.com/client/v4"
+AUTH="Authorization: Bearer ${CLOUDFLARE_API_TOKEN:?Set CLOUDFLARE_API_TOKEN}"
+
+CONFIG_DIR="${HOME}/.config/cfdns"
+ZONES_CACHE="${CONFIG_DIR}/zones.json"
+mkdir -p "$CONFIG_DIR"
+
+declare -A ZONE_ID_CACHE=()
+
+usage() {
+  cat <<EOF
+Usage: cfdns <command> [args]
+
+Zone resolution: most commands accept an FQDN in place of <zone>. The longest
+registered zone is auto-detected from the cached zones map (see 'zones --refresh').
+
+Commands:
+  zones [--refresh] [--json]         List zones. --refresh rewrites the local cache.
+  ls <zone-or-fqdn> [--type T] [--name N] [--proxied-only] [--json]
+                                     List DNS records. <zone-or-fqdn> is auto-resolved.
+  get <zone-or-fqdn> <record-id>     Get a single record by ID
+  get <name> [type]                  Get a single record by name (+optional type)
+  add <zone-or-fqdn> <type> <name> <content> [--proxied] [--ttl N] [--force-proxy] [--dry-run]
+                                     Create a DNS record. --proxied requires --force-proxy.
+  set <zone> <record-id> <content>   Update record content by ID (legacy form)
+  set <name> [type] [--content V] [--ttl N] [--proxied BOOL] [--force-proxy]
+                                     Update record by name (+optional type)
+  rm  <zone> <record-id>             Delete a record by ID (legacy form)
+  rm  <name> [type]                  Delete record by name (+optional type)
+  upsert <zone-or-fqdn> <type> <name> <content> [--ttl N] [--proxied] [--force-proxy]
+                                     Create if absent, PATCH if present. Idempotent.
+  find [zone-or-fqdn] [--name SUB] [--content VAL] [--json]
+                                     Search by name substring or content. Zone optional.
+  audit [zone-or-fqdn]               Report proxied records (policy violation). Exit 1 if any.
+  help | -h | --help                 Show this help
+
+Examples:
+  cfdns zones --refresh
+  cfdns ls admin.qa.pharmia.ca        # auto-detects pharmia.ca zone
+  cfdns rm admin.qa.pharmia.ca A
+  cfdns find --content 51.222.204.73
+  cfdns audit
+  cfdns upsert pharmia.ca A app.dev.pharmia.ca 1.2.3.4 --ttl 300
+EOF
+}
+
+die() { echo "cfdns: $*" >&2; exit 1; }
+
+# --- HTTP layer with error surfacing -----------------------------------------
+# cf_http METHOD PATH [json-body]  -> echoes response body on success,
+# prints Cloudflare errors[].message to stderr and returns non-zero on failure.
+cf_http() {
+  local method="$1" path="$2" body="${3:-}"
+  local url="$API$path" tmp status
+  tmp=$(mktemp)
+  if [[ -n "$body" ]]; then
+    status=$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" \
+      -H "$AUTH" -H "Content-Type: application/json" -d "$body") || true
+  else
+    status=$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" \
+      -H "$AUTH") || true
+  fi
+  local resp; resp=$(cat "$tmp"); rm -f "$tmp"
+  if [[ "$status" =~ ^2 ]]; then
+    printf '%s' "$resp"
+    return 0
+  fi
+  local msgs
+  msgs=$(printf '%s' "$resp" | jq -r '.errors[]? | "Cloudflare: \(.message)\(if .code then " (code \(.code))" else "" end)"' 2>/dev/null || true)
+  if [[ -n "$msgs" ]]; then
+    printf '%s\n' "$msgs" >&2
+  else
+    printf 'cfdns: HTTP %s from %s\n%s\n' "$status" "$path" "$resp" >&2
+  fi
+  return 1
+}
+
+# --- Zones cache -------------------------------------------------------------
+refresh_zones_cache() {
+  local page=1 total=1 resp all='[]'
+  while :; do
+    resp=$(cf_http GET "/zones?per_page=50&page=$page") || die "failed to list zones"
+    all=$(jq -c --argjson acc "$all" '$acc + (.result // [])' <<<"$resp")
+    total=$(jq -r '.result_info.total_pages // 1' <<<"$resp")
+    (( page >= total )) && break
+    page=$(( page + 1 ))
+  done
+  jq '[.[] | {name, id, status}]' <<<"$all" > "$ZONES_CACHE"
+}
+
+ensure_zones_cache() {
+  [[ -s "$ZONES_CACHE" ]] || refresh_zones_cache
+}
+
+# Resolve <zone-or-fqdn> to the longest matching registered zone name.
+# Prints the resolved zone name on stdout.
+resolve_zone_name() {
+  local candidate="$1"
+  ensure_zones_cache
+  # Exact match fast path
+  if jq -e --arg n "$candidate" 'any(.name == $n)' "$ZONES_CACHE" >/dev/null; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  # Walk labels left-to-right, testing each suffix for a registered zone.
+  local rest="$candidate"
+  while [[ "$rest" == *.* ]]; do
+    rest="${rest#*.}"
+    if jq -e --arg n "$rest" 'any(.name == $n)' "$ZONES_CACHE" >/dev/null; then
+      printf '%s' "$rest"
+      return 0
+    fi
+  done
+  die "no registered zone matches '$candidate' (try 'cfdns zones --refresh')"
+}
+
+zone_id() {
+  local zone="$1"
+  if [[ -z "${ZONE_ID_CACHE[$zone]+x}" ]]; then
+    ensure_zones_cache
+    local id
+    id=$(jq -r --arg n "$zone" '.[] | select(.name == $n) | .id' "$ZONES_CACHE" | head -n1)
+    if [[ -z "$id" ]]; then
+      # Zone exists in Cloudflare but not in cache yet — refresh and retry once.
+      refresh_zones_cache
+      id=$(jq -r --arg n "$zone" '.[] | select(.name == $n) | .id' "$ZONES_CACHE" | head -n1)
+    fi
+    [[ -n "$id" ]] || die "zone '$zone' not found (run 'cfdns zones --refresh')"
+    ZONE_ID_CACHE[$zone]="$id"
+  fi
+  printf '%s' "${ZONE_ID_CACHE[$zone]}"
+}
+
+# Paginate a records endpoint. Emits NDJSON (.result[] raw, one per line).
+paginate_records() {
+  local base="$1" per_page=100 page=1 total=1 resp
+  local sep="?"; [[ "$base" == *\?* ]] && sep="&"
+  while :; do
+    resp=$(cf_http GET "${base}${sep}per_page=${per_page}&page=${page}") || return 1
+    jq -c '.result[]' <<<"$resp"
+    total=$(jq -r '.result_info.total_pages // 1' <<<"$resp")
+    (( page >= total )) && break
+    page=$(( page + 1 ))
+  done
+}
+
+# Resolve an FQDN+optional type to a single record ID within a zone.
+# Returns "zone_name<TAB>zone_id<TAB>record_id<TAB>record_json".
+resolve_record_by_name() {
+  local fqdn="$1" rtype="${2:-}"
+  local zname zid q resp count
+  zname=$(resolve_zone_name "$fqdn")
+  zid=$(zone_id "$zname")
+  q="$API/zones/$zid/dns_records?name=$(jq -rn --arg s "$fqdn" '$s|@uri')"
+  [[ -n "$rtype" ]] && q+="&type=$rtype"
+  resp=$(cf_http GET "${q#$API}") || die "lookup failed for $fqdn"
+  count=$(jq '.result | length' <<<"$resp")
+  if [[ "$count" == "0" ]]; then
+    die "no record matches name='$fqdn'${rtype:+ type=$rtype} in zone $zname"
+  elif [[ "$count" != "1" ]]; then
+    local list
+    list=$(jq -r '.result[] | "  \(.type) \(.name) -> \(.content) [\(.id)]"' <<<"$resp")
+    die $'multiple records match (narrow with type):\n'"$list"
+  fi
+  local rid rjson
+  rid=$(jq -r '.result[0].id' <<<"$resp")
+  rjson=$(jq -c '.result[0]' <<<"$resp")
+  printf '%s\t%s\t%s\t%s\n' "$zname" "$zid" "$rid" "$rjson"
+}
+
+# Detect whether an argument is a Cloudflare record ID (32 hex chars).
+is_record_id() { [[ "$1" =~ ^[0-9a-f]{32}$ ]]; }
+
+# --- Command dispatch --------------------------------------------------------
+# Allow --json / -h / --help / help as pre-subcommand global flags.
+GLOBAL_JSON_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) GLOBAL_JSON_ARGS+=(--json); shift ;;
+    -h|--help|help) usage; exit 0 ;;
+    *) break ;;
+  esac
+done
+
+[[ $# -lt 1 ]] && { usage; exit 0; }
+
+CMD="$1"; shift || true
+# Forward any pre-subcommand --json to the subcommand parser.
+set -- "$@" "${GLOBAL_JSON_ARGS[@]}"
+
+case "$CMD" in
+  help|-h|--help)
+    usage; exit 0 ;;
+
+  zones)
+    JSON=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --refresh) refresh_zones_cache; shift ;;
+        --json) JSON=1; shift ;;
+        *) die "unknown flag: $1" ;;
+      esac
+    done
+    ensure_zones_cache
+    if (( JSON )); then
+      cat "$ZONES_CACHE"
+    else
+      jq -r '.[] | "\(.name)\t\(.id)\t\(.status)"' "$ZONES_CACHE"
+    fi
+    ;;
+
+  ls)
+    [[ $# -lt 1 ]] && die "usage: cfdns ls <zone-or-fqdn> [--type T] [--name N] [--proxied-only] [--json]"
+    ZNAME=$(resolve_zone_name "$1"); shift
+    ZID=$(zone_id "$ZNAME")
+    FILTERS=""; PROXIED_ONLY=0; JSON=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --type) FILTERS+="&type=$2"; shift 2 ;;
+        --name) FILTERS+="&name=$2"; shift 2 ;;
+        --proxied-only) PROXIED_ONLY=1; shift ;;
+        --json) JSON=1; shift ;;
+        *) die "unknown flag: $1" ;;
+      esac
+    done
+    URL="/zones/$ZID/dns_records${FILTERS:+?${FILTERS#&}}"
+    if (( JSON )); then
+      paginate_records "$URL" \
+        | { (( PROXIED_ONLY )) && jq -c 'select(.proxied==true)' || cat; } \
+        | jq -s '[.[] | {id, type, name, content, proxied, ttl}]'
+    else
+      paginate_records "$URL" \
+        | { (( PROXIED_ONLY )) && jq -c 'select(.proxied==true)' || cat; } \
+        | jq -r '"\(.type)\t\(.name)\t\(.content)\tproxied=\(.proxied)\tttl=\(.ttl)\t\(.id)"'
+    fi
+    ;;
+
+  get)
+    [[ $# -lt 1 ]] && die "usage: cfdns get <zone> <record-id> | cfdns get <name> [type] [--json]"
+    JSON=0
+    # Peel --json off the tail if present.
+    ARGS=(); for a in "$@"; do [[ "$a" == "--json" ]] && JSON=1 || ARGS+=("$a"); done
+    set -- "${ARGS[@]}"
+    if [[ $# -eq 2 ]] && is_record_id "$2"; then
+      # Legacy: <zone> <record-id>
+      ZNAME=$(resolve_zone_name "$1"); ZID=$(zone_id "$ZNAME")
+      RESP=$(cf_http GET "/zones/$ZID/dns_records/$2") || exit 1
+      if (( JSON )); then
+        jq '.result | {id, type, name, content, proxied, ttl}' <<<"$RESP"
+      else
+        jq -r '.result | "\(.type)\t\(.name)\t\(.content)\tproxied=\(.proxied)\tttl=\(.ttl)\t\(.id)"' <<<"$RESP"
+      fi
+    else
+      # By-name: <name> [type]
+      IFS=$'\t' read -r _ _ _ RJSON < <(resolve_record_by_name "$1" "${2:-}")
+      if (( JSON )); then
+        jq '{id, type, name, content, proxied, ttl}' <<<"$RJSON"
+      else
+        jq -r '"\(.type)\t\(.name)\t\(.content)\tproxied=\(.proxied)\tttl=\(.ttl)\t\(.id)"' <<<"$RJSON"
+      fi
+    fi
+    ;;
+
+  add)
+    [[ $# -lt 4 ]] && die "usage: cfdns add <zone-or-fqdn> <type> <name> <content> [--proxied] [--ttl N] [--force-proxy] [--dry-run]"
+    ZNAME=$(resolve_zone_name "$1")
+    TYPE="$2"; NAME="$3"; CONTENT="$4"; shift 4
+    PROXIED=false; TTL=1; FORCE_PROXY=0; DRY_RUN=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --proxied)
+          if [[ "${2:-}" == "true" || "${2:-}" == "false" ]]; then
+            PROXIED="$2"; shift 2
+          else
+            PROXIED=true; shift
+          fi ;;
+        --ttl) TTL="$2"; shift 2 ;;
+        --force-proxy) FORCE_PROXY=1; shift ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        *) die "unknown flag: $1" ;;
+      esac
+    done
+    if [[ "$PROXIED" == "true" && $FORCE_PROXY -ne 1 ]]; then
+      die "refusing --proxied: CLAUDE.md policy requires Cloudflare DNS to stay unproxied. Pass --force-proxy to override."
+    fi
+    ZID=$(zone_id "$ZNAME")
+    BODY=$(jq -cn --arg t "$TYPE" --arg n "$NAME" --arg c "$CONTENT" \
+      --argjson p "$PROXIED" --argjson ttl "$TTL" \
+      '{type:$t,name:$n,content:$c,proxied:$p,ttl:$ttl}')
+    if (( DRY_RUN )); then
+      echo "[dry-run] POST /zones/$ZID/dns_records  $BODY"
+      exit 0
+    fi
+    RESP=$(cf_http POST "/zones/$ZID/dns_records" "$BODY") || exit 1
+    jq '{success, id: .result.id, name: .result.name, content: .result.content, proxied: .result.proxied}' <<<"$RESP"
+    ;;
+
+  set)
+    [[ $# -lt 1 ]] && die "usage: cfdns set <zone> <record-id> <content> | cfdns set <name> [type] [--content V] [--ttl N] [--proxied BOOL] [--force-proxy]"
+    # Legacy form: <zone> <record-id> <content>
+    if [[ $# -ge 3 ]] && is_record_id "$2" && [[ "$3" != --* ]]; then
+      ZNAME=$(resolve_zone_name "$1"); ZID=$(zone_id "$ZNAME")
+      RID="$2"; CONTENT="$3"
+      BODY=$(jq -cn --arg c "$CONTENT" '{content:$c}')
+      RESP=$(cf_http PATCH "/zones/$ZID/dns_records/$RID" "$BODY") || exit 1
+      jq '{success, name: .result.name, content: .result.content}' <<<"$RESP"
+      exit 0
+    fi
+    # By-name form
+    NAME="$1"; shift
+    TYPE=""
+    [[ $# -gt 0 && "$1" != --* ]] && { TYPE="$1"; shift; }
+    CONTENT=""; TTL=""; PROXIED=""; FORCE_PROXY=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --content) CONTENT="$2"; shift 2 ;;
+        --ttl) TTL="$2"; shift 2 ;;
+        --proxied) PROXIED="$2"; shift 2 ;;
+        --force-proxy) FORCE_PROXY=1; shift ;;
+        *) die "unknown flag: $1" ;;
+      esac
+    done
+    if [[ "$PROXIED" == "true" && $FORCE_PROXY -ne 1 ]]; then
+      die "refusing --proxied true: CLAUDE.md policy requires Cloudflare DNS to stay unproxied. Pass --force-proxy to override."
+    fi
+    IFS=$'\t' read -r ZNAME ZID RID _ < <(resolve_record_by_name "$NAME" "$TYPE")
+    BODY="{}"
+    [[ -n "$CONTENT" ]] && BODY=$(jq -c --arg c "$CONTENT" '. + {content:$c}' <<<"$BODY")
+    [[ -n "$TTL" ]] && BODY=$(jq -c --argjson t "$TTL" '. + {ttl:$t}' <<<"$BODY")
+    [[ -n "$PROXIED" ]] && BODY=$(jq -c --argjson p "$PROXIED" '. + {proxied:$p}' <<<"$BODY")
+    [[ "$BODY" == "{}" ]] && die "nothing to update (pass --content/--ttl/--proxied)"
+    RESP=$(cf_http PATCH "/zones/$ZID/dns_records/$RID" "$BODY") || exit 1
+    jq '{success, name: .result.name, content: .result.content, proxied: .result.proxied, ttl: .result.ttl}' <<<"$RESP"
+    ;;
+
+  rm)
+    [[ $# -lt 1 ]] && die "usage: cfdns rm <zone> <record-id> | cfdns rm <name> [type]"
+    if [[ $# -ge 2 ]] && is_record_id "$2"; then
+      ZNAME=$(resolve_zone_name "$1"); ZID=$(zone_id "$ZNAME")
+      RESP=$(cf_http DELETE "/zones/$ZID/dns_records/$2") || exit 1
+      jq '{success, id: .result.id}' <<<"$RESP"
+    else
+      IFS=$'\t' read -r ZNAME ZID RID RJSON < <(resolve_record_by_name "$1" "${2:-}")
+      echo "cfdns: deleting $(jq -r '"\(.type) \(.name) -> \(.content)"' <<<"$RJSON") [$RID] in $ZNAME" >&2
+      RESP=$(cf_http DELETE "/zones/$ZID/dns_records/$RID") || exit 1
+      jq '{success, id: .result.id}' <<<"$RESP"
+    fi
+    ;;
+
+  upsert)
+    [[ $# -lt 4 ]] && die "usage: cfdns upsert <zone-or-fqdn> <type> <name> <content> [--ttl N] [--proxied] [--force-proxy]"
+    ZNAME=$(resolve_zone_name "$1")
+    TYPE="$2"; NAME="$3"; CONTENT="$4"; shift 4
+    PROXIED=false; TTL=1; FORCE_PROXY=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --proxied)
+          if [[ "${2:-}" == "true" || "${2:-}" == "false" ]]; then PROXIED="$2"; shift 2
+          else PROXIED=true; shift; fi ;;
+        --ttl) TTL="$2"; shift 2 ;;
+        --force-proxy) FORCE_PROXY=1; shift ;;
+        *) die "unknown flag: $1" ;;
+      esac
+    done
+    if [[ "$PROXIED" == "true" && $FORCE_PROXY -ne 1 ]]; then
+      die "refusing --proxied: CLAUDE.md policy requires Cloudflare DNS to stay unproxied. Pass --force-proxy to override."
+    fi
+    ZID=$(zone_id "$ZNAME")
+    LOOKUP=$(cf_http GET "/zones/$ZID/dns_records?name=$(jq -rn --arg s "$NAME" '$s|@uri')&type=$TYPE") || exit 1
+    COUNT=$(jq '.result | length' <<<"$LOOKUP")
+    BODY=$(jq -cn --arg t "$TYPE" --arg n "$NAME" --arg c "$CONTENT" \
+      --argjson p "$PROXIED" --argjson ttl "$TTL" \
+      '{type:$t,name:$n,content:$c,proxied:$p,ttl:$ttl}')
+    if [[ "$COUNT" == "0" ]]; then
+      RESP=$(cf_http POST "/zones/$ZID/dns_records" "$BODY") || exit 1
+      jq '{op:"created", id: .result.id, name: .result.name, content: .result.content}' <<<"$RESP"
+    elif [[ "$COUNT" == "1" ]]; then
+      RID=$(jq -r '.result[0].id' <<<"$LOOKUP")
+      RESP=$(cf_http PATCH "/zones/$ZID/dns_records/$RID" "$BODY") || exit 1
+      jq '{op:"updated", id: .result.id, name: .result.name, content: .result.content}' <<<"$RESP"
+    else
+      die "upsert ambiguous: $COUNT records match name=$NAME type=$TYPE"
+    fi
+    ;;
+
+  find)
+    ZONE_ARG=""; NAME_Q=""; CONTENT_Q=""; JSON=0
+    # First positional (if not a flag) is zone. Else all positional names become a legacy substring query.
+    if [[ $# -gt 0 && "$1" != --* ]]; then
+      ZONE_ARG="$1"; shift
+    fi
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --name) NAME_Q="$2"; shift 2 ;;
+        --content) CONTENT_Q="$2"; shift 2 ;;
+        --json) JSON=1; shift ;;
+        --*) die "unknown flag: $1" ;;
+        *)
+          # Legacy: `cfdns find <zone> <substring>` — treat trailing positional as --name
+          NAME_Q="$1"; shift ;;
+      esac
+    done
+    [[ -z "$NAME_Q" && -z "$CONTENT_Q" ]] && die "find: pass --name SUB and/or --content VAL"
+
+    search_zone() {
+      local zn="$1" zid
+      zid=$(zone_id "$zn")
+      paginate_records "/zones/$zid/dns_records" \
+        | jq -c --arg zn "$zn" --arg nq "$NAME_Q" --arg cq "$CONTENT_Q" '
+            select(
+              ($nq == "" or (.name | test($nq; "i"))) and
+              ($cq == "" or (.content | tostring | test($cq; "i")))
+            )
+            | {zone:$zn, id, type, name, content, proxied, ttl}'
+    }
+
+    {
+      if [[ -n "$ZONE_ARG" ]]; then
+        search_zone "$(resolve_zone_name "$ZONE_ARG")"
+      else
+        ensure_zones_cache
+        while IFS= read -r zn; do search_zone "$zn"; done < <(jq -r '.[].name' "$ZONES_CACHE")
+      fi
+    } | if (( JSON )); then
+      jq -s '.'
+    else
+      jq -r '"\(.zone)\t\(.type)\t\(.name)\t\(.content)\tproxied=\(.proxied)\t\(.id)"'
+    fi
+    ;;
+
+  audit)
+    VIOLATIONS=0
+    TMP=$(mktemp); trap 'rm -f "$TMP"' EXIT
+    if [[ $# -ge 1 ]]; then
+      ZONES_TO_AUDIT=("$(resolve_zone_name "$1")")
+    else
+      ensure_zones_cache
+      mapfile -t ZONES_TO_AUDIT < <(jq -r '.[].name' "$ZONES_CACHE")
+    fi
+    for zn in "${ZONES_TO_AUDIT[@]}"; do
+      zid=$(zone_id "$zn")
+      paginate_records "/zones/$zid/dns_records" \
+        | jq -c --arg zn "$zn" 'select(.proxied==true) | {zn:$zn, name, type, content}' >> "$TMP"
+    done
+    if [[ -s "$TMP" ]]; then
+      while IFS= read -r line; do
+        echo "[VIOLATION] $(jq -r '"\(.zn) \(.name) \(.type) \(.content) proxied=true"' <<<"$line")"
+        VIOLATIONS=$(( VIOLATIONS + 1 ))
+      done < "$TMP"
+      echo "cfdns: $VIOLATIONS proxied record(s) found (CLAUDE.md policy: always proxied:false)" >&2
+      exit 1
+    fi
+    echo "cfdns: audit clean across ${#ZONES_TO_AUDIT[@]} zone(s)"
+    ;;
+
+  *)
+    usage; exit 1 ;;
+esac

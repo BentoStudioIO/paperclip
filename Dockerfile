@@ -57,12 +57,31 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 WORKDIR /app
 COPY --chown=node:node --from=build /app /app
-RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai \
+
+# Install apt deps + npm globals + logcli (Loki query CLI used by the `loki` wrapper)
+RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai langfuse-cli \
   && apt-get update \
   && apt-get install -y --no-install-recommends openssh-client jq \
+  && LOGCLI_VERSION="3.7.2" \
+  && curl -fsSL "https://github.com/grafana/loki/releases/download/v${LOGCLI_VERSION}/logcli_${LOGCLI_VERSION}_amd64.deb" \
+       -o /tmp/logcli.deb \
+  && dpkg -i /tmp/logcli.deb \
+  && rm /tmp/logcli.deb \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /paperclip \
   && chown node:node /paperclip
+
+# Copy Pharmia HTTP-API CLIs into the image
+COPY tools/clis/ /usr/local/bin/
+RUN chmod +x /usr/local/bin/loki \
+              /usr/local/bin/tempo \
+              /usr/local/bin/prom \
+              /usr/local/bin/langfuse \
+              /usr/local/bin/autumn \
+              /usr/local/bin/cfdns \
+              /usr/local/bin/ol \
+              /usr/local/bin/shlink \
+              /usr/local/bin/gcal
 
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

@@ -1,0 +1,536 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Config: ~/.config/outline-cli/config.json  (existing)
+# Also supports shell config at ~/.config/outline-cli/config
+CONF_DIR="${HOME}/.config/outline-cli"
+CONF_JSON="${CONF_DIR}/config.json"
+CONF_SHELL="${CONF_DIR}/config"
+
+# Load config — JSON takes priority, then shell, then env
+if [[ -f "$CONF_JSON" ]]; then
+  OUTLINE_URL="${OUTLINE_URL:-$(jq -r '.base_url // empty' "$CONF_JSON")}"
+  OUTLINE_API_TOKEN="${OUTLINE_API_TOKEN:-$(jq -r '.api_token // empty' "$CONF_JSON")}"
+fi
+[[ -f "$CONF_SHELL" ]] && source "$CONF_SHELL"
+
+BASE="${OUTLINE_URL:?Set OUTLINE_URL in config or env}"
+TOKEN="${OUTLINE_API_TOKEN:?Set OUTLINE_API_TOKEN in config or env}"
+API="${BASE}/api"
+
+usage() {
+  cat <<'EOF'
+Usage: ol <command> [args]
+
+Documents:
+  search <query> [--limit N] [--collection ID] [--user ID]
+                 [--date-filter day|week|month|year]
+                 [--short] [--ids-only] [--json]
+                                    Full-text search (default limit 10).
+                                    Default columns: id | title | date | url | snippet
+  doc get <id|slug|url> [--raw] [--include-deleted] [--json]
+                                    Fetch document (--raw = markdown body only).
+  doc get --stdin [--raw]           Batch: read IDs/slugs/URLs from stdin,
+                                    emit each doc separated by `---`.
+  doc update <id|slug> --file PATH [--no-link-check]
+                                    Update document from local file.
+  doc rename <id|slug> --title T    Rename document title only.
+  doc trash <id|slug>               Move document to trash (non-permanent).
+  doc create --collection ID --title TITLE --file PATH [--parent ID] [--no-link-check]
+                                    Create a new document (optionally under parent).
+  doc move <id|slug> --parent <parent-id>
+                                    Move document under a parent.
+  doc list [--collection ID] [--short] [--long] [--ids-only] [--json]
+                                    List documents.
+                                    Default columns: id | title | date | author | collection | url
+
+Collections:
+  collections [--json]              List all collections with doc counts.
+  tree <collection-id> [--json]     Render indented parent/child document tree.
+
+Validation:
+  verify <id|slug|url> [--corpus NAME] [--json] [--strict] [-q]
+                                    Validate a doc. Generic checks always run
+                                    (URL liveness, Outline cross-refs, empty
+                                    links). --corpus grounds factual claims
+                                    against a local source profile at
+                                    ~/.config/outline-cli/corpus/<name>/.
+  verify --all-collection ID [--corpus NAME] [-q]
+                                    Validate every doc in a collection.
+  verify --file PATH [--corpus NAME]
+                                    Validate a local markdown file.
+
+Other:
+  whoami                            Show current user and team info.
+
+Config: ~/.config/outline-cli/config.json
+  {"api_token": "ol_api_...", "base_url": "https://..."}
+EOF
+  exit 1
+}
+
+# Extract slug from full Outline URL or pass through as-is
+normalize_id() {
+  local input="$1"
+  if [[ "$input" =~ ^https?:// ]]; then
+    local path="${input#*/doc/}"
+    path="${path%%\?*}"
+    path="${path%%#*}"
+    echo "$path"
+  else
+    echo "$input"
+  fi
+}
+
+api() {
+  local endpoint="$1"; shift
+  curl -sf -X POST \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    "$@" "${API}/${endpoint}"
+}
+
+api_nofail() {
+  local endpoint="$1"; shift
+  curl -s -X POST \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    "$@" "${API}/${endpoint}"
+}
+
+# Strip <b>...</b> highlight tags, collapse whitespace, truncate to N chars.
+# Usage: echo "$context" | snippet_fmt 120
+snippet_fmt() {
+  local maxlen="${1:-120}"
+  awk -v n="$maxlen" '
+    {
+      gsub(/<\/?b>/, "", $0)
+      gsub(/[\r\n\t]+/, " ", $0)
+      gsub(/  +/, " ", $0)
+      line = (line == "" ? $0 : line " " $0)
+    }
+    END {
+      if (length(line) > n) line = substr(line, 1, n-1) "…"
+      print line
+    }
+  '
+}
+
+# Validate all URLs in a markdown file. Exits with error if any return 404/410.
+# POSIX grep -oE (not -oP) for portability.
+validate_links() {
+  local filepath="$1"
+  local skip="${2:-false}"
+  [[ "$skip" == "true" ]] && return 0
+
+  local urls
+  # Match http(s) URLs, stopping at whitespace or any character that would close a
+  # markdown link / inline reference: () <> " '. Trailing punctuation (.,;:!?) is
+  # stripped after extraction so sentence-final URLs don't get checked with a dangling dot.
+  urls=$(grep -oE "https?://[^[:space:]<>\")'(]+" "$filepath" 2>/dev/null \
+    | sed -E 's/[.,;:!?*]+$//' \
+    | sort -u) || true
+  [[ -z "$urls" ]] && return 0
+
+  local broken=""
+  local checked=0
+  while IFS= read -r url; do
+    checked=$((checked + 1))
+    local http_code
+    http_code=$(curl -sL -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>/dev/null || echo "000")
+    if [[ "$http_code" == "404" || "$http_code" == "410" ]]; then
+      broken="${broken}  ${http_code} ${url}\n"
+    fi
+  done <<< "$urls"
+
+  if [[ -n "$broken" ]]; then
+    echo "ERROR: Document contains broken links (404/410):" >&2
+    echo -e "$broken" >&2
+    echo "Fix the URLs and retry. Use --no-link-check to bypass." >&2
+    exit 1
+  fi
+  [[ $checked -gt 0 ]] && echo "[ol] Validated $checked link(s) — all OK" >&2
+  return 0
+}
+
+[[ $# -lt 1 ]] && usage
+
+case "$1" in
+  search)
+    shift
+    [[ $# -lt 1 ]] && { echo "Usage: ol search <query> [--limit N] [--collection ID] [--user ID] [--date-filter day|week|month|year] [--short] [--ids-only] [--json]" >&2; exit 1; }
+    query="$1"; shift
+    limit=10
+    collection=""
+    user_id=""
+    date_filter=""
+    mode="default"   # default | short | ids-only | json
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --limit)      limit="$2"; shift 2 ;;
+        --collection) collection="$2"; shift 2 ;;
+        --user)       user_id="$2"; shift 2 ;;
+        --date-filter)
+          case "$2" in
+            day|week|month|year) date_filter="$2" ;;
+            *) echo "Error: --date-filter must be day|week|month|year" >&2; exit 1 ;;
+          esac
+          shift 2 ;;
+        --short)    mode="short"; shift ;;
+        --ids-only) mode="ids-only"; shift ;;
+        --json)     mode="json"; shift ;;
+        *) echo "Error: unknown flag '$1' for 'ol search'" >&2; exit 1 ;;
+      esac
+    done
+
+    # Build request body with optional filters
+    body=$(jq -nc \
+      --arg q "$query" \
+      --argjson l "$limit" \
+      --arg c "$collection" \
+      --arg u "$user_id" \
+      --arg df "$date_filter" \
+      '{query:$q, limit:$l}
+       + (if $c  != "" then {collectionId:$c} else {} end)
+       + (if $u  != "" then {userId:$u}       else {} end)
+       + (if $df != "" then {dateFilter:$df}  else {} end)')
+
+    result=$(api documents.search -d "$body")
+
+    case "$mode" in
+      json)
+        echo "$result" | jq '.data'
+        ;;
+      ids-only)
+        echo "$result" | jq -r '.data[].document.id'
+        ;;
+      short)
+        echo "$result" \
+          | jq -r '.data[] | "\(.document.id)\t\(.document.title)\t\(.document.updatedAt[:10])"' \
+          | column -t -s $'\t'
+        ;;
+      default)
+        # id | title | date | url | snippet (snippet built per-row so we can strip <b>)
+        while IFS=$'\t' read -r id title date url context; do
+          snippet=$(printf '%s' "$context" | snippet_fmt 120)
+          printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$title" "$date" "$url" "$snippet"
+        done < <(echo "$result" | jq -r --arg base "$BASE" \
+            '.data[] | [.document.id, .document.title, .document.updatedAt[:10], ($base + .document.url), (.context // "")] | @tsv') \
+          | column -t -s $'\t'
+        ;;
+    esac
+    ;;
+
+  doc)
+    shift
+    [[ $# -lt 1 ]] && { echo "Usage: ol doc <get|update|rename|trash|move|create|list> ..." >&2; exit 1; }
+    subcmd="$1"; shift
+
+    case "$subcmd" in
+      get)
+        # Two modes: single positional ID, or --stdin batch
+        stdin_mode=false
+        raw=false
+        include_deleted=false
+        as_json=false
+        doc_arg=""
+        # Peek for --stdin to decide parsing
+        for a in "$@"; do
+          [[ "$a" == "--stdin" ]] && stdin_mode=true
+        done
+
+        if $stdin_mode; then
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              --stdin) shift ;;
+              --raw) raw=true; shift ;;
+              --include-deleted) include_deleted=true; shift ;;
+              --json) as_json=true; shift ;;
+              *) echo "Error: unknown flag '$1' for 'ol doc get --stdin'" >&2; exit 1 ;;
+            esac
+          done
+        else
+          [[ $# -lt 1 ]] && { echo "Usage: ol doc get <id|slug|url> [--raw] [--include-deleted] [--json]" >&2; echo "   or: ol doc get --stdin [--raw]" >&2; exit 1; }
+          doc_arg="$1"; shift
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              --raw) raw=true; shift ;;
+              --include-deleted) include_deleted=true; shift ;;
+              --json) as_json=true; shift ;;
+              *) echo "Error: unknown flag '$1' for 'ol doc get'" >&2; exit 1 ;;
+            esac
+          done
+        fi
+
+        render_doc() {
+          local doc_id="$1"
+          local result
+          result=$(api documents.info -d "$(jq -nc --arg id "$doc_id" '{id:$id}')")
+          local deleted_at
+          deleted_at="$(echo "$result" | jq -r '.data.deletedAt // empty')"
+          if [[ -n "$deleted_at" && "$include_deleted" != true ]]; then
+            echo "Document is trashed ($doc_id) deletedAt=$deleted_at. Re-run with --include-deleted to inspect it." >&2
+            return 1
+          fi
+          if $as_json; then
+            echo "$result" | jq '.data'
+          elif $raw; then
+            echo "$result" | jq -r '.data.text'
+          else
+            echo "$result" | jq -r --arg base "$BASE" \
+              '("# " + .data.title
+                + (if .data.deletedAt then " [TRASHED]" else "" end)
+                + "\nID: " + .data.id
+                + "\nURL: " + $base + .data.url
+                + "\nUpdated: " + .data.updatedAt
+                + "\nCollection: " + .data.collectionId
+                + (if .data.deletedAt then "\nDeleted: " + .data.deletedAt else "" end)
+                + "\n\n" + .data.text)'
+          fi
+        }
+
+        if $stdin_mode; then
+          first=true
+          while IFS= read -r line; do
+            line="${line%%#*}"              # strip trailing comments
+            line="${line## }"; line="${line%% }"
+            [[ -z "$line" ]] && continue
+            id_norm="$(normalize_id "$line")"
+            if ! $first; then
+              printf '\n---\n\n'
+            fi
+            first=false
+            render_doc "$id_norm" || true
+          done
+        else
+          doc_id="$(normalize_id "$doc_arg")"
+          render_doc "$doc_id"
+        fi
+        ;;
+
+      update)
+        [[ $# -lt 1 ]] && { echo "Usage: ol doc update <id|slug> --file PATH [--no-link-check]" >&2; exit 1; }
+        doc_id="$(normalize_id "$1")"; shift
+        filepath="" skip_links=false
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --file) filepath="$2"; shift 2 ;;
+            --no-link-check) skip_links=true; shift ;;
+            *) shift ;;
+          esac
+        done
+        [[ -z "$filepath" ]] && { echo "Error: --file is required" >&2; exit 1; }
+        [[ -f "$filepath" ]] || { echo "Error: file not found: $filepath" >&2; exit 1; }
+        validate_links "$filepath" "$skip_links"
+        jq -nc --arg id "$doc_id" --rawfile text "$filepath" '{id:$id, text:$text, done:true}' \
+          | api documents.update -d @- \
+          | jq -r '"Updated (" + .data.id + "): " + .data.title'
+        ;;
+
+      rename)
+        [[ $# -lt 1 ]] && { echo "Usage: ol doc rename <id|slug> --title TITLE" >&2; exit 1; }
+        doc_id="$(normalize_id "$1")"; shift
+        title=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --title) title="$2"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        [[ -z "$title" ]] && { echo "Error: --title is required" >&2; exit 1; }
+        api documents.update -d "$(jq -nc --arg id "$doc_id" --arg title "$title" '{id:$id, title:$title}')" \
+          | jq -r '"Renamed (" + .data.id + "): " + .data.title'
+        ;;
+
+      trash)
+        [[ $# -lt 1 ]] && { echo "Usage: ol doc trash <id|slug>" >&2; exit 1; }
+        doc_id="$(normalize_id "$1")"; shift
+        response="$(api_nofail documents.delete -d "$(jq -nc --arg id "$doc_id" '{id:$id, permanent:false}')")"
+        deleted_at="$(api documents.info -d "$(jq -nc --arg id "$doc_id" '{id:$id}')" | jq -r '.data.deletedAt // empty')"
+        if [[ -n "$deleted_at" ]]; then
+          echo "Trashed ($doc_id) deletedAt=$deleted_at"
+        else
+          message="$(echo "$response" | jq -r '.message // .error // "unknown_error"' 2>/dev/null || true)"
+          echo "Trash failed ($doc_id): ${message:-unknown_error}" >&2
+          exit 1
+        fi
+        ;;
+
+      move)
+        [[ $# -lt 1 ]] && { echo "Usage: ol doc move <id|slug> --parent <parent-id>" >&2; exit 1; }
+        doc_id="$(normalize_id "$1")"; shift
+        parent_id=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --parent) parent_id="$2"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        [[ -z "$parent_id" ]] && { echo "Error: --parent is required" >&2; exit 1; }
+        result=$(api documents.move -d "$(jq -nc --arg id "$doc_id" --arg parent "$parent_id" '{id:$id, parentDocumentId:$parent}')")
+        echo "$result" | jq -r '"Moved (" + .data.id + "): " + .data.title + " -> parent: " + .data.parentDocumentId'
+        ;;
+
+      create)
+        collection="" title="" filepath="" parent="" skip_links=false
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --collection) collection="$2"; shift 2 ;;
+            --title) title="$2"; shift 2 ;;
+            --file) filepath="$2"; shift 2 ;;
+            --parent) parent="$2"; shift 2 ;;
+            --no-link-check) skip_links=true; shift ;;
+            *) shift ;;
+          esac
+        done
+        [[ -z "$collection" || -z "$title" || -z "$filepath" ]] && {
+          echo "Usage: ol doc create --collection ID --title TITLE --file PATH [--parent ID] [--no-link-check]" >&2; exit 1; }
+        [[ -f "$filepath" ]] || { echo "Error: file not found: $filepath" >&2; exit 1; }
+        validate_links "$filepath" "$skip_links"
+        if [[ -n "$parent" ]]; then
+          jq -nc --arg c "$collection" --arg t "$title" --arg p "$parent" --rawfile text "$filepath" \
+            '{collectionId:$c, title:$t, text:$text, publish:true, parentDocumentId:$p}' \
+            | api documents.create -d @- \
+            | jq -r --arg base "$BASE" '"Created: " + .data.title + " (" + .data.id + ")\nURL: " + $base + .data.url'
+        else
+          jq -nc --arg c "$collection" --arg t "$title" --rawfile text "$filepath" \
+            '{collectionId:$c, title:$t, text:$text, publish:true}' \
+            | api documents.create -d @- \
+            | jq -r --arg base "$BASE" '"Created: " + .data.title + " (" + .data.id + ")\nURL: " + $base + .data.url'
+        fi
+        ;;
+
+      list)
+        collection=""
+        mode="default"  # default | short | long | ids-only | json
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --collection) collection="$2"; shift 2 ;;
+            --short) mode="short"; shift ;;
+            --long) mode="long"; shift ;;
+            --ids-only) mode="ids-only"; shift ;;
+            --json) mode="json"; shift ;;
+            *) echo "Error: unknown flag '$1' for 'ol doc list'" >&2; exit 1 ;;
+          esac
+        done
+
+        # Build a slug lookup for collections (used for richer columns).
+        # Cheap: one call total, ~dozens of collections.
+        collections_lookup="{}"
+        if [[ "$mode" != "ids-only" && "$mode" != "json" ]]; then
+          collections_lookup=$(api collections.list -d '{"limit":100}' \
+            | jq -c '[.data[] | {key:.id, value:{name:.name, slug:(.urlId // .permalink // .id)}}] | from_entries' 2>/dev/null || echo '{}')
+        fi
+
+        offset=0
+        batch=100
+        # Collect pages into a temp file (avoids ARG_MAX on large collections).
+        tmp_pages=$(mktemp)
+        trap 'rm -f "$tmp_pages"' EXIT
+        echo '[]' > "$tmp_pages"
+        while true; do
+          if [[ -n "$collection" ]]; then
+            page=$(api documents.list -d "$(jq -nc --arg c "$collection" --argjson o "$offset" --argjson l "$batch" '{collectionId:$c, offset:$o, limit:$l}')")
+          else
+            page=$(api documents.list -d "$(jq -nc --argjson o "$offset" --argjson l "$batch" '{offset:$o, limit:$l}')")
+          fi
+          count=$(echo "$page" | jq '.data | length')
+          echo "$page" | jq '.data' > "${tmp_pages}.new"
+          jq -c --slurpfile p "${tmp_pages}.new" '. + $p[0]' "$tmp_pages" > "${tmp_pages}.merged"
+          mv "${tmp_pages}.merged" "$tmp_pages"
+          rm -f "${tmp_pages}.new"
+          [[ "$count" -lt "$batch" ]] && break
+          offset=$((offset + batch))
+        done
+        all_pages=$(cat "$tmp_pages")
+
+        case "$mode" in
+          json)
+            echo "$all_pages" | jq '.'
+            ;;
+          ids-only)
+            echo "$all_pages" | jq -r '.[].id'
+            ;;
+          short)
+            echo "$all_pages" | jq -r '.[] | "\(.id)\t\(.title)\t\(.updatedAt[:10])"' | column -t -s $'\t'
+            ;;
+          long|default)
+            # default == long: id | title | date | author | collection | url
+            echo "$all_pages" | jq -r --arg base "$BASE" --argjson cols "$collections_lookup" '
+              .[] |
+              [ .id,
+                .title,
+                .updatedAt[:10],
+                (.createdBy.name // "—"),
+                ($cols[.collectionId].slug // .collectionId),
+                ($base + .url)
+              ] | @tsv' \
+              | column -t -s $'\t'
+            ;;
+        esac
+        ;;
+
+      *) echo "Unknown doc subcommand: $subcmd" >&2; exit 1 ;;
+    esac
+    ;;
+
+  collections)
+    shift || true
+    as_json=false
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json) as_json=true; shift ;;
+        *) echo "Error: unknown flag '$1' for 'ol collections'" >&2; exit 1 ;;
+      esac
+    done
+    collections_json=$(api collections.list -d '{}')
+    if $as_json; then
+      echo "$collections_json" | jq '.data'
+    else
+      while IFS=$'\t' read -r cid cname; do
+        total=$(api documents.list -d "$(jq -nc --arg c "$cid" '{collectionId:$c, limit:1, offset:0}')" \
+          | jq -r '.pagination.total // (.data | length) // 0')
+        printf '%s\t%s\t%s docs\n' "$cid" "$cname" "$total"
+      done < <(echo "$collections_json" | jq -r '.data[] | "\(.id)\t\(.name)"') \
+        | column -t -s $'\t'
+    fi
+    ;;
+
+  tree)
+    shift
+    [[ $# -lt 1 ]] && { echo "Usage: ol tree <collection-id> [--json]" >&2; exit 1; }
+    collection_id="$1"; shift
+    as_json=false
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json) as_json=true; shift ;;
+        *) echo "Error: unknown flag '$1' for 'ol tree'" >&2; exit 1 ;;
+      esac
+    done
+    tree_json=$(api collections.documents -d "$(jq -nc --arg id "$collection_id" '{id:$id}')")
+    if $as_json; then
+      echo "$tree_json" | jq '.data'
+    else
+      # Recursive walk: emit "<indent>- <title> (<id>)"
+      echo "$tree_json" | jq -r '
+        def walk($depth):
+          . as $n
+          | "\("  " * $depth)- \($n.title) (\($n.id))",
+            ( ($n.children // [])[] | walk($depth + 1) );
+        .data[] | walk(0)
+      '
+    fi
+    ;;
+
+  whoami)
+    api auth.info -d '{}' \
+      | jq -r '"User: " + .data.user.name + " (" + .data.user.email + ")\nTeam: " + .data.team.name + "\nURL: " + .data.team.url'
+    ;;
+
+  verify)
+    shift
+    exec ol-verify "$@"
+    ;;
+
+  *) usage ;;
+esac
