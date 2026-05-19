@@ -80,7 +80,11 @@ RUN chmod +x /usr/local/bin/loki \
               /usr/local/bin/autumn \
               /usr/local/bin/cfdns \
               /usr/local/bin/ol \
-              /usr/local/bin/shlink
+              /usr/local/bin/shlink \
+              /usr/local/bin/git-credential-github-app
+
+# Configure git to use the GitHub App credential helper for github.com clones
+RUN git config --global credential.https://github.com.helper /usr/local/bin/git-credential-github-app
 
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
