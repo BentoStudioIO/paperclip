@@ -210,3 +210,8 @@ customization stays on the edges:
 - The deprecated `paperclip.manifest.json` JSON export format must not be used.
 - Edit the package in git, then apply with
   `paperclipai company import templates/<company> --target existing --company-id <id> --dry-run`.
+- `.paperclip.yaml` is the manifest and source of truth. Adding an
+  `agents/<slug>/AGENTS.md` is **not enough** — an agent dir not listed in
+  `.paperclip.yaml` is invisible. To add an agent, also register it under the
+  `agents:` block (role + adapter config) **and** in `sidebar.agents`, or it
+  will not appear in the UI.
