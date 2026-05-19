@@ -57,6 +57,10 @@ services:
       OUTLINE_API_TOKEN: ${OUTLINE_API_TOKEN:-}
       SHLINK_URL: ${SHLINK_URL:-}
       SHLINK_API_KEY: ${SHLINK_API_KEY:-}
+      # GitHub App credentials for private repo clones
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
+      GITHUB_APP_PRIVATE_KEY_B64: ${GITHUB_APP_PRIVATE_KEY_B64:-}
     volumes:
       - paperclip-data:/paperclip
     depends_on:
