@@ -35,6 +35,13 @@ agents:
         dangerouslySkipPermissions: true
         model: "claude-sonnet-4-6"
       type: "claude_local"
+  quebec-legal:
+    role: "legal"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
   planner:
     role: "pm"
     adapter:
@@ -81,6 +88,7 @@ sidebar:
     - "e2e"
     - "implementer"
     - "planner"
+    - "quebec-legal"
     - "researcher"
     - "reviewer"
     - "security-agent"
