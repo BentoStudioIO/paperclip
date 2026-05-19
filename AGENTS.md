@@ -4,214 +4,115 @@ Guidance for human and AI contributors working in this repository.
 
 ## 1. Purpose
 
-Paperclip is a control plane for AI-agent companies.
-The current implementation target is V1 and is defined in `doc/SPEC-implementation.md`.
+Paperclip is a control plane for AI-agent companies. V1 build contract is `doc/SPEC-implementation.md`.
 
 ## 2. Read This First
 
-Before making changes, read in this order:
-
-1. `doc/GOAL.md`
-2. `doc/PRODUCT.md`
-3. `doc/SPEC-implementation.md`
-4. `doc/DEVELOPING.md`
-5. `doc/DATABASE.md`
-
-`doc/SPEC.md` is long-horizon product context.
-`doc/SPEC-implementation.md` is the concrete V1 build contract.
+Before making changes, read in order: `doc/GOAL.md`, `doc/PRODUCT.md`, `doc/SPEC-implementation.md`, `doc/DEVELOPING.md`, `doc/DATABASE.md`. `doc/SPEC.md` is long-horizon context; `doc/SPEC-implementation.md` is the concrete V1 contract.
 
 ## 3. Repo Map
 
-- `server/`: Express REST API and orchestration services
-- `ui/`: React + Vite board UI
-- `packages/db/`: Drizzle schema, migrations, DB clients
-- `packages/shared/`: shared types, constants, validators, API path constants
-- `packages/adapters/`: agent adapter implementations (Claude, Codex, Cursor, etc.)
-- `packages/adapter-utils/`: shared adapter utilities
-- `packages/plugins/`: plugin system packages
-- `doc/`: operational and product docs
+- `server/` — Express REST API and orchestration services
+- `ui/` — React + Vite board UI
+- `packages/db/` — Drizzle schema, migrations, DB clients
+- `packages/shared/` — shared types, constants, validators, API path constants
+- `packages/adapters/` — agent adapter implementations (Claude, Codex, Cursor, etc.)
+- `packages/adapter-utils/` — shared adapter utilities
+- `packages/plugins/` — plugin system packages
+- `doc/` — operational and product docs
 
 ## 4. Dev Setup (Auto DB)
 
-Use embedded PGlite in dev by leaving `DATABASE_URL` unset.
+Embedded PGlite is used in dev if `DATABASE_URL` is unset.
 
 ```sh
-pnpm install
-pnpm dev
+pnpm install && pnpm dev
 ```
 
-This starts:
-
-- API: `http://localhost:3100`
-- UI: `http://localhost:3100` (served by API server in dev middleware mode)
-
-Quick checks:
-
-```sh
-curl http://localhost:3100/api/health
-curl http://localhost:3100/api/companies
-```
-
-Reset local dev DB:
-
-```sh
-rm -rf data/pglite
-pnpm dev
-```
+API + UI both served on `http://localhost:3100` (UI via dev middleware). Health: `curl http://localhost:3100/api/health`. Reset local DB: `rm -rf data/pglite && pnpm dev`.
 
 ## 5. Core Engineering Rules
 
-1. Keep changes company-scoped.
-Every domain entity should be scoped to a company and company boundaries must be enforced in routes/services.
-
-2. Keep contracts synchronized.
-If you change schema/API behavior, update all impacted layers:
-- `packages/db` schema and exports
-- `packages/shared` types/constants/validators
-- `server` routes/services
-- `ui` API clients and pages
-
-3. Preserve control-plane invariants.
-- Single-assignee task model
-- Atomic issue checkout semantics
-- Approval gates for governed actions
-- Budget hard-stop auto-pause behavior
-- Activity logging for mutating actions
-
-4. Do not replace strategic docs wholesale unless asked.
-Prefer additive updates. Keep `doc/SPEC.md` and `doc/SPEC-implementation.md` aligned.
-
-5. Keep repo plan docs dated and centralized.
-When you are creating a plan file in the repository itself, new plan documents belong in `doc/plans/` and should use `YYYY-MM-DD-slug.md` filenames. This does not replace Paperclip issue planning: if a Paperclip issue asks for a plan, update the issue `plan` document per the `paperclip` skill instead of creating a repo markdown file.
+1. **Keep changes company-scoped.** Every domain entity is scoped to a company; enforce company boundaries in routes/services.
+2. **Keep contracts synchronized.** Schema/API behavior changes must propagate through `packages/db`, `packages/shared`, `server`, and `ui`.
+3. **Preserve control-plane invariants.** Single-assignee task model, atomic issue checkout, approval gates for governed actions, budget hard-stop auto-pause, activity logging for mutations.
+4. **No wholesale strategic-doc rewrites unless asked.** Prefer additive updates; keep `doc/SPEC.md` and `doc/SPEC-implementation.md` aligned.
+5. **Dated plans in `doc/plans/`** as `YYYY-MM-DD-slug.md`. If a Paperclip issue asks for a plan, update the issue `plan` document per the `paperclip` skill instead of creating a repo file.
 
 ## 6. Database Change Workflow
 
-When changing data model:
-
-1. Edit `packages/db/src/schema/*.ts`
-2. Ensure new tables are exported from `packages/db/src/schema/index.ts`
-3. Generate migration:
-
-```sh
-pnpm db:generate
-```
-
-4. Validate compile:
-
-```sh
-pnpm -r typecheck
-```
-
-Notes:
-- `packages/db/drizzle.config.ts` reads compiled schema from `dist/schema/*.js`
-- `pnpm db:generate` compiles `packages/db` first
+1. Edit `packages/db/src/schema/*.ts` and export new tables from `packages/db/src/schema/index.ts`.
+2. `pnpm db:generate` (compiles `packages/db` first; drizzle reads `dist/schema/*.js`).
+3. `pnpm -r typecheck` to validate.
 
 ## 7. Verification Before Hand-off
 
-Default local/agent test path:
+Default: `pnpm test` (Vitest only). Browser suites are opt-in: `pnpm test:e2e`, `pnpm test:release-smoke` — run only when your change touches them or you're verifying CI/release.
+
+For normal issue work, run the smallest relevant check first. Do not default to repo-wide typecheck/build/test on every heartbeat. Before a PR-ready hand-off or for broad changes:
 
 ```sh
-pnpm test
+pnpm -r typecheck && pnpm test:run && pnpm build
 ```
 
-This is the cheap default and only runs the Vitest suite. Browser suites stay opt-in:
-
-```sh
-pnpm test:e2e
-pnpm test:release-smoke
-```
-
-Run the browser suites only when your change touches them or when you are explicitly verifying CI/release flows.
-
-For normal issue work, run the smallest relevant verification first. Do not default to repo-wide typecheck/build/test on every heartbeat when a narrower check is enough to prove the change.
-
-Run this full check before claiming repo work done in a PR-ready hand-off, or when the change scope is broad enough that targeted checks are not sufficient:
-
-```sh
-pnpm -r typecheck
-pnpm test:run
-pnpm build
-```
-
-If anything cannot be run, explicitly report what was not run and why.
+If anything cannot be run, explicitly report what and why.
 
 ## 8. API and Auth Expectations
 
 - Base path: `/api`
-- Board access is treated as full-control operator context
-- Agent access uses bearer API keys (`agent_api_keys`), hashed at rest
-- Agent keys must not access other companies
+- Board access = full-control operator context
+- Agent access via bearer API keys (`agent_api_keys`), hashed at rest; keys must not cross companies
 
-When adding endpoints:
-
-- apply company access checks
-- enforce actor permissions (board vs agent)
-- write activity log entries for mutations
-- return consistent HTTP errors (`400/401/403/404/409/422/500`)
+When adding endpoints: apply company access checks, enforce actor permissions (board vs agent), write activity log entries for mutations, return consistent HTTP errors (`400/401/403/404/409/422/500`).
 
 ## 9. UI Expectations
 
 - Keep routes and nav aligned with available API surface
 - Use company selection context for company-scoped pages
-- Surface failures clearly; do not silently ignore API errors
+- Surface failures clearly; never silently ignore API errors
 
 ## 10. Pull Request Requirements
 
-When creating a pull request (via `gh pr create` or any other method), you **must** read and fill in every section of [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md). Do not craft ad-hoc PR bodies — use the template as the structure for your PR description. Required sections:
+When opening a PR (via `gh pr create` or any other method), read and fill in every section of `.github/PULL_REQUEST_TEMPLATE.md` — do not craft ad-hoc PR bodies. Required sections:
 
-- **Thinking Path** — trace reasoning from project context to this change (see `CONTRIBUTING.md` for examples)
-- **What Changed** — bullet list of concrete changes
-- **Verification** — how a reviewer can confirm it works
+- **Thinking Path** — reasoning from project context to this change (see `CONTRIBUTING.md`)
+- **What Changed** — concrete changes
+- **Verification** — how a reviewer confirms it works
 - **Risks** — what could go wrong
-- **Model Used** — the AI model that produced or assisted with the change (provider, exact model ID, context window, capabilities). Write "None — human-authored" if no AI was used.
+- **Model Used** — AI model (provider, exact ID, context window, capabilities) or "None — human-authored"
 - **Checklist** — all items checked
 
 ## 11. Definition of Done
 
-A change is done when all are true:
-
 1. Behavior matches `doc/SPEC-implementation.md`
 2. Typecheck, tests, and build pass
-3. Contracts are synced across db/shared/server/ui
+3. Contracts synced across db/shared/server/ui
 4. Docs updated when behavior or commands change
-5. PR description follows the [PR template](.github/PULL_REQUEST_TEMPLATE.md) with all sections filled in (including Model Used)
+5. PR description follows the template with all sections filled in (including Model Used)
 
 ## 12. Bento Fork (BentoStudioIO/paperclip)
 
-This is Bento Studio's fork of `paperclipai/paperclip`, branch `master`. It is the
-foundation for Bento's internal AI company and a future sellable template.
-`CLAUDE.md` is a symlink to this file.
+Bento Studio's fork of `paperclipai/paperclip`, branch `master`. Foundation for Bento's internal AI company and future sellable template. `CLAUDE.md` is a symlink to this file.
 
 ### Fork strategy — keep the delta minimal
 
-Upstream ships breaking changes daily. The fork stays cheap to maintain only if
-customization stays on the edges:
+Upstream ships breaking changes daily. The fork stays cheap only if customization stays on the edges.
 
-- **Never edit `server/`, `ui/`, or `packages/db/` core.** Customize through the
-  plugin system and external adapter plugins (`~/.paperclip/adapter-plugins.json`).
-- Sync `upstream/master` weekly; rebase, do not merge; keep history linear.
+- **Never edit `server/`, `ui/`, or `packages/db/` core.** Customize via the plugin system and external adapter plugins (`~/.paperclip/adapter-plugins.json`).
+- Sync `upstream/master` weekly; rebase, never merge; keep history linear.
 - Pin a `stable` release tag for anything run in earnest — never track `canary`.
-- Current fork delta — keep it this small: PocketID OIDC sign-in, invite-only mode,
-  and the `claude-local` host-DB-env strip security fix.
+- Current fork delta — keep it this small: PocketID OIDC sign-in, invite-only mode, `claude-local` host-DB-env strip security fix.
 
 ### Deployment
 
 - Deployed via Dokploy on the Bento VPS at `paperclip.bentostudio.io`.
-- Dokploy builds the image from `docker-compose.yml` (the repo `Dockerfile`) and
-  **auto-deploys on every push to `master`** — no registry, no manual image push.
-- `.github/workflows/docker.yml` is **manual-only** (`workflow_dispatch`); the ghcr
-  image is no longer consumed. Use it only for ad-hoc or rollback builds.
+- Dokploy builds the image from `docker-compose.yml` (repo `Dockerfile`) and **auto-deploys on every push to `master`** — no registry, no manual image push.
+- `.github/workflows/docker.yml` is **manual-only** (`workflow_dispatch`); the ghcr image is no longer consumed — use only for ad-hoc/rollback builds.
 
 ### Org-as-code
 
-- A Paperclip company is version-controlled as a canonical markdown package under
-  `templates/<company>/` — `COMPANY.md` + `agents/<slug>/AGENTS.md` +
-  `skills/<slug>/SKILL.md` + `.paperclip.yaml`.
-- The deprecated `paperclip.manifest.json` JSON export format must not be used.
-- Edit the package in git, then apply with
-  `paperclipai company import templates/<company> --target existing --company-id <id> --dry-run`.
-- `.paperclip.yaml` is the manifest and source of truth. Adding an
-  `agents/<slug>/AGENTS.md` is **not enough** — an agent dir not listed in
-  `.paperclip.yaml` is invisible. To add an agent, also register it under the
-  `agents:` block (role + adapter config) **and** in `sidebar.agents`, or it
-  will not appear in the UI.
+- A Paperclip company is version-controlled as a canonical markdown package under `templates/<company>/` — `COMPANY.md` + `agents/<slug>/AGENTS.md` + `skills/<slug>/SKILL.md` + `.paperclip.yaml`. Deprecated `paperclip.manifest.json` must not be used.
+- Edit the package in git, then apply with `paperclipai company import templates/<company> --target existing --company-id <id> --dry-run`.
+- `.paperclip.yaml` is the manifest and source of truth. An `agents/<slug>/AGENTS.md` alone is **invisible** — also register the agent under the `agents:` block (role + adapter config) **and** in `sidebar.agents`.
+- **Push + redeploy does NOT sync templates into a running company.** Dokploy rebuilds the server image; the Postgres volume persists; there is no seed/import on boot. Template changes only reach the live company when someone runs `paperclipai company import ... --target existing --company-id <id>`.
+- **Prompt edits made in the UI live only in the DB** — they survive redeploys but get clobbered by a future `--collisionStrategy replace` import. No merge; last writer wins. Decide which side is source of truth per agent.
