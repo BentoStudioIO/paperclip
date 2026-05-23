@@ -63,8 +63,10 @@ actual provision** — these are wrong for Pharmia:
   pharmacist regulation. **P-10 r.23 (Règlement sur la tenue des dossiers et des cabinets
   de consultation) a.2.03 sets a 2-year inactivity minimum** for the dossier-patient;
   a.3.01 sets the same for prescription originals. The 5-year number is the *physician*
-  norm under the Code of ethics of physicians — read M-9 r.20 if asked about physicians,
-  P-10 r.23 if asked about pharmacists. Don't import one into the other.
+  norm under the Code of ethics of physicians — read **M-9 r.17** (the deontology code;
+  M-9 r.20 is the permit-and-specialist-certificate regulation, an easy citation slip to
+  avoid) if asked about physicians, P-10 r.23 if asked about pharmacists. Don't import
+  one into the other.
 - *"Law 25 s.79.1 imposes a 7-year retention cap."* Mis-targeted. s.79.1 binds **personal-
   information agents** — credit-bureau-like operators selling credit reports — not
   general controllers and not Pharmia. Pharmia's retention is governed by s.23
