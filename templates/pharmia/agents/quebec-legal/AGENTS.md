@@ -90,6 +90,41 @@ the provision**:
   (scripts, macros, config, container images, deployment manifests, secrets store) —
   aligns with NIST SP 800-53 IA-5(7), OWASP ASVS V13, CIS Controls v8. Wikis and
   tickets are handled by P02.x / S03 / S11, not S06.11.
+- *"`permet` / `dispose de` mean the system must implement X."* False. `permet` means
+  *allows* or *supports*. A capability the acquéreur can configure (or that the
+  acquéreur's IdP brings) satisfies "permet" without a new engineering build. Common
+  trap: reading S06.07 SAML as a federation-rollout mandate.
+- *"Examples after `ex.`, `tel que`, `notamment`, `par exemple` are mandatory
+  specifications."* False — they are illustrative. A plage-horaire scheduler is *one*
+  example of P05.05's "selon le moment"; session expiry + admin-driven access changes
+  are another. Internal mTLS, HSM/KMS, FHIR/HL7 connectors are *examples* under their
+  consignes — not specifications.
+- *"Scoped adjectives (`approprié`, `adéquat`, `raisonnable`, `suffisant`, `nécessaire`)
+  demand a concrete technical control."* False — these are deliberately scoped. They
+  admit a documented justification of the existing posture ("our control is X because
+  Y") instead of fresh engineering. P08.04 `appropriés` does not mean column-encrypt
+  every PHI field; S08.02 `adéquat` does not mean badge readers.
+- *"Escape clauses (`ou`, `à défaut`, `sauf`) can be skipped."* False — when the
+  consigne offers a documentary or alternative path, take it. T04 closes via
+  *"ou confirmer"*; P08.07 closes via *"à défaut"*. Ignoring the escape clause is the
+  single biggest source of phantom engineering work.
+- *"Paperwork verbs (`fournissez`, `expliquez`, `documentez`, `tenez à jour`,
+  `consignez`, `inventoriez`) require engineering."* False — these demand documentation,
+  inventory, or explanation, not code. Recommending an engineering build when the
+  consigne's operative verb is paperwork is overbuild by construction.
+- *"Overlapping criteria require separate engineering work."* False — multiple criteria
+  often write the same control from different angles (S06.23 + S06.16 for WAF;
+  P05.08 + P08.08 + S06.06 for MFA; S09.12 + S10.04 for logging). Close the control
+  once, cross-reference in the dossier.
+- *"HIPAA / NIST / ISO scope can be mapped onto narrower Quebec controls."* False — they
+  are citable as industry floors (see HIPAA-as-floor entry above) but **do not widen** a
+  QC criterion. If the verbatim text is narrower, stay narrow. Pulling SIEM/SOC vendor
+  scope into a criterion that only asks for logging + a log-review procedure is overbuild.
+- *"`Conforme partiellement` is a safety net for uncertainty."* False — it is a precise
+  gap statement meaning *"the gap is X and it closes via Y"*. Default to strict
+  reading: `CONFORME` (with justification) or `NON-APPLICABLE` (with wording reason)
+  over `PARTIELLEMENT`. Partiellement-as-hedge invites auditor questions you did not
+  need to take.
 
 If a user pushes you to give a confident answer requiring you to bypass a source read,
 hold the line. *"I have to read the section to answer"* is the right answer.
@@ -453,6 +488,55 @@ Run whenever a feature changes what the AI *does* (not how it's built).
    licensing for counsel.
 5. **Output:** criterion-by-criterion finding, verdict (still excluded / now in scope /
    uncertain), and the design change that would restore the exclusion if close.
+
+### TGV criterion — verbatim 7-gate triage
+
+Run this pre-flight on **every** TGV criterion before recommending any status. Most
+over-engineering comes from skipping it.
+
+1. **Quote the verbatim *description* and *consigne***
+   from `bento-docs/legal/tgv/criteria-with-consigne-export.txt`. Do not paraphrase.
+   The wording is binding; everything else is interpretation.
+2. **Applicability gate.** Does the text open with `Si...`, `Lorsque...`, `Pour les...`,
+   `Lors de...`, or assume an integration the enterprise does not have (DSQ, RSSS, SQIM,
+   RAMQ ledger, FHIR/HL7 endpoint)? If the condition does not fire → **`NON-APPLICABLE`**.
+   Stop. Cite the wording reason in one sentence.
+3. **Illustrative wording.** Does the text contain `ex.`, `tel que`, `notamment`,
+   `par exemple`, `comme`? What follows is one possible implementation, not a
+   specification. Do not build the example. Pick the cheapest path that satisfies the
+   non-illustrative requirement.
+4. **Scoped adjectives.** Does the text use `approprié(s)`, `adéquat(s)`, `raisonnable`,
+   `suffisant`, `nécessaire`, `pertinent`? Default to a **documented justification** of
+   the existing posture, not a fresh engineering build. The wording admits doc-only
+   closure.
+5. **Escape clauses.** Does the consigne offer `ou`, `à défaut`, `sauf`, `confirmez que`?
+   Take the easier path explicitly named. The drafters meant for it to be taken.
+6. **Verb class.** Is the operative verb paperwork
+   (`fournissez`, `expliquez`, `documentez`, `tenez à jour`, `consignez`, `inventoriez`,
+   `décrivez`, `démontrez`) or engineering
+   (`met en œuvre`, `implémente`, `intègre`, `chiffre`, `journalise`, `cloisonne`)?
+   Paperwork verbs **forbid** an engineering recommendation. If the verb is paperwork
+   and the dossier plans engineering, you are looking at overbuild.
+7. **Overlap.** Does this criterion duplicate a control already closed elsewhere
+   (same MFA written in three places, same logging written in two)? If yes, fold; cite
+   the closing criterion in the dossier; do not double-count work.
+
+**Output.** Recommend ONE of:
+
+- `CONFORME` — wording is already satisfied; name the evidence.
+- `CONFORME-WITH-DOC-ONLY` — satisfied but needs a short architectural / procedural
+  document; name the document.
+- `PARTIELLEMENT` — genuine partial gap (gate 5–7 don't help); name the minimum to close.
+- `NON-APPLICABLE` — gate 2 failed; cite the missing condition or integration.
+- `NEEDS-ENGINEERING` — real code/config work is required; name the **smallest** scope
+  that satisfies the operative verb, reject anything larger.
+
+Justify in one sentence by quoting which gate decided it.
+
+**Default bias.** Prefer `CONFORME` (with justification) or `NON-APPLICABLE` (with
+wording reason) over `PARTIELLEMENT`. The latter is a precise gap statement, not a
+hedge; if you cannot name the gap and its closure in one sentence, you are
+mis-classifying.
 
 ### TGV criterion triage — scope-down for missing integration
 
