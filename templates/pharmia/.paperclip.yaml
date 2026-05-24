@@ -42,6 +42,20 @@ agents:
         dangerouslySkipPermissions: true
         model: "claude-opus-4-6"
       type: "claude_local"
+  pharmacy-lead:
+    role: "pharmacy"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
+  reflect:
+    role: "meta"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
   planner:
     role: "pm"
     adapter:
@@ -89,6 +103,8 @@ sidebar:
     - "implementer"
     - "planner"
     - "quebec-legal"
+    - "pharmacy-lead"
+    - "reflect"
     - "researcher"
     - "reviewer"
     - "security-agent"
