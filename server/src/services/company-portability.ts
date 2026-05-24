@@ -2424,9 +2424,41 @@ function readProjectEnvInputs(
   });
 }
 
-function readAgentSkillRefs(frontmatter: Record<string, unknown>) {
-  const skills = frontmatter.skills;
-  if (!Array.isArray(skills)) return [];
+function readAgentSkillRefs(
+  frontmatter: Record<string, unknown>,
+  defaults: string[] = [],
+) {
+  const skills = Array.isArray(frontmatter.skills) ? frontmatter.skills : [];
+  const frontmatterSkills = skills
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => normalizeSkillKey(entry) ?? entry.trim())
+    .filter(Boolean);
+  const excludesRaw = readStringArray(frontmatter.excludeSkills) ?? [];
+  const excludes = new Set(
+    excludesRaw.map((entry) => normalizeSkillKey(entry) ?? entry.trim()).filter(Boolean),
+  );
+  return Array.from(new Set([...defaults, ...frontmatterSkills])).filter(
+    (entry) => !excludes.has(entry),
+  );
+}
+
+// Reads agents/defaults.yaml (a peer to the agent directories) and returns the
+// universal skill set merged into every agent's `skills:` frontmatter at import
+// time. Per-agent `excludeSkills:` opts an agent out of any default. Note: the
+// exporter materializes the resolved skill list back onto each agent in the
+// exported package, so a round-trip (import -> export) loses the DRY structure;
+// the live DB is the source of truth post-import.
+function readAgentDefaultSkills(
+  files: Record<string, CompanyPortabilityFileEntry>,
+): string[] {
+  const candidate = Object.keys(files).find(
+    (entry) => entry === "agents/defaults.yaml" || entry.endsWith("/agents/defaults.yaml"),
+  );
+  if (!candidate) return [];
+  const raw = readPortableTextFile(files, candidate);
+  if (typeof raw !== "string") return [];
+  const parsed = parseYamlFile(raw);
+  const skills = Array.isArray(parsed.skills) ? parsed.skills : [];
   return Array.from(new Set(
     skills
       .filter((entry): entry is string => typeof entry === "string")
@@ -2555,6 +2587,7 @@ function buildManifestFromPackageFiles(
   if (manifest.company?.logoPath && !normalizedFiles[manifest.company.logoPath]) {
     warnings.push(`Referenced company logo file is missing from package: ${manifest.company.logoPath}`);
   }
+  const agentDefaultSkills = readAgentDefaultSkills(normalizedFiles);
   for (const agentPath of agentPaths) {
     const markdownRaw = readPortableTextFile(normalizedFiles, agentPath);
     if (typeof markdownRaw !== "string") {
@@ -2580,7 +2613,7 @@ function buildManifestFromPackageFiles(
       slug,
       name: asString(frontmatter.name) ?? title ?? slug,
       path: agentPath,
-      skills: readAgentSkillRefs(frontmatter),
+      skills: readAgentSkillRefs(frontmatter, agentDefaultSkills),
       role: asString(extension.role) ?? asString(frontmatter.role) ?? "agent",
       title,
       icon: asString(extension.icon),

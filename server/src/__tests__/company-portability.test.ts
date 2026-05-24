@@ -3162,4 +3162,91 @@ describe("company portability", () => {
     expect(preview.plan.projectPlans).toHaveLength(0);
     expect(preview.plan.issuePlans).toHaveLength(0);
   });
+
+  it("merges agents/defaults.yaml skills into each agent's skill set", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    const files = {
+      "COMPANY.md": ['---', 'schema: "agentcompanies/v1"', 'name: "Imported Co"', "---", ""].join("\n"),
+      "agents/defaults.yaml": [
+        "skills:",
+        '  - "paperclipai/paperclip/paperclip"',
+        '  - "paperclipai/paperclip/paperclip-dev"',
+        "",
+      ].join("\n"),
+      "agents/alpha/AGENTS.md": [
+        "---",
+        'name: "Alpha"',
+        "skills:",
+        '  - "company/abc/extra-one"',
+        '  - "company/abc/extra-two"',
+        "---",
+        "",
+        "Alpha body.",
+        "",
+      ].join("\n"),
+      "agents/beta/AGENTS.md": [
+        "---",
+        'name: "Beta"',
+        "excludeSkills:",
+        '  - "paperclipai/paperclip/paperclip-dev"',
+        "skills:",
+        '  - "company/abc/beta-only"',
+        "---",
+        "",
+        "Beta body.",
+        "",
+      ].join("\n"),
+    };
+
+    const preview = await portability.previewImport({
+      source: { type: "inline", rootPath: "co-demo", files },
+      include: { company: true, agents: true, projects: false, issues: false, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Co" },
+      agents: "all",
+      collisionStrategy: "rename",
+    });
+
+    const alpha = preview.manifest.agents.find((a) => a.slug === "alpha");
+    const beta = preview.manifest.agents.find((a) => a.slug === "beta");
+    expect(alpha?.skills).toEqual([
+      "paperclipai/paperclip/paperclip",
+      "paperclipai/paperclip/paperclip-dev",
+      "company/abc/extra-one",
+      "company/abc/extra-two",
+    ]);
+    expect(beta?.skills).toEqual([
+      "paperclipai/paperclip/paperclip",
+      "company/abc/beta-only",
+    ]);
+  });
+
+  it("falls back to frontmatter-only skills when agents/defaults.yaml is absent", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    const files = {
+      "COMPANY.md": ['---', 'schema: "agentcompanies/v1"', 'name: "Imported Co"', "---", ""].join("\n"),
+      "agents/alpha/AGENTS.md": [
+        "---",
+        'name: "Alpha"',
+        "skills:",
+        '  - "company/abc/extra-one"',
+        "---",
+        "",
+        "Alpha body.",
+        "",
+      ].join("\n"),
+    };
+
+    const preview = await portability.previewImport({
+      source: { type: "inline", rootPath: "co-demo", files },
+      include: { company: true, agents: true, projects: false, issues: false, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Co" },
+      agents: "all",
+      collisionStrategy: "rename",
+    });
+
+    const alpha = preview.manifest.agents.find((a) => a.slug === "alpha");
+    expect(alpha?.skills).toEqual(["company/abc/extra-one"]);
+  });
 });

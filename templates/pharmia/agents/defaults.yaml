@@ -1,0 +1,12 @@
+# Defaults merged into every agent's skills: at import time.
+# Per-agent excludeSkills: [<key>] to opt out.
+# Frontmatter skills: are added on top (deduped).
+skills:
+  - "paperclipai/paperclip/diagnose-why-work-stopped"
+  - "paperclipai/paperclip/paperclip"
+  - "paperclipai/paperclip/paperclip-converting-plans-to-tasks"
+  - "paperclipai/paperclip/paperclip-create-agent"
+  - "paperclipai/paperclip/paperclip-create-plugin"
+  - "paperclipai/paperclip/paperclip-dev"
+  - "paperclipai/paperclip/para-memory-files"
+  - "paperclipai/paperclip/terminal-bench-loop"
