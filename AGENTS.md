@@ -115,4 +115,25 @@ Upstream ships breaking changes daily. The fork stays cheap only if customizatio
 - Edit the package in git, then apply with `paperclipai company import templates/<company> --target existing --company-id <id> --dry-run`.
 - `.paperclip.yaml` is the manifest and source of truth. An `agents/<slug>/AGENTS.md` alone is **invisible** — also register the agent under the `agents:` block (role + adapter config) **and** in `sidebar.agents`.
 - **Push + redeploy does NOT sync templates into a running company.** Dokploy rebuilds the server image; the Postgres volume persists; there is no seed/import on boot. Template changes only reach the live company when someone runs `paperclipai company import ... --target existing --company-id <id>`.
-- **Prompt edits made in the UI live only in the DB** — they survive redeploys but get clobbered by a future `--collisionStrategy replace` import. No merge; last writer wins. Decide which side is source of truth per agent.
+
+### Sources of truth (per agent)
+
+1. **Template** — `templates/<company>/agents/<slug>/AGENTS.md` is the import seed. See `templates/AGENTS.md` for the authoring contract.
+2. **Database** — UI edits write here. Survives redeploys. Authority for the running company.
+3. **Runtime file** — `/paperclip/instances/<company>/instructions/<slug>/AGENTS.md` is what the adapter actually reads. See `server/src/services/AGENTS.md` §3.
+
+UI edits live only in the DB; they get clobbered by a future `--collisionStrategy replace` import. Decide which side is source of truth per agent.
+
+## 13. Company portability quick map
+
+- `templates/AGENTS.md` — org-as-code authoring (directory layout, `.paperclip.yaml` schema, `defaults.yaml` inheritance, skill key namespacing).
+- `server/src/services/AGENTS.md` — portability pipeline, board auth tier, runtime instructions authority, FK delete ordering, `X-Paperclip-Run-Id` audit header.
+- `packages/db/AGENTS.md` — schema invariants, FK delete order table, migration workflow, PGlite/Postgres parity.
+
+## 14. Skill directories: who reads what
+
+- `skills/` — runtime skills installed *into agents* (e.g., `paperclip`, `paperclip-dev`). The adapter copies these into the agent's working directory at heartbeat time.
+- `.agents/skills/` — *contributor* workflows for working *on* Paperclip itself (release, pr-report, doc-maintenance). Not shipped to agents.
+- `.claude/skills/` — Claude Code consumer skills for users running Claude Code locally on this repo. May overlap with the other two; pick the directory by audience.
+
+Decision tree: authoring a skill that runs *inside* a deployed agent → `skills/`. A workflow for editing this repo → `.agents/skills/`. A skill for Claude Code users on the repo → `.claude/skills/`.
