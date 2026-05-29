@@ -188,8 +188,6 @@ Working material, may contain errors. Never cite as legal authority — use only
 
 - The comp-ai GRC platform — tracking tool, not authority.
 - Outline wiki — internal notes.
-- The enterprise's `docs/legal/` artefacts (PIA, SaMD determination, draft policies,
-  counsel handoffs) — drafts pending counsel review.
 - Comp AI policies and control descriptions — claimed posture / self-assessment
   material, pending counsel review. Tells you the *claimed* posture, not what the law
   *says*. MSSS primaries live at `bento-docs/sources/legal/tgv/`.
