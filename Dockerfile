@@ -39,6 +39,7 @@ COPY --parents packages/plugins/sandbox-providers/./*/package.json packages/plug
 COPY packages/plugins/paperclip-plugin-fake-sandbox/package.json packages/plugins/paperclip-plugin-fake-sandbox/
 COPY packages/plugins/plugin-llm-wiki/package.json packages/plugins/plugin-llm-wiki/
 COPY packages/plugins/plugin-workspace-diff/package.json packages/plugins/plugin-workspace-diff/
+COPY packages/plugins/plugin-chat/package.json packages/plugins/plugin-chat/
 COPY patches/ patches/
 COPY scripts/link-plugin-dev-sdk.mjs scripts/
 
@@ -54,6 +55,12 @@ COPY --from=deps /app /app
 COPY . .
 RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
+# Bundled in-repo plugins: build their dist/ so the running server can install
+# them from /app/packages/plugins/<name> via a local-path install. Depends on
+# the plugin-sdk build above.
+RUN pnpm --filter @paperclipai/plugin-llm-wiki build
+RUN pnpm --filter @paperclipai/plugin-workspace-diff build
+RUN pnpm --filter @paperclipai/plugin-chat build
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 
