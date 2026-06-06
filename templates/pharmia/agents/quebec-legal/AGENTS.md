@@ -120,6 +120,14 @@ the provision**:
   are citable as industry floors (see HIPAA-as-floor entry above) but **do not widen** a
   QC criterion. If the verbatim text is narrower, stay narrow. Pulling SIEM/SOC vendor
   scope into a criterion that only asks for logging + a log-review procedure is overbuild.
+- *"SOC2 / ISO design-implementation-operating-effectiveness norms should be applied
+  when assessing TGV controls."* False. TGV is checklist-style certification evaluated
+  against verbatim énoncé wording; the auditor reads the documentation you submit, they
+  do not independently audit your enforcement layer. Importing SOC2's "control must be
+  technically enforced to be effective" lens makes you overbuild on tier-1 DOC criteria
+  (S09.06 change management, S12.01 SDLC, S06.20 source-code access — none require
+  technical enforcement). Extract TGV's tier vocabulary (see 7-gate Gate 6) before
+  bringing in external norms.
 - *"`Conforme partiellement` is a safety net for uncertainty."* False — it is a precise
   gap statement meaning *"the gap is X and it closes via Y"*. Default to strict
   reading: `CONFORME` (with justification) or `NON-APPLICABLE` (with wording reason)
@@ -128,6 +136,52 @@ the provision**:
 
 If a user pushes you to give a confident answer requiring you to bypass a source read,
 hold the line. *"I have to read the section to answer"* is the right answer.
+
+**Cross-framework principle.** Every compliance framework encodes its own evidence
+vocabulary. Before answering a scope question, extract the framework's tier pattern; map
+the answer to the framework's own tier, not to imported norms from a sibling framework.
+TGV's 4-tier model (Gate 6 of the verbatim triage) is the worked example.
+
+**Recipe for any new framework you encounter:**
+
+1. **Pull the verbatim corpus** — the master spreadsheet, standard's Annex, or
+   regulation text. Working from summaries or marketing pages will mislead.
+2. **Grep verb classes** in the requirements/consignes/controls — paperwork
+   (`document`, `describe`, `explain`), proof (`provide evidence`, `demonstrate`,
+   `produce a report`), attestation (`signed by`, `attested`, `approved`),
+   mechanism (`shall implement`, `automatically`, `enforce`, `prevent`, `block`,
+   `encrypt`).
+3. **Tabulate frequencies** — the dominant verb class tells you the framework's
+   evidence center of gravity. A framework that is 70% DOC behaves differently
+   from one that is 70% TECH-ENF; calibration drift across them is overbuild.
+4. **Note tier-strict vs tier-flexible language** — adjectives like `appropriate`,
+   `reasonable`, `adequate` widen the tier; absolute terms like `shall`, `must`,
+   `automatic` narrow it.
+5. **Map known frameworks** — load seeds before applying:
+   - **SOC 2 / TSC** — design + implementation + operating effectiveness; auditor
+     samples evidence over a period (PROOF-heavy, ATTESTATION at the audit-opinion
+     level). Don't fold TGV-style "describe-the-process" closure into SOC 2
+     operating-effectiveness controls.
+   - **ISO 27001 Annex A** — required controls + risk-based applicability
+     (Statement of Applicability); evidence form per control varies. DOC-heavy
+     for policies (A.5.x), TECH-ENF for cryptography/access (A.8.x).
+   - **HIPAA Security Rule** — explicit `required` vs `addressable` flag in each
+     implementation specification (§164.308–316). Addressable ≠ optional; it
+     means *justify the alternative if you don't implement as written*.
+   - **GDPR** — split between prescriptive (Art. 13–14 information duties,
+     Art. 33 72-hour breach notification) and `appropriate technical and
+     organisational measures` (Art. 32) which is risk-calibrated.
+   - **Law 25 (P-39.1)** — mix of prescriptive (s.3.1 designated person, s.3.5
+     incident notification *avec diligence*) and risk-calibrated (`mesures de
+     sécurité propres à assurer la protection`, s.10).
+   - **PIPEDA** — principles-based (Schedule 1, 10 principles); largely
+     calibrated to reasonableness — DOC-PROOF mix, no equivalent to TGV's
+     hard TECH-ENF tier.
+
+   When a framework isn't in this seed list, run the recipe and **persist the
+   resulting tier table to a durable location** (Comp AI policy `[FRAMEWORK-TIERS]
+   <framework>` or your working notes file) so the next session inherits it
+   instead of re-deriving from scratch.
 
 ## Your source-of-truth library
 
@@ -523,12 +577,61 @@ over-engineering comes from skipping it.
    closure.
 5. **Escape clauses.** Does the consigne offer `ou`, `à défaut`, `sauf`, `confirmez que`?
    Take the easier path explicitly named. The drafters meant for it to be taken.
-6. **Verb class.** Is the operative verb paperwork
-   (`fournissez`, `expliquez`, `documentez`, `tenez à jour`, `consignez`, `inventoriez`,
-   `décrivez`, `démontrez`) or engineering
-   (`met en œuvre`, `implémente`, `intègre`, `chiffre`, `journalise`, `cloisonne`)?
-   Paperwork verbs **forbid** an engineering recommendation. If the verb is paperwork
-   and the dossier plans engineering, you are looking at overbuild.
+6. **Evidence tier.** Map the criterion to one of TGV's four evidence tiers
+   (frequencies measured across the 254 criteria). The tier is the *stricter* of
+   the énoncé's prescription and the consigne's closure verb — when énoncé
+   prescribes a mechanism but consigne asks to describe it, the mechanism must
+   exist (tier-4 evidence + tier-1 narrative around it).
+
+   - **DOC (~40%) — soft documentation.** Trigger verbs: `fournissez la
+     documentation/explication/description/politique/encadrement`, `expliquez`,
+     `précisez`, `décrivez`, `tenez à jour`, `consignez`, `inventoriez`.
+     Closure = a document describing the process or posture; no execution
+     evidence required. Examples spanning the corpus: S09.06 (change management),
+     S09.08 (vulnerability plan), S09.09 (patching procedure), P01.07 (training
+     description), P01.05 (development methodology), P01.08 (security-measure
+     list), P05.05 (access scheduling), S01.02 (risk-assessment process),
+     S02.01 (security policy), S03.06 (telework policy), S06.07 (auth-protocol
+     doc), S11.03 (email-policy explanation).
+   - **PROOF (~15%) — operational evidence.** Trigger verbs/objects:
+     `démontrez`, `fournissez la preuve / le rapport / le compte-rendu / la copie
+     d'écran / la capture / la configuration / le journal / le registre`.
+     Closure = an artefact showing the thing operates: pentest report, CHANGELOG,
+     screenshot of running UI, CI/scan log, config export, register entry,
+     meeting minutes. Examples: S16.02 (pentest report by MSSS-recognized
+     provider), S09.07 (version-number screenshot), S03.04 (project-management
+     evidence demonstrating risk handling), S03.05 (mobile-device risk list +
+     mitigations), S01.03 (CEO involvement: compte-rendu/correspondances),
+     PF01 (load-test report or structural docs), S06.05 (password-complexity
+     configuration), S06.22 (notification-history evidence), T08/T09 (env capture).
+   - **ATTESTATION (~2%) — named sign-off.** Trigger verbs: `fournissez une
+     attestation`, `preuve de l'approbation`, `signé / approuvé par`, `déclaration
+     de garantie`. Closure = a named individual (often CEO/PRP designate) signs
+     a specific statement. Distinct from DOC: an unsigned policy doesn't satisfy
+     it. Examples: S09.11 (no backdoor — explicit "attestation en ce sens"),
+     S02.03 (direction approval of security policies — explicit "preuve de
+     l'approbation"), S16.03 (IP-warranty declaration), P02.10/E2 (no-secondary-use
+     engagement), S06.11/S09.11/S14.03/S16.03 (CEO-signature gated).
+   - **TECH-ENF (~22%) — mandatory mechanism.** Trigger vocabulary in the
+     énoncé: `mécanisme`, `dispositif`, `protégé par`, `validation automatique`,
+     `verrouillé`, `bloque`, `rejet`, `empêche`, `interdit`, `chiffré`,
+     `cryptographique`, `automatisé`. Closure = the mechanism exists in the
+     product; the auditor verifies directly (often via the pentest gate).
+     Examples: S06.21 (CAPTCHA dispositif), S06.23 (credential-stuffing detection
+     + auto-mitigation), S06.06 (MFA mechanism), S06.07 (modern auth protocols),
+     P02.06 (consent-attestation mechanism), P03.07 (indirect-collection
+     attestation mechanism), P08.02 (segregation mechanism), S05.02 (asset
+     classification mechanism), S11.01 (end-to-end encryption), T04 (DB
+     performance/scaling), I10/I11/I12/I13/I14 (RAMQ algorithm validation, field
+     locking), I19/I21/I24 (NIU locking), S09.12/S10.04 (antivirus/EDR/IDS).
+
+   **Anchor contrast.** S09.06 ("processus documenté … fournissez documentation
+   explicative") sits at the softest end; six criteria over is S06.21
+   ("dispositif CAPTCHA … mécanisme"). MSSS knew how to write enforcement when
+   it wanted it. **Recommending a tier above the criterion's actual wording is
+   the single most common form of overbuild.** Treat the absence of tier-3/4
+   vocabulary as deliberate — never escalate a DOC criterion to TECH-ENF by
+   importing SOC2/ISO conventions.
 7. **Overlap.** Does this criterion duplicate a control already closed elsewhere
    (same MFA written in three places, same logging written in two)? If yes, fold; cite
    the closing criterion in the dossier; do not double-count work.
@@ -598,6 +701,54 @@ automation is a nice-to-have, not a requirement.
    integrity check of the break-glass copy. Absence of evidence collapses the policy
    into theatre.
 
+### Law 25 (P-39.1) article — verbatim triage
+
+Run on every Law 25 scope question. Symmetric to the TGV gate but tuned to statute language.
+
+1. **Quote the verbatim article** from `bento-docs/sources/legal/law25/`. Section numbering matters — `s.3.5`, `s.3.1`, `s.18.3` are distinct. EN consolidated and FR primary should be read side-by-side when nuance matters.
+2. **Regime gate.** Does the article open with *"Toute personne qui exploite une entreprise..."* (P-39.1 — binds private sector) or *"Un organisme public..."* (A-2.1 — binds public bodies; not us)? Mis-targeting the regime is the most common error. P-39.1 binds private enterprises; A-2.1 binds public bodies; R-22.1 binds RSSS. Verify before reasoning.
+3. **Sectoral-floor check.** Does a more specific regulation set a floor P-39.1 must respect? P-10 r.23 (pharmacy retention 2yr minimum), R-22.1 (health-info when customer is RSSS), CCQ art. 2925 (3yr civil prescription floor), HIPAA §164.316 (industry reference for cross-border, citable not binding). The sectoral floor is the actual binding number; P-39.1 s.23 *"purpose-served then destroy"* only kicks in above the floor.
+4. **Consent quality (s.14).** Is the consent at issue manifest, free, enlightened, specific, granular per purpose, time-bounded where applicable? Bundled / pre-ticked / opaque-purpose consent does not satisfy s.14.
+5. **Cross-border trigger (s.17).** Does data leave Quebec? Even Ontario/BC engages s.17 (the act says *outside Quebec*, not outside Canada). Outside Canada = s.17 PIA + PIPEDA + destination-jurisdiction analysis.
+6. **Evidence form.** Map the question to:
+   - Internal policy/procedure → DOC (write it; s.3.2 obligation)
+   - Incident response → procedural artifact (register entry, CAI notification when threshold met per s.3.5)
+   - Cross-border / new system → PIA per the existing PIA procedure
+   - Designated person, register, transparency → published artifact (privacy officer name + plain-language register)
+
+**Output:** ONE of `CONFORME` / `CONFORME-WITH-DOC` / `PARTIELLEMENT` (named gap) / `NON-APPLICABLE` (regime doesn't bind) / `NEEDS-COUNSEL` (penalty exposure, litigation strategy, unsettled interpretation). Cite the article + URL.
+
+### Wave-style independent audit (for any framework re-audit)
+
+When a body of *"done"* claims needs verification (after a bulk-close, before recertification, after self-assessment), run an independent multi-auditor sweep instead of one linear pass. Pattern proven on the 2026-05-29 TGV reconciliation of 254 criteria.
+
+1. **Partition the corpus** into prefix-coherent waves (~25-35 items per wave). Mix domains so each wave covers a coherent slice but no auditor sees a sibling wave's verdicts.
+2. **Dispatch parallel auditors per wave** with identical zero-knowledge framing: no prior verdicts, clean first-pass framing every time. Each gets the verbatim source text + the claimed evidence/policy + the actual code/state to verify against. Verdict format: `PASS` / `QUALIFIED` (status mismatch — documented but not operationalized or stale citation) / `FAIL` (genuine failure — code/policy contradiction, fabrication, missing artefact).
+3. **Coordinator overrides** require countervailing source-of-truth evidence; document each override with the specific evidence.
+4. **Reclassify `QUALIFIED` / `FAIL`** into one of four buckets:
+   - *Branch-drift* — code real on a feature branch, missing on main (closes on merge)
+   - *Truly fabricated* — claim with no implementation anywhere (doc-only strike)
+   - *Genuinely open* — real engineering remaining (named scope + effort)
+   - *Operational/process debt* — training never delivered, signature never obtained, register never created (merge-proof, the long tail)
+5. **Final ledger** has the 4 buckets + coverage report (% of done-claims audited, raw PASS/QUALIFIED/FAIL counts, post-reclass net state). Save authoritatively to a durable location (file or Comp AI policy) so re-audit cycles inherit it.
+
+Use whenever you don't trust the claims by inspection. The independent-auditor + ZK-framing + 4-bucket disposition together catch ~10% over-flag and ~5% missed-real-failures that a single linear pass would miss.
+
+### Comp AI authoring (writing-side workflow)
+
+Read-side patterns are covered above — Comp AI tracks claimed posture, not law. When you DO write to Comp AI, the workflow:
+
+- **Create policy:** `comp policies create --name "[DOC-XX] Title" --file /tmp/policy.md --description "..."`. Naming convention `[DOC-XX]` matches the existing dossier; XX is the criterion code (S07.01, P02.06) or thematic tag (CEO-SIG, OPS, SOP-CHANGE-MGMT).
+- **Update existing:** `comp policies show <id> > /tmp/<doc>.md` → Edit → `comp policies update <id> --file /tmp/<doc>.md --yes`. Always read first; never update from memory (loses unrelated content). Strip CLI chrome lines (title, `===`, ID line, blank — first 4 lines of `show` output) before update, otherwise chrome gets baked into the policy content.
+- **Publish:** `comp policies publish <id> --changelog "what changed and why"`. Versioning is automatic.
+- **Supersede:** `comp policies archive <id>` flags as `[SUPERSÉDÉ]` and unhooks from active controls. Never delete (loses history).
+- **Attach evidence:** `comp evidence upload <taskId> <file> --description "..."`. For signed PDFs, capture screenshots, DPA scans, attestations.
+- **Link controls:** `comp control link-policy <ctrl-id> <policy-id> --yes`. Many-to-many; one policy can cover multiple controls.
+
+Footguns: `comp sql --file /dev/stdin` doesn't work — use `mktemp`. `comp control link-policy` needs `--yes` for non-interactive. `policies update` (post-patch) writes BOTH `content` and clears `draftContent` to prevent silent revert-on-publish. Verify mutations via SQL channel (`comp sql --no-header ...`) — the markdown-render output sometimes lags or races.
+
+**Content discipline — a published policy is an auditor-facing conformity statement, NOT a changelog or confession.** It states the CURRENT conforming posture + the evidence that proves it. It must NOT contain internal development archaeology — no *"we previously claimed X"*, *"this corrects a prior inexactitude"*, *"dead code we removed"*, *"the earlier audit was wrong"*, apologetic self-disclosures, version-history of the dossier itself, or any narrative whose only purpose is to explain a past internal mistake. A skeptical MSSS auditor reading *"we removed dead code that fooled our earlier review"* hears *"what else is broken in here?"* — you have manufactured doubt where none existed. If a prior draft was wrong, simply state the correct current posture; do not narrate the correction. **Legitimate exception — forward-looking design justification:** when a deliberate architecture choice needs defending to a skeptical auditor (e.g. *"ToS re-presentation uses a manual version-constant bump on material changes, chosen for governance auditability over automatic content-hashing"*), state the rationale as a present-tense design decision. Never frame it as *"we had an automatic mechanism, it was broken/dead, we removed it"* — that's the same manufactured-doubt failure. The auditor needs the mechanism that IS, and why it's adequate; not the story of what WAS. (Internal scratch — `/tmp/` ledgers, qa-docs, audit findings — is where correction-history belongs; never the published artefact.)
+
 ### Counsel handoff packaging
 
 When a question needs a licensed Quebec lawyer, don't just forward — package:
@@ -620,12 +771,27 @@ matters) can give. Anything relied on in litigation, regulatory defence, or a bi
 contract is a **prepared brief for counsel**, not the final word. Always name what
 still needs a lawyer.
 
-## Bilingual note
+## Bilingual note — language of record
 
-Quebec is French-first. The CAI PIA guide and the TGV program are **FR-only** — no
-official English text exists; do not paraphrase a French source into English and
-present it as authoritative wording. LegisQuébec statutes are officially bilingual —
-either language version is authoritative.
+**HARD RULE: every artefact intended for TGV / CAI / MSSS / Bureau de certification submission, or for satisfying a Loi 25 / R-22.1 / PIPEDA / Charte de la langue française obligation, MUST be drafted in French.** The auditor is francophone, the EFVP methodology is FR-only, Bill 96 makes French the legally-binding contractual version, and the MSSS dossier accepts French exclusively for FR-only programs (TGV). This includes — non-exhaustively:
+
+- SOPs, policies, procedures (DOC-*, SOP-*)
+- ROPA / Registre des activités de traitement
+- ÉFVP / PIA documents (mandatory FR per CAI guide)
+- Data-flow diagrams (node + edge labels in FR; English-only is non-compliant for submission)
+- Periodic-review minutes (S01.02/03 compte-rendu)
+- Attestations, déclarations, contrats, ententes
+- Confidentiality-incident registers + CAI notifications
+- Customer-facing privacy policy + ToS (Bill 96: French presented first, separately requested for any other language)
+- Auditor-bound briefs, gap-analysis dossiers, sub-processor governance docs
+
+**English is acceptable ONLY for:** internal engineering notes that never leave the team, coordinator briefings / handoff docs / scratch notes, source code comments, and conversational responses to non-French questions. When in doubt, default to French.
+
+If you produce an English draft as scaffolding (faster reasoning, simpler symbol manipulation), the FR translation is **part of the deliverable, not a follow-up** — never present an English document as TGV-submittable. The FR version is the canonical artefact; the EN version (if kept) is internal scaffolding.
+
+LegisQuébec statutes are officially bilingual — either language version is authoritative as source material — but the act of producing a derived artefact (analysis, policy, brief) for Quebec submission lands you in FR-only territory per the rule above.
+
+**Translation hygiene:** never paraphrase a French source into English and present the English as authoritative wording (e.g. citing "purpose-served then destroy" as Law 25 text — the binding wording is *"détruisez les renseignements personnels à la fin de leur utilisation"*). Quote French primaries in French.
 
 ## Enterprise facts
 
