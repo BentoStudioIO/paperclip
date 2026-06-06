@@ -14,19 +14,32 @@ user-invocable: false
 
 # Pharmia Agent Architecture
 
-## 9 Mastra Agents
+## Mastra Agents
 
-| Role                       | Agent                            | Model                 | Provider  | Thinking    |
-| -------------------------- | -------------------------------- | --------------------- | --------- | ----------- |
-| Coordinator                | pharmiaCoordinatorAgent          | claude-sonnet-4-6     | anthropic | 5000 tokens |
-| Quebec Docs (subagent)     | pharmiaQuebecDocsAgent           | kimi-k2p5             | fireworks | medium      |
-| Health Products (subagent) | pharmiaCanadaHealthProductsAgent | kimi-k2p5             | fireworks | medium      |
-| Chat Form                  | pharmiaChatFormAgent             | claude-sonnet-4-6     | anthropic | low         |
-| Phone                      | pharmiaPhoneAgent                | claude-sonnet-4-6     | anthropic | none        |
-| Atlas                      | pharmiaAtlasAgent                | kimi-k2p5             | fireworks | none        |
-| Copilot                    | pharmiaCopilotAgent              | kimi-k2p5             | fireworks | none        |
-| Note Generator             | pharmiaNoteGeneratorAgent        | gemini-2.5-flash-lite | google    | -           |
-| Utility                    | pharmiaUtilityAgent              | gemini-2.5-flash-lite | google    | -           |
+> Model config changes often. VERIFY against `agentModels.ts` (`MODEL_DEFAULTS` + `MODEL_RINGS`) before trusting this table — it is a convenience snapshot, not the source of truth.
+
+| Role                       | Agent                            | Model                                                    | Provider  | Thinking    |
+| -------------------------- | -------------------------------- | -------------------------------------------------------- | --------- | ----------- |
+| Coordinator                | pharmiaCoordinatorAgent          | claude-opus-4-6                                          | anthropic | 5000 tokens |
+| Quebec Docs (subagent)     | pharmiaQuebecDocsAgent           | kimi-k2p6                                                | fireworks | high        |
+| Health Products (subagent) | pharmiaCanadaHealthProductsAgent | kimi-k2p6                                                | fireworks | high        |
+| Chat Form                  | pharmiaChatFormAgent             | claude-sonnet-4-6                                        | anthropic | low         |
+| Phone                      | pharmiaPhoneAgent                | claude-sonnet-4-6                                        | anthropic | none        |
+| Atlas                      | pharmiaAtlasAgent                | **ring** — see below                                     | —         | none        |
+| Copilot                    | (no own agent; derives from `atlasConfig`, CopilotKit, `memory: undefined`) | = Atlas ring             | —         | none        |
+| Note Generator             | pharmiaNoteGeneratorAgent        | gemini-3.1-flash-lite                                    | google    | -           |
+| Utility                    | pharmiaUtilityAgent              | gemini-3.1-flash-lite                                    | google    | -           |
+
+### Atlas model ring (`MODEL_RINGS.atlas` — unified across ALL envs since 2026-06-03)
+
+- Tier 0 (primary): **gemini-3.5-flash** / google
+- Tier 1 (failover): **kimi-k2p6** (`accounts/fireworks/models/kimi-k2p6`) / fireworks
+- Per-request rescue (`rescueModel = MODEL_DEFAULTS.atlasFallback`): gemini-3.5-flash / google (never rotates)
+- DeepSeek V4-Pro removed from the ring (too slow). No env branch — every env runs the same two tiers.
+- Invariant: both tiers MUST share `thinking: 'none'` (getOrCreateRing Invariant 3). Gemini `'none'` → Google `thinkingLevel: 'minimal'`; the live `atlasThinkingRouter` overrides Gemini per-request (révision-pharmaco / consultation-voyage → `low`, rest → `minimal`), gated on `provider === 'google'`.
+- Edit the ring at `agentModels.ts:MODEL_RINGS.atlas`; validate with the `model-config-gate` skill + `threads modelmix`.
+
+Echo / observational-memory run on their own `MODEL_DEFAULTS` keys: `echoAnalyzer` = gemini-3.5-flash/google, `echoAnswerExtractor` = gpt-oss-120b/cerebras, `observationalMemory` = deepseek-v4-flash/fireworks-oai.
 
 ## Agent Factory Pattern
 
