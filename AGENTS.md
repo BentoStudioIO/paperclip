@@ -140,3 +140,13 @@ UI edits live only in the DB; they get clobbered by a future `--collisionStrateg
 - `.claude/skills/` — Claude Code consumer skills for users running Claude Code locally on this repo. May overlap with the other two; pick the directory by audience.
 
 Decision tree: authoring a skill that runs *inside* a deployed agent → `skills/`. A workflow for editing this repo → `.agents/skills/`. A skill for Claude Code users on the repo → `.claude/skills/`.
+
+## 15. Agent & skill sync (Paperclip → local harnesses)
+
+Paperclip is the single source of truth for agent and skill definitions; `git pull` projects them into your local Claude Code / Codex / OpenCode with no manual step.
+
+- **One-time setup (new clone):** `git config core.hooksPath .githooks` (also needs `node` and network for `npx rulesync`). The `post-merge`/`post-checkout` hooks then run the sync on every pull/checkout.
+- **Agents** — `scripts/sync-claude-agents.mjs` extracts the Claude-format frontmatter block + body from `templates/pharmia/agents/<slug>/AGENTS.md` → `~/.claude/agents/<name>.md`, then `rulesync convert --from claudecode --to codexcli,opencode --features subagents --global` mirrors to `~/.codex/agents/` + `~/.config/opencode/agent/`.
+- **Skills** — `scripts/sync-claude-skills.mjs` writes `templates/pharmia/skills/company/<co>/<slug>/SKILL.md` (+ support files) to `~/.claude/skills/<name>/` as **real dirs** (portable — no dependency on any shared `~/.agents` store), strips Paperclip-internal keys (`slug`/`metadata`/`key`), normalizes `allowed-tools` to an array, then rulesync mirrors `--features skills` to codex/opencode.
+- **Marker = `source: paperclip`** (frontmatter key). It's the prune key: generated files are overwritten/removed on sync; anything without it (hand-authored or skills.sh installs) is never touched.
+- Run manually with `node scripts/sync-claude-agents.mjs` / `sync-claude-skills.mjs` (`--dry-run`, `--verbose`, `--no-rulesync` supported).
