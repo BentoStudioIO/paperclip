@@ -3,3 +3,4 @@
 # Paperclip is the source of truth; generated files are tagged `source: paperclip`.
 command -v node >/dev/null 2>&1 || exit 0
 node "$(git rev-parse --show-toplevel)/scripts/sync-claude-agents.mjs" || true
+node "$(git rev-parse --show-toplevel)/scripts/sync-claude-skills.mjs" || true

@@ -3,3 +3,4 @@
 [ "$3" = "1" ] || exit 0   # only on branch checkouts, not file checkouts
 command -v node >/dev/null 2>&1 || exit 0
 node "$(git rev-parse --show-toplevel)/scripts/sync-claude-agents.mjs" || true
+node "$(git rev-parse --show-toplevel)/scripts/sync-claude-skills.mjs" || true
