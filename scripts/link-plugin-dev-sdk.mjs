@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdirSync, lstatSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, lstatSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,6 +30,22 @@ try {
 }
 
 const relativeSdkDir = relative(scopeDir, sdkDir);
-symlinkSync(relativeSdkDir, linkTarget, "dir");
+
+try {
+  symlinkSync(relativeSdkDir, linkTarget, "dir");
+} catch (err) {
+  // pnpm links the @paperclipai/plugin-sdk workspace dependency itself, and may
+  // (re)create this symlink concurrently with this postinstall script — racing the
+  // rm above and throwing EEXIST. Accept an existing symlink that already points at
+  // the SDK as success; otherwise replace it.
+  if (err?.code !== "EEXIST") throw err;
+  const existing = lstatSync(linkTarget);
+  if (existing.isSymbolicLink() && readlinkSync(linkTarget) === relativeSdkDir) {
+    console.log(`  ✓ @paperclipai/plugin-sdk already linked for ${packageDir}`);
+    process.exit(0);
+  }
+  rmSync(linkTarget, { force: true, recursive: true });
+  symlinkSync(relativeSdkDir, linkTarget, "dir");
+}
 
 console.log(`  ✓ Linked local @paperclipai/plugin-sdk for ${packageDir}`);
