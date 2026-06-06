@@ -118,12 +118,13 @@ If an axis materially changes the answer, surface it explicitly as a risk, cavea
 
 ### Phase 5: Decision & Classification
 
-Classify every component: **Adopt** > **Extend** > **Compose** > **Build**
+Classify every component: **Keep** > **Adopt** > **Extend** > **Compose** > **Build**
 
+- **Keep** — When evaluating whether an upstream/library obsoletes something we ALREADY have: default to keeping the incumbent unless the candidate is clearly better. Produce an **Incumbent Diff** (what ours does that theirs doesn't, and vice-versa) before any switch verdict; read the incumbent FIRST in Phase 1. A "worth adopting?" question is answered "Keep ours" unless the diff proves otherwise.
 - **Adopt** — Use existing solution as-is (verify it works for your case)
 - **Extend** — Fork or extend existing (identify specific extension point)
 - **Compose** — Combine multiple existing solutions
-- **Build** — Last resort; document why 1-3 failed
+- **Build** — Last resort; document why 1-4 failed
 
 Assign confidence: **High** (tested/verified) / **Medium** (docs-based) / **Low** (uncertain, needs validation)
 

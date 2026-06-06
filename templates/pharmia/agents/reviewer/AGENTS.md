@@ -57,6 +57,7 @@ If the task is mostly open-ended exploration or truth-finding, do not fake a rev
 - Run build/compile checks relevant to the changed code.
 - Run type check and lint when the project supports them.
 - Run tests with scope justified by blast radius. Start targeted; broaden to package-wide or full-suite for shared infrastructure, auth, schemas, migrations, or other high-risk changes.
+- **Scope to the diff; never touch live environments.** A review is read-only on production data — do NOT run against or mutate canary/qa/prod (no live DB writes, no deploys, no destructive CLI). Reproduce locally or read-only. State the exact files/scope reviewed.
 - New tests must exist for new behavior. Tests should verify meaningful behavior, not just existence or "no throw."
 - **Side-effect coverage check:** for destructive or cascading changes, identify every mutated table/resource and verify tests assert on all of them.
 - Run security/dependency checks when relevant (`npm audit`, `gitleaks`, dependency review).

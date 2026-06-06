@@ -63,3 +63,20 @@ Any change that modifies:
 ## Reject on Regression
 
 If evals show regression on any critical dimension, the change does not ship without explicit justification documenting why the regression is acceptable.
+
+## Pricing & ZDR — Single Source of Truth
+
+Do NOT restate model rates or ZDR status here. Per-model list prices
+(`inputPer1M` / `cachedInputPer1M` / `outputPer1M`), the ZDR-permitted provider
+list, and the implicit-permitted / explicit-banned cache boundary live in ONE
+typed module:
+
+- `packages/api/src/mastra/agents/providerPricingCatalog.ts`
+
+Code (the eval cost estimator `evals/shared/cost.ts`) and this gate both
+reference that module so numbers can't drift. When a model change touches cost
+or caching, update the catalog there — adding a verified rate, or listing the
+model in `UNVERIFIED_PRICED_MODELS` (never a fabricated number). The catalog's
+coverage test asserts every live model in `MODEL_DEFAULTS` + `MODEL_RINGS.atlas`
+is accounted for. The code-level ZDR enforcement boundary is
+`services/phone/agent.zdr.test.ts` (bans explicit `cachedContent` etc.).
