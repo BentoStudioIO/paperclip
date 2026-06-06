@@ -23,13 +23,13 @@ import { readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync, rmSync
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+import { spawnSync } from "node:child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..");
 const SRC_DIR = join(repoRoot, "templates", "pharmia", "agents");
 const TARGET_DIR = process.env.CLAUDE_AGENTS_DIR || join(homedir(), ".claude", "agents");
 const MARKER = "source: paperclip";
-const DESC_SUFFIX = " (synced from Paperclip)";
 
 const argv = new Set(process.argv.slice(2));
 const DRY = argv.has("--dry-run");
@@ -72,11 +72,8 @@ function tagSlice(slice) {
   let fm = slice.slice(fmInnerStart, fmClose);
   const body = slice.slice(fmClose); // includes closing fence + body, verbatim
 
-  // Append suffix to the description value if not already present (idempotent vs clean source).
-  fm = fm.replace(/^(description:\s*)(.*)$/m, (_, k, v) =>
-    v.includes(DESC_SUFFIX.trim()) ? `${k}${v}` : `${k}${v}${DESC_SUFFIX}`,
-  );
-  // Prepend the marker key if absent.
+  // Prepend the marker key if absent. Kept as a frontmatter key (not a description
+  // suffix) so the output stays valid YAML even when description values are quoted.
   if (!new RegExp(`^${MARKER}$`, "m").test(fm)) fm = `${MARKER}\n${fm}`;
 
   return `---\n${fm}${body}`;
@@ -156,3 +153,24 @@ console.log(
     `${generated.size} sources, ${written} written, ${unchanged} unchanged, ${pruned} pruned` +
     (skipped.length ? ` | skipped: ${skipped.join(", ")}` : ""),
 );
+
+// ---- fan out to codex + opencode via rulesync (best-effort) ----
+// The Claude agents are the intermediate format; rulesync converts them to other
+// harnesses. This never throws — a missing/failed rulesync must not break the core sync.
+// Skip with --no-rulesync; override targets with RULESYNC_TARGETS (default codexcli,opencode).
+if (!argv.has("--no-rulesync") && !process.env.CLAUDE_AGENTS_DIR) {
+  const targets = process.env.RULESYNC_TARGETS || "codexcli,opencode";
+  const rsArgs = [
+    "-y", "rulesync@latest", "convert",
+    "--from", "claudecode", "--to", targets,
+    "--features", "subagents", "--global",
+    VERBOSE ? "--verbose" : "--silent",
+  ];
+  if (DRY) rsArgs.push("--dry-run");
+  try {
+    const r = spawnSync("npx", rsArgs, { stdio: VERBOSE ? "inherit" : "ignore" });
+    console.log(`[sync-claude-agents] rulesync -> ${targets}: ${r.status === 0 ? "ok" : `skipped (exit ${r.status})`}`);
+  } catch (e) {
+    console.log(`[sync-claude-agents] rulesync skipped: ${e.message}`);
+  }
+}
