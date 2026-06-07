@@ -84,6 +84,27 @@ agents:
         dangerouslySkipPermissions: true
         model: "claude-sonnet-4-6"
       type: "claude_local"
+  ai-product-observer:
+    role: "observer"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
+  clinical-flow-observer:
+    role: "observer"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
+  platform-observer:
+    role: "observer"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
 company:
   attachmentMaxBytes: 10485760
 routines:
@@ -108,3 +129,6 @@ sidebar:
     - "researcher"
     - "reviewer"
     - "security-agent"
+    - "ai-product-observer"
+    - "clinical-flow-observer"
+    - "platform-observer"
