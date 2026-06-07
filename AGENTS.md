@@ -150,3 +150,20 @@ Paperclip is the single source of truth for agent and skill definitions; `git pu
 - **Skills** — `scripts/sync-claude-skills.mjs` writes `templates/pharmia/skills/company/<co>/<slug>/SKILL.md` (+ support files) to `~/.claude/skills/<name>/` as **real dirs** (portable — no dependency on any shared `~/.agents` store), strips Paperclip-internal keys (`slug`/`metadata`/`key`), normalizes `allowed-tools` to an array, then rulesync mirrors `--features skills` to codex/opencode.
 - **Marker = `source: paperclip`** (frontmatter key). It's the prune key: generated files are overwritten/removed on sync; anything without it (hand-authored or skills.sh installs) is never touched.
 - Run manually with `node scripts/sync-claude-agents.mjs` / `sync-claude-skills.mjs` (`--dry-run`, `--verbose`, `--no-rulesync` supported).
+- **Instant autosync on edit (no git pull needed):** `scripts/watch-sync.mjs` watches `templates/pharmia/{agents,skills}` and re-runs the sync (`--no-rulesync`, ~debounced 400ms) on every file change — so editing a template reflects in `~/.claude` within a second. Run ad-hoc: `node scripts/watch-sync.mjs`. Durable (Linux, systemd-user) one-time setup:
+  ```sh
+  cat > ~/.config/systemd/user/paperclip-autosync.service <<EOF
+  [Unit]
+  Description=Paperclip -> ~/.claude template autosync
+  After=default.target
+  [Service]
+  Type=simple
+  ExecStart=$(command -v node) $PWD/scripts/watch-sync.mjs
+  Restart=on-failure
+  RestartSec=5
+  [Install]
+  WantedBy=default.target
+  EOF
+  systemctl --user daemon-reload && systemctl --user enable --now paperclip-autosync
+  ```
+  One-way only (Paperclip SSOT → `~/.claude`); never edits the generated copies back. Logs: `journalctl --user -u paperclip-autosync -f`.
