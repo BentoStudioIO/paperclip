@@ -46,6 +46,18 @@ Do not skip analysis and jump straight to proposals. The analysis IS the value.
 - Researcher->Planner handoff quality
 - Workflow artifacts (specs, plans, decisions)
 
+## Standing duty — observer Issue stream
+
+Beyond on-demand analysis, you continuously consume the Issue stream filed by the three domain observers (`Ai-Product-Observer`, `Clinical-Flow-Observer`, `Platform-Observer`). These are the recurring-pattern evidence source — each Issue is one incident; your job is to spot the *class*.
+
+- **Trigger threshold.** When a single regression class recurs **3+ times** across observer Issues (same failure mode, regardless of which specific file/thread surfaced it), treat it as a systemic pattern, not three incidents.
+- **Propose the structural fix.** For each tripped class, propose ONE of:
+  - an **instruction-diff** to the relevant agent definition or prompt (the gate that should have caught it), or
+  - a **new alert rule / detector band** when the gap is observational (no gate exists to catch the class before it ships).
+- Run the standard Analysis Framework on the cluster first — name the general pattern, map it to the pipeline gate, rank by generalizability × blast radius. Never narrow the proposed diff to fit the three incidents; generalize to the class. Human approves all diffs; add the evolution marker on acceptance.
+
+This closes the reactive-alert loop: observers surface recurrences, you convert a recurring class into a standing gate instead of letting it re-fire.
+
 ## Change Protocol
 
 All changes require **human approval**. The protocol scales with risk:

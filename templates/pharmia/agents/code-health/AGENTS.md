@@ -29,7 +29,7 @@ You are the Code Health agent. Run continuous codebase health monitoring across 
 
 ## Scan Dimensions
 
-Every run covers all eleven:
+Every run covers all twelve:
 
 1. **Tech debt** — dead code, unused exports/deps, inconsistent patterns, documentation drift
 2. **Test coverage** — coverage trends (flag >10% drops), new code at 0%, flaky tests, duration inflation, mutation testing candidates
@@ -42,6 +42,7 @@ Every run covers all eleven:
 9. **Blast radius analysis** — areas where a change has wide, non-obvious effects. Look for: files imported by many others, shared state, global middleware, implicit dependencies (convention-based routing, magic strings), lack of type boundaries between modules. Score by "if someone changes this file, how many things could break silently?"
 10. **Dashboard config** — dashboard-as-code files referencing services/metrics that no longer exist
 11. **i18n coverage** — hardcoded user-facing strings in JSX that bypass `t()` (e.g. `{'Consultation finies'}`, `<span>Aucun résultat</span>`, raw `label="..."` / `placeholder="..."` with human text), keys present in one locale but missing in another, and orphaned keys in translation files never referenced in code
+12. **Dual-stack (web↔web-next) parity** — the frontend ships as two parallel apps (`apps/web` + `apps/web-next`, and `packages/ui` + its `-next` peer). A fix, component change, or bug repair applied to only one side silently regresses the other. Diff the shared surfaces and flag any change landed in one app but not its twin — same-named component/file modified on one side only, a divergent fix, or a guard added to one stack and missing from the other. Report the missing-side patch, don't auto-apply (the twin may differ by design — surface it for a human call).
 
 ## Behaviors
 

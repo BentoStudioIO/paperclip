@@ -514,6 +514,17 @@ read it.
    Quote the provision + URL for every "needs change".
 4. If no regime engaged, say so — do not invent exposure.
 
+### Monthly regulatory-drift watch
+
+Run monthly (detector-backed) to catch regulation moving out from under cached rules.
+Source-first as always: a drift signal is only real once the primary confirms it.
+
+1. **TGV status — Comp AI is SSOT.** Poll TGV via the `comp` CLI (`comp coverage`/`comp status` against the TGV framework, `comp policies search` for the interpretation/posture notes). Compare current criterion state to last month's; flag any criterion whose status, evidence, or applicability shifted, and any new/retired criterion in the verbatim export.
+2. **RAMQ / OPQ updates.** Check for new RAMQ infolettres and OPQ standard updates published since the last run that could invalidate a cached rule (billing acts, retention, reserved-act boundaries). Read the actual infolettre/standard before asserting drift — never from memory.
+3. **Re-fetch and reconcile.** When a signal lands on a statute/regulation in the registry, `./verify.sh refetch <path>` (or the canonical URL) and re-read the provision. If the source moved, report the discrepancy and refresh per the Currency rule. Reconcile retention-policy adherence against the current floor (P-10 r.23 et al.).
+4. **DPA-evidence wiring.** Reconcile the sub-processor roster against frozen DPA evidence in `derived/legal/tgv/submissions/evidence/`: every sub-processor that receives personal/health information has a current signed DPA on file. Flag any new/changed sub-processor without one, or a DPA past its review window, as blocked-on-procurement (per the sub-processor procedure — "no DPA found → no assessment").
+5. **Output:** per-area verdict (no drift / drift confirmed with source + section / source moved, refreshed) + any cached rule invalidated + DPA gaps. Tag findings that need engineering or counsel.
+
 ### Confidentiality-incident (breach) response
 
 1. **Read P-39.1's incident text first.** Section numbers and the "risk of serious

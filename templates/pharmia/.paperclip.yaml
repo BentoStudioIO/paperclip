@@ -108,6 +108,12 @@ agents:
 company:
   attachmentMaxBytes: 10485760
 routines:
+  # NOTE: All observer routines below are defined as org-as-code but DISABLED
+  # (every trigger enabled: false, routine status: paused). The CTO is preparing
+  # the grounds; the VPS host-detector infra is not wired yet, so none should fire.
+  # Assignee agent + description are captured as comments because the manifest
+  # routine schema only reads triggers / variables / concurrencyPolicy /
+  # catchUpPolicy / status. Assignee + description bind at the TASK.md level.
   code-health:
     triggers:
       -
@@ -115,6 +121,188 @@ routines:
         cronExpression: "0 9 * * 1"
         label: "Weekly Monday morning"
         timezone: "UTC"
+
+  # ── Tier-A host detectors (SCHEDULE) ──────────────────────────────────────
+  # Tier-A host-detector
+  # assignee: ai-product-observer
+  # purpose: Atlas thread/tool-health — unrendered tags, fabricated data, tool failures
+  daily-atlas-health:
+    status: "paused"
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "0 10 * * *"
+        label: "Daily Atlas health"
+        timezone: "UTC"
+        enabled: false
+  # Tier-A host-detector
+  # assignee: platform-observer
+  # purpose: Grafana fired-vs-expected + poller-cursor drops
+  daily-alert-health:
+    status: "paused"
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "30 9 * * *"
+        label: "Daily alert health"
+        timezone: "UTC"
+        enabled: false
+  # Tier-A host-detector
+  # assignee: clinical-flow-observer
+  # purpose: Echo/phone failed transcripts, null insights, abort spikes
+  daily-echo-phone-health:
+    status: "paused"
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "0 10 * * *"
+        label: "Daily Echo/phone health"
+        timezone: "UTC"
+        enabled: false
+  # Tier-A host-detector
+  # assignee: clinical-flow-observer
+  # purpose: Consult forms never isComplete, confirm dead-ends
+  daily-consultation-flow-health:
+    status: "paused"
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "5 10 * * *"
+        label: "Daily consultation-flow health"
+        timezone: "UTC"
+        enabled: false
+  # Tier-A host-detector
+  # assignee: platform-observer
+  # purpose: Each external clinical tool returns expected shape
+  daily-clinical-tool-health:
+    status: "paused"
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "15 10 * * *"
+        label: "Daily clinical-tool health"
+        timezone: "UTC"
+        enabled: false
+  # Tier-A host-detector
+  # assignee: security-agent
+  # purpose: audit_log triggers installed, 401 spikes, controls still fire
+  daily-auth-integrity:
+    status: "paused"
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "45 9 * * *"
+        label: "Daily auth integrity"
+        timezone: "UTC"
+        enabled: false
+  # Tier-A host-detector
+  # assignee: ai-product-observer
+  # purpose: Judge + USD-cost deltas vs baseline
+  weekly-eval-drift:
+    status: "paused"
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "0 6 * * 2"
+        label: "Weekly eval drift"
+        timezone: "UTC"
+        enabled: false
+  # Tier-A host-detector
+  # assignee: ai-product-observer
+  # purpose: Breaker/park/rescue + ring review (consumes atlas-report.ts)
+  weekly-model-ring-review:
+    status: "paused"
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "0 9 * * 1"
+        label: "Weekly model-ring review"
+        timezone: "UTC"
+        enabled: false
+  # Tier-A host-detector
+  # assignee: security-agent
+  # purpose: Every router declares a tenant policy
+  weekly-authz-regression-audit:
+    status: "paused"
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "0 7 * * 2"
+        label: "Weekly authz-regression audit"
+        timezone: "UTC"
+        enabled: false
+  # Tier-A host-detector
+  # assignee: security-agent
+  # purpose: Deployed Autumn config vs autumn.config.ts
+  weekly-autumn-billing-drift:
+    status: "paused"
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "0 8 * * 2"
+        label: "Weekly Autumn billing drift"
+        timezone: "UTC"
+        enabled: false
+  # Tier-A host-detector
+  # assignee: clinical-flow-observer
+  # purpose: Consent re-prompt coverage + audit writes
+  weekly-consent-compliance-drift:
+    status: "paused"
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "0 9 * * 3"
+        label: "Weekly consent-compliance drift"
+        timezone: "UTC"
+        enabled: false
+  # Tier-A host-detector
+  # assignee: quebec-legal
+  # purpose: comp TGV status + RAMQ infolettre check
+  monthly-regulatory-drift:
+    status: "paused"
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "0 6 1 * *"
+        label: "Monthly regulatory drift"
+        timezone: "UTC"
+        enabled: false
+
+  # ── Tier-B sandbox routines (WEBHOOK / SCHEDULE) ──────────────────────────
+  # Tier-B sandbox-routine
+  # assignee: ai-product-observer
+  # purpose: Sweep Inbox for detector Issues lacking an RCA verdict
+  observer-issue-triage:
+    status: "paused"
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "0 11 * * *"
+        label: "Daily observer issue triage"
+        timezone: "UTC"
+        enabled: false
+  # Tier-B sandbox-routine
+  # assignee: clinical-flow-observer
+  # purpose: On echo-analyzer/STT/phone-config diff, assert bench-* ran + no ZDR-voiding key
+  analyzer-stt-zdr-gate:
+    status: "paused"
+    triggers:
+      -
+        kind: "webhook"
+        label: "echo-analyzer/STT/phone-config diff"
+        timezone: "UTC"
+        enabled: false
+  # Tier-B sandbox-routine
+  # assignee: e2e
+  # purpose: Playwright mobile suite on web/web-next change (also wants a daily synthetic)
+  mobile-webview-guard:
+    status: "paused"
+    triggers:
+      -
+        kind: "webhook"
+        label: "web/web-next change"
+        timezone: "UTC"
+        enabled: false
 sidebar:
   agents:
     - "engineering-lead"
