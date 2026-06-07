@@ -127,6 +127,8 @@ routines:
   # assignee: ai-product-observer
   # purpose: Atlas thread/tool-health — unrendered tags, fabricated data, tool failures;
   #          + external clinical tools return expected shape (merged from daily-clinical-tool-health)
+  #          + capability-gap detection (over-search / webSearch-fallback / missing-info -> upgrade suggestions)
+  # prompt SSOT: templates/pharmia/tasks/daily-atlas-tool-health/TASK.md
   daily-atlas-tool-health:
     status: "paused"
     triggers:
@@ -139,6 +141,7 @@ routines:
   # Tier-A host-detector
   # assignee: platform-observer
   # purpose: Grafana fired-vs-expected + poller-cursor drops
+  # prompt SSOT: templates/pharmia/tasks/daily-alert-health/TASK.md
   daily-alert-health:
     status: "paused"
     triggers:
