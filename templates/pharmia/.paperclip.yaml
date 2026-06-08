@@ -105,6 +105,34 @@ agents:
         dangerouslySkipPermissions: true
         model: "claude-opus-4-6"
       type: "claude_local"
+  growth-lead:
+    role: "cmo"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
+  market-intel:
+    role: "analyst"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
+  lead-scout:
+    role: "sdr"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
+  content:
+    role: "marketing"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
 company:
   attachmentMaxBytes: 10485760
 routines:
@@ -120,6 +148,13 @@ routines:
         kind: "schedule"
         cronExpression: "0 9 * * 1"
         label: "Weekly Monday morning"
+        timezone: "UTC"
+  weekly-growth-brief:
+    triggers:
+      -
+        kind: "schedule"
+        cronExpression: "0 13 * * 1"
+        label: "Weekly Monday afternoon"
         timezone: "UTC"
 
   # ── Tier-A host detectors (SCHEDULE) ──────────────────────────────────────
@@ -300,3 +335,7 @@ sidebar:
     - "ai-product-observer"
     - "clinical-flow-observer"
     - "platform-observer"
+    - "growth-lead"
+    - "market-intel"
+    - "lead-scout"
+    - "content"
