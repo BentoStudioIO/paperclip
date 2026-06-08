@@ -6,3 +6,4 @@ sh "$(git rev-parse --show-toplevel)/templates/pharmia/cli/install.sh" >/dev/nul
 command -v node >/dev/null 2>&1 || exit 0
 node "$(git rev-parse --show-toplevel)/scripts/sync-claude-agents.mjs" || true
 node "$(git rev-parse --show-toplevel)/scripts/sync-claude-skills.mjs" || true
+node "$(git rev-parse --show-toplevel)/scripts/sync-claude-rules.mjs" || true

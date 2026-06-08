@@ -1,0 +1,546 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# camofox — CLI wrapper for camofox-browser (Camoufox anti-detect Firefox REST API)
+# Server: ~/Documents/self-hosted/camofox-browser/
+# Port: 9377 (default)
+
+CAMOFOX_DIR="${CAMOFOX_DIR:-$HOME/Documents/self-hosted/camofox-browser}"
+CAMOFOX_PORT="${CAMOFOX_PORT:-9377}"
+CAMOFOX_URL="http://localhost:${CAMOFOX_PORT}"
+PID_FILE="/tmp/camofox.pid"
+LOG_FILE="/tmp/camofox.log"
+
+usage() {
+  cat <<'EOF'
+camofox — anti-detect Firefox browser server (Camoufox)
+
+Usage:
+  camofox start                       Start the server (background, port 9377)
+  camofox stop                        Stop the server (graceful if CAMOFOX_ADMIN_KEY set)
+  camofox restart                     Restart the server
+  camofox status                      Check if server is running
+  camofox health                      Hit /health endpoint
+  camofox metrics                     Fetch /metrics (Prometheus text format)
+  camofox logs [-n N] [--errors] [--follow]
+                                      Show server logs (default last 100 lines)
+  camofox diag [--tab TAB]            Composite health check (logs, state, proxy,
+                                      optional Cloudflare-challenge probe on a tab)
+  camofox whoami                      Print resolved userId/session + tab count
+
+  camofox tab <url>                   Create a tab and navigate to URL
+  camofox navigate <tabId> <url>      Navigate an existing tab to a new URL
+  camofox wait <tabId> [--timeout N] [--no-network]
+                                      Wait for page ready (default 10000ms, networkidle)
+  camofox eval <tabId> '<js-expr>'    Run arbitrary JS in tab; returns the result
+  camofox snap <tabId> [--offset N] [--screenshot]
+                                      Accessibility snapshot, paginated, optional PNG
+  camofox click <tabId> <ref>         Click element by ref (e1, e2, ...)
+  camofox type <tabId> <ref> <text>   Type text into element
+  camofox screenshot <tabId>          Take screenshot (saves to /tmp/)
+  camofox links <tabId>               Get all links on page
+  camofox close <tabId>               Close a tab
+  camofox tabs                        List active tabs
+
+  camofox cookies-export [--domain X] [--user USER]
+                                      Dump cookies (Playwright format) to stdout
+  camofox cookies-import <file|-> [--user USER]
+                                      Load cookies from file or stdin
+
+  camofox api <method> <path> [json-body]
+                                      Raw API call
+
+Environment:
+  CAMOFOX_PORT          Server port (default: 9377)
+  CAMOFOX_USER          Session userId (default: agent)
+  CAMOFOX_SESSION       Session key (default: default)
+  CAMOFOX_API_KEY       Bearer token for cookie import (remote / prod)
+  CAMOFOX_ADMIN_KEY     X-Admin-Key header for graceful /stop
+  PROXY_HOST/PROXY_PORT Proxy configuration
+
+EOF
+  exit 0
+}
+
+_is_running() {
+  curl -sf "${CAMOFOX_URL}/health" >/dev/null 2>&1
+}
+
+_require_running() {
+  if ! _is_running; then
+    echo "Error: camofox server is not running. Run: camofox start" >&2
+    exit 1
+  fi
+}
+
+_user_id() { echo "${CAMOFOX_USER:-agent}"; }
+_session_key() { echo "${CAMOFOX_SESSION:-default}"; }
+
+# Pretty-print stdin if valid JSON, else raw passthrough.
+_maybe_json() {
+  local buf
+  buf=$(cat)
+  if echo "$buf" | python3 -m json.tool 2>/dev/null; then
+    :
+  else
+    printf '%s\n' "$buf"
+  fi
+}
+
+cmd_start() {
+  if _is_running; then
+    echo "camofox already running on port ${CAMOFOX_PORT}"
+    return 0
+  fi
+
+  # Preflight: port not held
+  local port_pid
+  port_pid=$(lsof -ti:"${CAMOFOX_PORT}" 2>/dev/null || true)
+  if [ -n "$port_pid" ]; then
+    echo "Error: port ${CAMOFOX_PORT} is already held by pid(s): $port_pid" >&2
+    echo "Run 'lsof -i:${CAMOFOX_PORT}' to inspect, or free the port first." >&2
+    exit 1
+  fi
+
+  # Preflight: camoufox binary cache
+  if [ ! -d "$HOME/.cache/camoufox" ]; then
+    echo "Error: ~/.cache/camoufox/ not found — Camoufox binary is not installed." >&2
+    echo "Install Camoufox (see $CAMOFOX_DIR/README.md) before starting." >&2
+    exit 1
+  fi
+
+  echo "Starting camofox on port ${CAMOFOX_PORT}..."
+  cd "$CAMOFOX_DIR"
+  CAMOFOX_PORT="$CAMOFOX_PORT" nohup node --max-old-space-size=128 server.js \
+    > "$LOG_FILE" 2>&1 &
+  echo $! > "$PID_FILE"
+  # Wait for server to be ready
+  for _ in $(seq 1 15); do
+    if _is_running; then
+      echo "camofox started (pid $(cat "$PID_FILE"))"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Error: server failed to start within 15s. Last 20 log lines:" >&2
+  if [ -f "$LOG_FILE" ]; then
+    tail -n 20 "$LOG_FILE" >&2
+  else
+    echo "(no log file at $LOG_FILE)" >&2
+  fi
+  exit 1
+}
+
+cmd_stop() {
+  if [ -z "${CAMOFOX_ADMIN_KEY:-}" ]; then
+    echo "warn: CAMOFOX_ADMIN_KEY not set, graceful stop may 403 and fall through to SIGKILL" >&2
+  fi
+
+  if [ -f "$PID_FILE" ]; then
+    local pid
+    pid=$(cat "$PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      # Graceful shutdown requires X-Admin-Key
+      curl -sf -X POST "${CAMOFOX_URL}/stop" \
+        -H "X-Admin-Key: ${CAMOFOX_ADMIN_KEY:-}" >/dev/null 2>&1 || true
+      sleep 1
+      kill "$pid" 2>/dev/null || true
+      echo "camofox stopped (pid $pid)"
+    else
+      echo "camofox was not running (stale pid file)"
+    fi
+    rm -f "$PID_FILE"
+  else
+    echo "No pid file found. Trying to kill by port..."
+    local pid
+    pid=$(lsof -ti:"${CAMOFOX_PORT}" 2>/dev/null || true)
+    if [ -n "$pid" ]; then
+      # Best-effort graceful first
+      curl -sf -X POST "${CAMOFOX_URL}/stop" \
+        -H "X-Admin-Key: ${CAMOFOX_ADMIN_KEY:-}" >/dev/null 2>&1 || true
+      sleep 1
+      kill "$pid" 2>/dev/null || true
+      echo "Killed process $pid on port ${CAMOFOX_PORT}"
+    else
+      echo "camofox is not running"
+    fi
+  fi
+}
+
+cmd_status() {
+  if _is_running; then
+    echo "camofox is running on port ${CAMOFOX_PORT}"
+    curl -sf "${CAMOFOX_URL}/health" | _maybe_json
+  else
+    echo "camofox is not running"
+    exit 1
+  fi
+}
+
+cmd_health() {
+  _require_running
+  curl -sf "${CAMOFOX_URL}/health" | _maybe_json
+}
+
+cmd_metrics() {
+  _require_running
+  curl -s "${CAMOFOX_URL}/metrics"
+  echo
+}
+
+cmd_logs() {
+  local n=100
+  local errors_only=0
+  local follow=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n)         n="${2:?-n requires an argument}"; shift 2 ;;
+      --errors)   errors_only=1; shift ;;
+      --follow|-f) follow=1; shift ;;
+      *) echo "Unknown logs flag: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  if [ ! -f "$LOG_FILE" ]; then
+    echo "No log file found at $LOG_FILE" >&2
+    exit 1
+  fi
+
+  if [ "$follow" = "1" ]; then
+    if [ "$errors_only" = "1" ]; then
+      tail -n "$n" -f "$LOG_FILE" | grep --line-buffered -iE 'error|warn|fail'
+    else
+      tail -n "$n" -f "$LOG_FILE"
+    fi
+  else
+    if [ "$errors_only" = "1" ]; then
+      tail -n "$n" "$LOG_FILE" | grep -iE 'error|warn|fail' || true
+    else
+      tail -n "$n" "$LOG_FILE"
+    fi
+  fi
+}
+
+cmd_tab() {
+  _require_running
+  local url="${1:?Usage: camofox tab <url>}"
+  curl -sf -X POST "${CAMOFOX_URL}/tabs" \
+    -H 'Content-Type: application/json' \
+    -d "{\"url\": \"${url}\", \"userId\": \"$(_user_id)\", \"sessionKey\": \"$(_session_key)\"}" \
+    | _maybe_json
+}
+
+cmd_navigate() {
+  _require_running
+  local tab_id="${1:?Usage: camofox navigate <tabId> <url>}"
+  local url="${2:?Usage: camofox navigate <tabId> <url>}"
+  curl -sf -X POST "${CAMOFOX_URL}/tabs/${tab_id}/navigate" \
+    -H 'Content-Type: application/json' \
+    -d "{\"url\": \"${url}\", \"userId\": \"$(_user_id)\", \"sessionKey\": \"$(_session_key)\"}" \
+    | _maybe_json
+}
+
+cmd_wait() {
+  _require_running
+  local tab_id="${1:?Usage: camofox wait <tabId> [--timeout N] [--no-network]}"
+  shift
+  local timeout=10000
+  local wait_network=true
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --timeout)    timeout="${2:?--timeout requires ms}"; shift 2 ;;
+      --no-network) wait_network=false; shift ;;
+      *) echo "Unknown wait flag: $1" >&2; exit 1 ;;
+    esac
+  done
+  curl -sf -X POST "${CAMOFOX_URL}/tabs/${tab_id}/wait" \
+    -H 'Content-Type: application/json' \
+    -d "{\"userId\": \"$(_user_id)\", \"timeout\": ${timeout}, \"waitForNetwork\": ${wait_network}}" \
+    | _maybe_json
+}
+
+cmd_eval() {
+  _require_running
+  local tab_id="${1:?Usage: camofox eval <tabId> '<js-expression>'}"
+  local expr="${2:?Usage: camofox eval <tabId> '<js-expression>'}"
+  # JSON-encode the expression safely via python to handle quotes/newlines.
+  local payload
+  payload=$(python3 -c 'import json,sys; print(json.dumps({"userId": sys.argv[1], "expression": sys.argv[2]}))' "$(_user_id)" "$expr")
+  curl -sf -X POST "${CAMOFOX_URL}/tabs/${tab_id}/evaluate" \
+    -H 'Content-Type: application/json' \
+    -d "$payload" | _maybe_json
+}
+
+cmd_snap() {
+  _require_running
+  local tab_id="${1:?Usage: camofox snap <tabId> [--offset N] [--screenshot]}"
+  shift
+  local offset=0
+  local include_screenshot=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --offset)     offset="${2:?--offset requires a number}"; shift 2 ;;
+      --screenshot) include_screenshot=true; shift ;;
+      *) echo "Unknown snap flag: $1" >&2; exit 1 ;;
+    esac
+  done
+  local qs="userId=$(_user_id)&offset=${offset}"
+  if [ "$include_screenshot" = "true" ]; then
+    qs="${qs}&includeScreenshot=true"
+  fi
+  curl -sf "${CAMOFOX_URL}/tabs/${tab_id}/snapshot?${qs}" | _maybe_json
+}
+
+cmd_click() {
+  _require_running
+  local tab_id="${1:?Usage: camofox click <tabId> <ref>}"
+  local ref="${2:?Usage: camofox click <tabId> <ref>}"
+  curl -sf -X POST "${CAMOFOX_URL}/tabs/${tab_id}/click" \
+    -H 'Content-Type: application/json' \
+    -d "{\"ref\": \"${ref}\", \"userId\": \"$(_user_id)\"}" | _maybe_json
+}
+
+cmd_type() {
+  _require_running
+  local tab_id="${1:?Usage: camofox type <tabId> <ref> <text>}"
+  local ref="${2:?Usage: camofox type <tabId> <ref> <text>}"
+  local text="${3:?Usage: camofox type <tabId> <ref> <text>}"
+  local payload
+  payload=$(python3 -c 'import json,sys; print(json.dumps({"ref": sys.argv[1], "text": sys.argv[2], "userId": sys.argv[3]}))' "$ref" "$text" "$(_user_id)")
+  curl -sf -X POST "${CAMOFOX_URL}/tabs/${tab_id}/type" \
+    -H 'Content-Type: application/json' \
+    -d "$payload" | _maybe_json
+}
+
+cmd_screenshot() {
+  _require_running
+  local tab_id="${1:?Usage: camofox screenshot <tabId>}"
+  local outfile="/tmp/camofox-screenshot-${tab_id}-$(date +%s).png"
+  curl -sf "${CAMOFOX_URL}/tabs/${tab_id}/screenshot?userId=$(_user_id)" -o "$outfile"
+  echo "$outfile"
+}
+
+cmd_links() {
+  _require_running
+  local tab_id="${1:?Usage: camofox links <tabId>}"
+  curl -sf "${CAMOFOX_URL}/tabs/${tab_id}/links?userId=$(_user_id)" | _maybe_json
+}
+
+cmd_close() {
+  _require_running
+  local tab_id="${1:?Usage: camofox close <tabId>}"
+  curl -sf -X DELETE "${CAMOFOX_URL}/tabs/${tab_id}?userId=$(_user_id)" | _maybe_json
+}
+
+cmd_tabs() {
+  _require_running
+  curl -sf "${CAMOFOX_URL}/tabs?userId=$(_user_id)" | _maybe_json
+}
+
+cmd_cookies_export() {
+  _require_running
+  local user
+  user=$(_user_id)
+  local domain=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --domain) domain="${2:?--domain requires a value}"; shift 2 ;;
+      --user)   user="${2:?--user requires a value}"; shift 2 ;;
+      *) echo "Unknown cookies-export flag: $1" >&2; exit 1 ;;
+    esac
+  done
+  local url="${CAMOFOX_URL}/sessions/${user}/cookies"
+  if [ -n "$domain" ]; then
+    url="${url}?domain=${domain}"
+  fi
+  curl -sf "$url" | _maybe_json
+}
+
+cmd_cookies_import() {
+  _require_running
+  local src="${1:?Usage: camofox cookies-import <file|-> [--user USER]}"
+  shift || true
+  local user
+  user=$(_user_id)
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --user) user="${2:?--user requires a value}"; shift 2 ;;
+      *) echo "Unknown cookies-import flag: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  local body
+  if [ "$src" = "-" ]; then
+    body=$(cat)
+  else
+    if [ ! -f "$src" ]; then
+      echo "Error: file not found: $src" >&2
+      exit 1
+    fi
+    body=$(cat "$src")
+  fi
+
+  # If the body is a bare array, wrap as {cookies:[...]}. If already an object
+  # with a "cookies" field, pass through.
+  local wrapped
+  wrapped=$(python3 -c '
+import json,sys
+raw = sys.stdin.read()
+data = json.loads(raw)
+if isinstance(data, list):
+    out = {"cookies": data}
+elif isinstance(data, dict) and "cookies" in data:
+    out = data
+else:
+    sys.stderr.write("cookies payload must be an array or an object with a \"cookies\" field\n")
+    sys.exit(2)
+print(json.dumps(out))
+' <<<"$body")
+
+  local auth_header=()
+  if [ -n "${CAMOFOX_API_KEY:-}" ]; then
+    auth_header=(-H "Authorization: Bearer ${CAMOFOX_API_KEY}")
+  fi
+
+  curl -sf -X POST "${CAMOFOX_URL}/sessions/${user}/cookies" \
+    "${auth_header[@]}" \
+    -H 'Content-Type: application/json' \
+    -d "$wrapped" | _maybe_json
+}
+
+cmd_whoami() {
+  local user session tab_count="?"
+  user=$(_user_id)
+  session=$(_session_key)
+  if _is_running; then
+    tab_count=$(curl -sf "${CAMOFOX_URL}/tabs?userId=${user}" \
+      | python3 -c 'import json,sys
+try:
+    data = json.load(sys.stdin)
+    if isinstance(data, dict):
+        for key in ("tabs","items","data"):
+            if isinstance(data.get(key), list):
+                print(len(data[key])); sys.exit(0)
+        # fall back: count any list-valued field
+        for v in data.values():
+            if isinstance(v, list):
+                print(len(v)); sys.exit(0)
+        print(0)
+    elif isinstance(data, list):
+        print(len(data))
+    else:
+        print(0)
+except Exception:
+    print("?")' 2>/dev/null || echo "?")
+  else
+    tab_count="(server not running)"
+  fi
+  echo "userId:  ${user}"
+  echo "session: ${session}"
+  echo "tabs for this user: ${tab_count}"
+}
+
+cmd_diag() {
+  local probe_tab=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tab) probe_tab="${2:?--tab requires a tabId}"; shift 2 ;;
+      *) echo "Unknown diag flag: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  echo "=== camofox diag ==="
+  echo "url:   ${CAMOFOX_URL}"
+  echo "user:  $(_user_id)   session: $(_session_key)"
+  echo
+
+  echo "--- /health ---"
+  if _is_running; then
+    curl -sf "${CAMOFOX_URL}/health" | _maybe_json
+  else
+    echo "server is NOT running"
+  fi
+  echo
+
+  echo "--- proxy env ---"
+  echo "PROXY_HOST=${PROXY_HOST:-(unset)}"
+  echo "PROXY_PORT=${PROXY_PORT:-(unset)}"
+  echo "CAMOFOX_ADMIN_KEY=$([ -n "${CAMOFOX_ADMIN_KEY:-}" ] && echo set || echo unset)"
+  echo "CAMOFOX_API_KEY=$([ -n "${CAMOFOX_API_KEY:-}" ] && echo set || echo unset)"
+  echo
+
+  echo "--- last 50 error/warn/fail lines from ${LOG_FILE} ---"
+  if [ -f "$LOG_FILE" ]; then
+    tail -n 500 "$LOG_FILE" | grep -iE 'error|warn|fail' | tail -n 50 || echo "(none)"
+  else
+    echo "(no log file)"
+  fi
+  echo
+
+  if [ -n "$probe_tab" ]; then
+    _require_running
+    echo "--- Cloudflare challenge probe on tab ${probe_tab} ---"
+    local expr='({title: document.title, cfChallenge: !!document.querySelector(".cf-challenge"), cfForm: !!document.querySelector("#challenge-form"), justAMoment: (document.title||"").includes("Just a moment")})'
+    local payload
+    payload=$(python3 -c 'import json,sys; print(json.dumps({"userId": sys.argv[1], "expression": sys.argv[2]}))' "$(_user_id)" "$expr")
+    local result
+    result=$(curl -sf -X POST "${CAMOFOX_URL}/tabs/${probe_tab}/evaluate" \
+      -H 'Content-Type: application/json' \
+      -d "$payload" || echo '{"error":"probe failed"}')
+    echo "$result" | _maybe_json
+    local verdict
+    verdict=$(echo "$result" | python3 -c '
+import json,sys
+try:
+    r = json.load(sys.stdin).get("result") or {}
+    hit = bool(r.get("cfChallenge") or r.get("cfForm") or r.get("justAMoment"))
+    print("CLOUDFLARE CHALLENGE DETECTED" if hit else "no challenge detected")
+except Exception:
+    print("probe inconclusive")
+' 2>/dev/null || echo "probe inconclusive")
+    echo "verdict: $verdict"
+  fi
+}
+
+cmd_api() {
+  _require_running
+  local method="${1:?Usage: camofox api <GET|POST|DELETE> <path> [json-body]}"
+  local path="${2:?Usage: camofox api <method> <path> [json-body]}"
+  local body="${3:-}"
+  method=$(echo "$method" | tr '[:lower:]' '[:upper:]')
+  if [ -n "$body" ]; then
+    curl -sf -X "$method" "${CAMOFOX_URL}${path}" \
+      -H 'Content-Type: application/json' \
+      -d "$body" | _maybe_json
+  else
+    curl -sf -X "$method" "${CAMOFOX_URL}${path}" | _maybe_json
+  fi
+}
+
+case "${1:-help}" in
+  start)          cmd_start ;;
+  stop)           cmd_stop ;;
+  restart)        cmd_stop; sleep 1; cmd_start ;;
+  status)         cmd_status ;;
+  health)         cmd_health ;;
+  metrics)        cmd_metrics ;;
+  logs)           shift; cmd_logs "$@" ;;
+  diag)           shift; cmd_diag "$@" ;;
+  whoami)         cmd_whoami ;;
+  tab)            shift; cmd_tab "$@" ;;
+  navigate)       shift; cmd_navigate "$@" ;;
+  wait)           shift; cmd_wait "$@" ;;
+  eval)           shift; cmd_eval "$@" ;;
+  snap)           shift; cmd_snap "$@" ;;
+  click)          shift; cmd_click "$@" ;;
+  type)           shift; cmd_type "$@" ;;
+  screenshot)     shift; cmd_screenshot "$@" ;;
+  links)          shift; cmd_links "$@" ;;
+  close)          shift; cmd_close "$@" ;;
+  tabs)           cmd_tabs ;;
+  cookies-export) shift; cmd_cookies_export "$@" ;;
+  cookies-import) shift; cmd_cookies_import "$@" ;;
+  api)            shift; cmd_api "$@" ;;
+  help|-h|--help) usage ;;
+  *) echo "Unknown command: $1. Run 'camofox help' for usage." >&2; exit 1 ;;
+esac

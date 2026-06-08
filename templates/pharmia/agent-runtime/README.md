@@ -1,8 +1,24 @@
 # Pharmia agent runtime
 
 The deterministic image agents run in (Daytona snapshot). It bakes the toolchain +
-the [CLI toolkit](../cli/README.md) + the coding agents; **credentials are injected at
-runtime**, never baked.
+the [CLI toolkit](../cli/README.md) + the coding agents + the research toolkit;
+**credentials are injected at runtime**, never baked.
+
+## Baked tools
+
+Beyond the CLI toolkit + coding agents, the image bakes:
+
+- **Research/security binaries** — `gh` (GitHub), `gitleaks` (secret scan), `oha` (load test),
+  `bx` (Brave Search), plus `curl_cffi` (Python TLS-fingerprint HTTP client to bypass WAFs).
+- **Two browser engines, intentionally** — **Camoufox** (`camofox` / `agent-browser`, which is a
+  shim delegating to camofox) for anti-detect scraping of bot-protected sites, vendored from MIT
+  `@askjo/camofox-browser@1.5.2` with the Camoufox binary pre-baked at `~/.cache/camoufox`; and
+  **Chromium via Playwright** (pinned to PharmaMate's resolved version) for the e2e suite.
+  ⚠️ **4 GB RAM ceiling per sandbox** (`daytona-compose.yml`) — do NOT run both engines heavy in
+  parallel. Camoufox uses Xvfb (a virtual display) for full anti-detection.
+- The trimmed agent-sandbox [`environment-bindings.md`](../rules/environment-bindings.md) is baked
+  to `/home/agent/.claude/rules/` (SSOT = `templates/pharmia/rules/`, synced to the host via
+  `scripts/sync-claude-rules.mjs`).
 
 ## Access set (all agents identical — locked 2026-06-08, "option B + comp")
 
@@ -20,7 +36,8 @@ One shared set for every agent (simple now; tier later if needed):
 ## Injected at runtime (not baked)
 
 `GITHUB_APP_*` (or git token, repo-wide write — main/canary held back by the hook),
-`ANTHROPIC_API_KEY`, `LOKI_{DEV,QA,CANARY}_TOKEN`, `PG_{DEV,QA}_*` (rw) + `PG_CANARY_*`
+`ANTHROPIC_API_KEY`, **`BRAVE_SEARCH_API_KEY`** (required by `bx`; source
+`~/.config/brave-search/api_key`), `LOKI_{DEV,QA,CANARY}_TOKEN`, `PG_{DEV,QA}_*` (rw) + `PG_CANARY_*`
 (the **read-only** role), and `~/.config/<tool>/` for `ol` / `langfuse` / `twenty` /
 `comp` (rw) / `dokploy` (bento dev/qa only), plus **`AUTUMN_SECRET_KEY` (LIVE `am_sk_live`)
 + `AUTUMN_URL`** for real MRR via the `autumn` CLI. The `autumn` script reads

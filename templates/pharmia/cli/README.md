@@ -4,7 +4,8 @@
 Migrated out of `~/.local/bin` so they are versioned, shared, and bakeable into the
 Daytona agent sandbox. (Compiled binaries — `gh`, `bx`, `oha`, `gitleaks`, `maverick`,
 etc. — and personal tools — `yt2mp3`, `sp2mp3`, `gcal` — are intentionally **not** here;
-install those normally.)
+install those normally. The agent image bakes `gh`/`bx`/`oha`/`gitleaks` as binaries plus the
+Camoufox browser server via the Dockerfile; the `camofox` CLI wrapper ships here in the toolkit.)
 
 ## Edit / install / bake workflow
 
@@ -62,6 +63,7 @@ Services / misc:
 - `shlink` — Shlink short links + visit analytics + QR.
 - `cfdns` — Cloudflare DNS (always `proxied:false`). **prod-capable.**
 - `search-ai-sessions "query"` — search prior Claude/OpenCode sessions.
+- `camofox` — anti-detect Firefox (Camoufox) REST wrapper (`start`/`tab`/`snap`/`click`/`screenshot`). Honors `$CAMOFOX_DIR` (the agent image sets it to the baked `/opt/camofox-browser`).
 
 ## Daytona image bake (snippet)
 
