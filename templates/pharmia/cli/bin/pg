@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# pg — Connect to Pharmia Postgres databases via SSH tunnel + pgcli
+# Usage: pg <env> [database] [--write] [--timeout <duration>] [query]
+#   env:       dev | qa | canary
+#   database:  app (default) | mastra | grafana
+#   --write:   disable read-only safety guard (allows INSERT/UPDATE/DELETE/DDL)
+#   --timeout: override statement_timeout (e.g. 5min, 30s, "none" to disable). Default: 60s
+#   query:     optional SQL — if provided, runs non-interactively via docker exec
+
+set -euo pipefail
+
+# -----------------------------------------------------------------------------
+# Secrets: read PG_<ENV>_PASSWORD / _MASTRA_PASSWORD / _GRAFANA_PASSWORD from the
+# environment (set in ~/.zshenv today; a Vaultwarden injector later). Optional
+# back-compat: source ~/.config/pg/secrets.env if it exists. NOTHING hardcoded.
+# -----------------------------------------------------------------------------
+SECRETS_FILE="${HOME}/.config/pg/secrets.env"
+# shellcheck disable=SC1090
+[[ -f "$SECRETS_FILE" ]] && source "$SECRETS_FILE"
+
+# -----------------------------------------------------------------------------
+# Flag parsing. Positional: <env> [database] [query]. Flags may appear anywhere.
+# -----------------------------------------------------------------------------
+WRITE_MODE=0
+TIMEOUT="60s"
+POSITIONAL=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --write)
+      WRITE_MODE=1
+      shift
+      ;;
+    --timeout)
+      TIMEOUT="${2:-}"
+      if [[ -z "$TIMEOUT" ]]; then
+        echo "Error: --timeout requires a value (e.g. 5min, 30s, none)" >&2
+        exit 2
+      fi
+      shift 2
+      ;;
+    --timeout=*)
+      TIMEOUT="${1#*=}"
+      shift
+      ;;
+    -h|--help|--version)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do POSITIONAL+=("$1"); shift; done
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+set -- "${POSITIONAL[@]:-}"
+
+ENV="${1:-}"
+DB="${2:-app}"
+QUERY="${3:-}"
+
+# Read query from stdin if no query arg was given and stdin is piped (not a TTY).
+# Lets you do: echo "SELECT 1" | pg dev app
+if [[ -z "$QUERY" && ! -t 0 && -n "$ENV" && "$ENV" != "-h" && "$ENV" != "--help" && "$ENV" != "--version" ]]; then
+  QUERY=$(cat)
+fi
+
+if [[ -z "$ENV" ]] || [[ "$ENV" == "-h" ]] || [[ "$ENV" == "--help" ]]; then
+  cat <<'EOF'
+Usage: pg <env> [database] [--write] [--timeout <duration>] [query]
+
+Environments: dev, qa, canary
+Databases:    app (default), mastra, grafana
+
+Safety defaults (non-interactive queries):
+  - read-only:      SET default_transaction_read_only = on  (bypass with --write)
+  - statement timeout: 60s                                  (override with --timeout, disable with --timeout none)
+
+Interactive pgcli sessions inherit the same guards via PGOPTIONS.
+
+Examples:
+  pg dev                                        # interactive pgcli on dev (read-only)
+  pg canary mastra                              # interactive pgcli on canary mastra
+  pg canary app "SELECT count(*) FROM ba_user"  # non-interactive read
+  pg dev app --write "UPDATE foo SET x=1"       # write (bypass read-only guard)
+  pg qa app --timeout 5min "SELECT ..."         # extended timeout
+  pg qa app --timeout none "SELECT ..."         # no timeout
+EOF
+  exit 0
+fi
+
+if [[ "$ENV" == "--version" ]]; then
+  echo "pg wrapper"
+  exit 0
+fi
+
+# Environment → SSH host + Dokploy appName + passwords (from secrets.env)
+case "$ENV" in
+  dev)
+    SSH_HOST="bento"
+    APP_NAME="pharmia-dev-kwvuth"
+    PG_USER="postgres"
+    PG_PASS="${PG_DEV_PASSWORD:-}"
+    MASTRA_PASS="${PG_DEV_MASTRA_PASSWORD:-}"
+    GF_PASS="${PG_DEV_GRAFANA_PASSWORD:-}"
+    ;;
+  qa)
+    SSH_HOST="pharmia-qa"
+    APP_NAME="pharmia-qa-xdb2q7"
+    PG_USER="postgres"
+    PG_PASS="${PG_QA_PASSWORD:-}"
+    MASTRA_PASS="${PG_QA_MASTRA_PASSWORD:-}"
+    GF_PASS="${PG_QA_GRAFANA_PASSWORD:-}"
+    ;;
+  canary)
+    SSH_HOST="prod"
+    APP_NAME="pharmia-canary-46uhia"
+    PG_USER="postgres"
+    PG_PASS="${PG_CANARY_PASSWORD:-}"
+    MASTRA_PASS="${PG_CANARY_MASTRA_PASSWORD:-}"
+    GF_PASS="${PG_CANARY_GRAFANA_PASSWORD:-}"
+    ;;
+  *)
+    echo "Unknown environment: $ENV (use dev, qa, or canary)" >&2
+    exit 1
+    ;;
+esac
+
+# Database → container service name + port + password
+case "$DB" in
+  app|db)
+    SERVICE="db"
+    PORT=5432
+    PASSWORD="$PG_PASS"
+    DB_NAME="postgres"
+    ;;
+  mastra)
+    SERVICE="mastra_db"
+    PORT=5431
+    PASSWORD="$MASTRA_PASS"
+    DB_NAME="postgres"
+    ;;
+  grafana)
+    SERVICE="pg_grafana"
+    PORT=5433
+    PASSWORD="$GF_PASS"
+    PG_USER="grafana"
+    DB_NAME="grafana"
+    ;;
+  *)
+    echo "Unknown database: $DB (use app, mastra, or grafana)" >&2
+    exit 1
+    ;;
+esac
+
+CONTAINER="${APP_NAME}-${SERVICE}-1"
+
+# -----------------------------------------------------------------------------
+# Build safety prelude. For non-interactive queries we prepend SQL SET
+# statements so Postgres enforces them before the user's query runs. For
+# interactive pgcli we use PGOPTIONS which Postgres applies at connection.
+# -----------------------------------------------------------------------------
+SQL_PRELUDE=""
+PGOPTIONS_PARTS=()
+
+if [[ "$WRITE_MODE" -eq 0 ]]; then
+  SQL_PRELUDE+="SET default_transaction_read_only = on;"$'\n'
+  PGOPTIONS_PARTS+=("-c" "default_transaction_read_only=on")
+fi
+
+if [[ "$TIMEOUT" != "none" ]]; then
+  SQL_PRELUDE+="SET statement_timeout = '${TIMEOUT}';"$'\n'
+  PGOPTIONS_PARTS+=("-c" "statement_timeout=${TIMEOUT}")
+fi
+
+if [[ -n "$QUERY" ]]; then
+  # Non-interactive: run query via docker exec + psql inside the container.
+  # Pipe the query through stdin (psql -f -); base64 over SSH preserves all
+  # literal bytes (quotes, newlines, backslashes). Safety prelude is prepended
+  # to the query in the same session so SET takes effect before user SQL runs.
+  FULL_QUERY="${SQL_PRELUDE}${QUERY}"
+  B64_QUERY=$(printf '%s' "$FULL_QUERY" | base64 -w0)
+  ssh "$SSH_HOST" "echo '$B64_QUERY' | base64 -d | sudo docker exec -i $CONTAINER psql -U $PG_USER -d $DB_NAME -v ON_ERROR_STOP=1 -f -"
+else
+  # Interactive: resolve container IP and open pgcli via SSH tunnel.
+  # PGOPTIONS is picked up by libpq on connect, so the read-only guard and
+  # statement timeout apply to every statement in the pgcli session.
+  CONTAINER_IP=$(ssh "$SSH_HOST" "sudo docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' '$CONTAINER'" 2>/dev/null)
+
+  if [[ -z "$CONTAINER_IP" ]]; then
+    echo "Error: Could not resolve IP for container $CONTAINER on $SSH_HOST" >&2
+    echo "Is the container running? Check: ssh $SSH_HOST sudo docker ps --filter name=$CONTAINER" >&2
+    exit 1
+  fi
+
+  PG_URL="postgresql://${PG_USER}:${PASSWORD}@${CONTAINER_IP}:${PORT}/${DB_NAME}"
+
+  # Build PGOPTIONS string (space-joined -c flags).
+  PGOPTIONS_STR=""
+  if [[ ${#PGOPTIONS_PARTS[@]} -gt 0 ]]; then
+    PGOPTIONS_STR="${PGOPTIONS_PARTS[*]}"
+  fi
+
+  MODE_BANNER="read-only"
+  [[ "$WRITE_MODE" -eq 1 ]] && MODE_BANNER="WRITE"
+  echo "Connecting to $ENV/$DB ($CONTAINER @ $CONTAINER_IP:$PORT) via $SSH_HOST [${MODE_BANNER}, timeout=${TIMEOUT}]..." >&2
+
+  if [[ -n "$PGOPTIONS_STR" ]]; then
+    PGOPTIONS="$PGOPTIONS_STR" exec pgcli --ssh-tunnel "root@$SSH_HOST" "$PG_URL"
+  else
+    exec pgcli --ssh-tunnel "root@$SSH_HOST" "$PG_URL"
+  fi
+fi

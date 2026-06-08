@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+# langfuse wrapper — intercepts ergonomics, passes through to npm langfuse-cli
+# Takes precedence via ~/.local/bin ordering ahead of ~/.nvm/.../bin in PATH.
+
+set -euo pipefail
+
+LANGFUSE_NPM="/home/vortex/.nvm/versions/node/v24.13.0/lib/node_modules/langfuse-cli/bin/langfuse.mjs"
+
+if [[ ! -x "$LANGFUSE_NPM" && ! -f "$LANGFUSE_NPM" ]]; then
+  echo "langfuse: npm binary not found at $LANGFUSE_NPM" >&2
+  exit 127
+fi
+
+# ---------- helpers ----------
+
+# Parse --since <duration> to a UTC ISO8601 timestamp via `date -d "<duration> ago"`.
+# Accepts 30m, 2h, 24h, 7d, etc. Mirrors loki/tempo syntax.
+_since_to_from_ts() {
+  local since="$1"
+  local spec
+  case "$since" in
+    *m) spec="${since%m} minutes ago" ;;
+    *h) spec="${since%h} hours ago" ;;
+    *d) spec="${since%d} days ago" ;;
+    *) spec="$since ago" ;;
+  esac
+  date -u -d "$spec" -Iseconds 2>/dev/null || {
+    echo "langfuse: invalid --since '$since'" >&2
+    return 1
+  }
+}
+
+# Preprocess args for list commands: translate --since, inject default --limit,
+# inject default --fields core,metrics on `traces list` unless --full is set.
+_preprocess_list_args() {
+  local is_traces_list="$1"; shift
+  local out=()
+  local has_limit=0 has_from=0 has_fields=0 full=0
+  local i=0
+  local args=("$@")
+  while (( i < ${#args[@]} )); do
+    local a="${args[$i]}"
+    case "$a" in
+      --since)
+        local dur="${args[$((i+1))]:-}"
+        if [[ -z "$dur" ]]; then echo "langfuse: --since needs a value" >&2; return 1; fi
+        local ts
+        ts=$(_since_to_from_ts "$dur") || return 1
+        out+=(--from-timestamp "$ts")
+        has_from=1
+        i=$((i+2))
+        continue
+        ;;
+      --since=*)
+        local dur="${a#--since=}"
+        local ts
+        ts=$(_since_to_from_ts "$dur") || return 1
+        out+=(--from-timestamp "$ts")
+        has_from=1
+        ;;
+      --full)
+        full=1
+        ;;
+      --limit|--limit=*)
+        has_limit=1
+        out+=("$a")
+        if [[ "$a" == "--limit" ]]; then
+          i=$((i+1)); out+=("${args[$i]}")
+        fi
+        ;;
+      --from-timestamp|--from-timestamp=*)
+        has_from=1; out+=("$a")
+        if [[ "$a" == "--from-timestamp" ]]; then
+          i=$((i+1)); out+=("${args[$i]}")
+        fi
+        ;;
+      --fields|--fields=*)
+        has_fields=1; out+=("$a")
+        if [[ "$a" == "--fields" ]]; then
+          i=$((i+1)); out+=("${args[$i]}")
+        fi
+        ;;
+      *)
+        out+=("$a")
+        ;;
+    esac
+    i=$((i+1))
+  done
+  (( has_limit )) || out+=(--limit 100)
+  if (( is_traces_list )) && (( ! has_fields )) && (( ! full )); then
+    out+=(--fields core,metrics)
+  fi
+  printf '%s\n' "${out[@]}"
+}
+
+# Detect the triple "api <resource> list" to apply list preprocessing.
+# Returns 0 if list-like, sets REPLY_RESOURCE.
+_is_list_cmd() {
+  [[ "${1:-}" == "api" && "${3:-}" == "list" ]]
+}
+
+# ---------- commands ----------
+
+_cmd_trace_tree() {
+  local raw=0 tid=""
+  while (( $# )); do
+    case "$1" in
+      --raw) raw=1 ;;
+      -*) echo "langfuse trace-tree: unknown flag $1" >&2; return 2 ;;
+      *) tid="$1" ;;
+    esac
+    shift
+  done
+  if [[ -z "$tid" ]]; then
+    echo "Usage: langfuse trace-tree <trace-id> [--raw]" >&2
+    return 2
+  fi
+
+  local trace_json
+  trace_json=$("$LANGFUSE_NPM" api traces get "$tid" --json)
+
+  if (( raw )); then
+    echo "$trace_json" | jq '.'
+    return 0
+  fi
+
+  # Root line
+  jq -r '.body | "TRACE  \(.name // "(no-name)")  \(.id)  latency=\(.latency // 0)ms  cost=\(.totalCost // 0)"' <<<"$trace_json"
+
+  # Build tree from the inline .body.observations array (full list, no extra API call).
+  # Root = any observation whose parent is null OR points to an ID not in the list
+  # (typically the trace itself). Remapped to "__root__" for the walk.
+  jq -r '
+    (.body.observations // []) as $all
+    | ($all | map({key: (.id), value: true}) | from_entries) as $ids
+    | ($all | map(
+        if (.parentObservationId == null) or ($ids[.parentObservationId] // false | not)
+        then .parentObservationId = "__root__"
+        else . end
+      )) as $norm
+    | ($norm
+        | group_by(.parentObservationId)
+        | map({key: .[0].parentObservationId, value: .})
+        | from_entries) as $children
+    | def walk($id; $depth):
+        ($children[$id] // [])
+        | sort_by(.startTime // "")
+        | .[] as $n
+        | (
+            (("  " * ($depth+1))
+             + ($n.name // "(unnamed)")
+             + "  "
+             + ($n.type // "?")
+             + "  "
+             + (((($n.latency // 0) | tonumber) | tostring) + "ms")
+             + "  "
+             + ($n.level // "DEFAULT")
+             + (if ($n.calculatedTotalCost // $n.totalCost // 0) != 0
+                then "  $" + ((($n.calculatedTotalCost // $n.totalCost) | tostring))
+                else "" end))
+          ),
+          walk($n.id; $depth+1);
+    walk("__root__"; 0)
+  ' <<<"$trace_json"
+}
+
+# Backport an extra closing-brace fix: remove leftover argjson reference below if still present
+
+
+_cmd_search_io() {
+  local q="" tags="" since="" limit="200"
+  while (( $# )); do
+    case "$1" in
+      --tags) tags="$2"; shift 2 ;;
+      --tags=*) tags="${1#--tags=}"; shift ;;
+      --since) since="$2"; shift 2 ;;
+      --since=*) since="${1#--since=}"; shift ;;
+      --limit) limit="$2"; shift 2 ;;
+      --limit=*) limit="${1#--limit=}"; shift ;;
+      -*) echo "langfuse search-io: unknown flag $1" >&2; return 2 ;;
+      *) q="$1"; shift ;;
+    esac
+  done
+  if [[ -z "$q" ]]; then
+    echo "Usage: langfuse search-io <substring> [--tags T,T] [--since 24h] [--limit 200]" >&2
+    return 2
+  fi
+
+  local args=(api traces list --fields core,io --limit "$limit" --json)
+  if [[ -n "$since" ]]; then
+    local ts; ts=$(_since_to_from_ts "$since") || return 1
+    args+=(--from-timestamp "$ts")
+  fi
+  if [[ -n "$tags" ]]; then
+    # --tags expects repeated flag? npm binary accepts comma list; pass as-is.
+    IFS=',' read -r -a tarr <<<"$tags"
+    for t in "${tarr[@]}"; do args+=(--tags "$t"); done
+  fi
+
+  local resp
+  resp=$("$LANGFUSE_NPM" "${args[@]}")
+  jq -r --arg q "$q" '
+    .body.data[]
+    | . as $t
+    | (($t.input // "") | tostring) as $in
+    | (($t.output // "") | tostring) as $out
+    | select(($in | contains($q)) or ($out | contains($q)))
+    | ($in + " " + $out) as $hay
+    | ($hay | ascii_downcase) as $hl
+    | ($q | ascii_downcase) as $ql
+    | ($hl | index($ql)) as $pos
+    | (if $pos == null then $hay[0:120]
+       else $hay[([$pos-40,0] | max):($pos+80)] end
+       | gsub("\\s+"; " ")) as $snippet
+    | "\($t.id)\t\($t.name // "")\t\($snippet)"
+  ' <<<"$resp"
+}
+
+_cmd_to_loki() {
+  local env="canary" tid=""
+  while (( $# )); do
+    case "$1" in
+      --env) env="$2"; shift 2 ;;
+      --env=*) env="${1#--env=}"; shift ;;
+      -*) echo "langfuse to-loki: unknown flag $1" >&2; return 2 ;;
+      *) tid="$1"; shift ;;
+    esac
+  done
+  if [[ -z "$tid" ]]; then
+    echo "Usage: langfuse to-loki <trace-id> [--env canary]" >&2
+    return 2
+  fi
+  local resp sid uid ts
+  resp=$("$LANGFUSE_NPM" api traces get "$tid" --json)
+  sid=$(jq -r '.body.sessionId // ""' <<<"$resp")
+  uid=$(jq -r '.body.userId // ""' <<<"$resp")
+  ts=$(jq -r '.body.timestamp // ""' <<<"$resp")
+
+  echo "# trace:    $tid"
+  echo "# timestamp:$ts"
+  [[ -n "$uid" ]] && echo "# userId:   $uid"
+  [[ -n "$sid" ]] && echo "# sessionId:$sid"
+  echo
+  if [[ -n "$sid" ]]; then
+    echo "loki $env search \"$sid\" --since 1h"
+  elif [[ -n "$uid" ]]; then
+    echo "loki $env search \"$uid\" --since 1h"
+  else
+    echo "loki $env search \"$tid\" --since 1h"
+  fi
+  echo "tempo $env trace $tid"
+}
+
+_cmd_obs() {
+  local tid="${1:-}"
+  if [[ -z "$tid" ]]; then
+    echo "Usage: langfuse obs <trace-id>" >&2
+    return 2
+  fi
+  shift
+  # Try v2 first, fall back to v1.
+  if ! "$LANGFUSE_NPM" api observations-v2s list --trace-id "$tid" --limit 500 "$@" 2>/dev/null; then
+    exec "$LANGFUSE_NPM" api observations list --trace-id "$tid" --limit 100 "$@"
+  fi
+}
+
+_print_wrapper_help() {
+  cat <<'EOF'
+
+Wrapper extensions (in ~/.local/bin/langfuse):
+
+  trace-tree <trace-id> [--raw]
+      Fetch trace + observations, print parent/child tree.
+      NAME  TYPE  DURATION  LEVEL  [COST]
+
+  search-io <substring> [--tags T,T] [--since 24h] [--limit 200]
+      Client-side text search across trace input/output.
+      Prints: traceId\tname\tmatched-snippet
+
+  to-loki <trace-id> [--env canary]
+      Print ready-to-run `loki <env> search ...` + `tempo <env> trace ...`
+      using the trace's sessionId / userId.
+
+  obs <trace-id>
+      Shortcut for `api observations-v2s list --trace-id <id> --limit 500`
+      (auto-falls back to v1 on self-hosted).
+
+Ergonomics applied to any `api <resource> list`:
+  --since <30m|2h|24h|7d>    → translated to --from-timestamp
+  default --limit 100        (cheap protection vs unfiltered 422)
+  traces list adds --fields core,metrics unless --full is given
+
+Anything not intercepted is passed through verbatim to the npm binary at:
+  /home/vortex/.nvm/versions/node/v24.13.0/lib/node_modules/langfuse-cli/bin/langfuse.mjs
+EOF
+}
+
+# ---------- dispatch ----------
+
+if (( $# == 0 )); then
+  exec "$LANGFUSE_NPM"
+fi
+
+case "$1" in
+  trace-tree) shift; _cmd_trace_tree "$@"; exit $? ;;
+  search-io)  shift; _cmd_search_io  "$@"; exit $? ;;
+  to-loki)    shift; _cmd_to_loki    "$@"; exit $? ;;
+  obs)        shift; _cmd_obs        "$@"; exit $? ;;
+  --help|-h|help)
+    "$LANGFUSE_NPM" --help || true
+    _print_wrapper_help
+    exit 0
+    ;;
+esac
+
+# List-command ergonomics: api <resource> list ...
+if _is_list_cmd "$@"; then
+  is_traces_list=0
+  if [[ "${2:-}" == "traces" ]]; then is_traces_list=1; fi
+  # Extract the head 3 args, rest goes to preprocessor.
+  head1="$1"; head2="$2"; head3="$3"
+  shift 3
+  mapfile -t processed < <(_preprocess_list_args "$is_traces_list" "$@")
+  exec "$LANGFUSE_NPM" "$head1" "$head2" "$head3" "${processed[@]}"
+fi
+
+exec "$LANGFUSE_NPM" "$@"

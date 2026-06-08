@@ -1,0 +1,426 @@
+#!/usr/bin/env bash
+# pharmia-git — git/release workflow helper for the Pharmia monorepo.
+#
+# Encodes the CTO's recurring git ceremonies as one self-documenting CLI so a
+# zero-context agent (or a phone-bound human) does not have to remember the
+# safety rules each time:
+#   - branch → environment auto-deploy topology (Dokploy git webhook)
+#   - "what's REALLY extra between dev and canary" (squash-merge aware)
+#   - fast-forward fan-out across env branches (never force)
+#   - worktree confinement (did commits leak onto dev/canary/main?)
+#   - per-branch deploy status (origin == deployed SHA for auto-deploy envs)
+#
+# SAFETY RULES BAKED IN (authoritative source: ~/.claude/CLAUDE.md "Git, Push &
+# PR" + repo AGENTS.md "Deployment"):
+#   - Linear history only. Fast-forward (`--ff-only`) merges; never merge commits.
+#   - ALWAYS `git fetch origin` before reasoning about ahead/behind.
+#   - NEVER `--force` / `--force-with-lease` / `--no-verify` on shared branches.
+#       The ONE sanctioned exception is a CTO-authorized canary promotion:
+#       `git push --force-with-lease=canary:<prior-sha> origin <target>:canary`.
+#       This CLI never runs that for you — it only mutates via clean fast-forwards.
+#
+# AGENT NOTE — ALWAYS IMPROVE THIS CLI WHEN INFO IS MISSING. If you ran a
+# subcommand and still had to reach for raw `git` plumbing or another tool to
+# answer the release question, that's a gap. Fix it here in the same task so the
+# next zero-context agent gets the answer from one invocation.
+#
+# Not git-tracked — lives in ~/.local/bin. Default read-only; only `ff-all`
+# mutates, and it confirms first and never forces.
+
+set -euo pipefail
+
+# ── Branch → target environment map (Dokploy git-webhook auto-deploy) ─────────
+# Pushing a branch auto-deploys to its matching environment. Anything not in
+# this map is a feature/topic branch with no auto-deploy target.
+declare -A ENV_MAP=(
+  [dev]=dev
+  [qa]=qa
+  [canary]=canary
+  [main]=prod
+)
+# Iteration order for fan-out / topology (promotion order).
+ENV_BRANCHES=(dev qa canary main)
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+
+# ── colours (TTY only) ────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+  C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+  C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YEL=$'\033[33m'; C_CYN=$'\033[36m'
+else
+  C_RESET=; C_DIM=; C_BOLD=; C_RED=; C_GRN=; C_YEL=; C_CYN=
+fi
+red()  { printf '%s%s%s' "$C_RED" "$1" "$C_RESET"; }
+grn()  { printf '%s%s%s' "$C_GRN" "$1" "$C_RESET"; }
+yel()  { printf '%s%s%s' "$C_YEL" "$1" "$C_RESET"; }
+cyn()  { printf '%s%s%s' "$C_CYN" "$1" "$C_RESET"; }
+dim()  { printf '%s%s%s' "$C_DIM" "$1" "$C_RESET"; }
+
+die() { echo "${C_RED}error:${C_RESET} $*" >&2; exit 1; }
+
+env_for() {
+  # branch -> env label (or "—" for non-deploy branches)
+  local b="$1"
+  echo "${ENV_MAP[$b]:-—}"
+}
+
+# git fetch origin (quiet); skip with PHARMIA_GIT_NO_FETCH=1 for offline/tests.
+fetch_origin() {
+  [[ "${PHARMIA_GIT_NO_FETCH:-0}" == "1" ]] && return 0
+  echo "$(dim "fetching origin…")" >&2
+  git -C "$REPO_ROOT" fetch --quiet origin 2>/dev/null || \
+    echo "$(yel "warn: git fetch origin failed (continuing with stale refs)")" >&2
+}
+
+show_help() {
+  cat <<EOF
+${C_BOLD}pharmia-git${C_RESET} — git/release workflow helper for the Pharmia monorepo.
+
+${C_BOLD}USAGE${C_RESET}
+  pharmia-git topology                      worktrees ↔ branches ↔ target env
+  pharmia-git extra <a> <b>                 commits on <a> not on <b> (squash-aware)
+  pharmia-git ff-all [--from dev] [--yes]   fast-forward fan-out across env branches
+  pharmia-git confine <worktree> <branch>   verify a worktree's commits stay on its branch
+  pharmia-git deploy-status <branch>        branch→env + ahead/behind origin vs HEAD
+
+${C_BOLD}ENV TOPOLOGY${C_RESET} (Dokploy git-webhook auto-deploy — push branch ⇒ deploy)
+  dev    → dev
+  qa     → qa
+  canary → canary   ${C_DIM}(live box; routinely diverges via hotfixes)${C_RESET}
+  main   → prod
+  ${C_DIM}Any other branch = feature/topic branch, no auto-deploy target.${C_RESET}
+  ${C_DIM}For auto-deploy envs the DEPLOYED sha ≈ origin/<branch>.${C_RESET}
+
+${C_BOLD}SAFETY RULES${C_RESET} (baked in — see ~/.claude/CLAUDE.md "Git, Push & PR")
+  • Linear history only — fast-forward merges, never merge commits.
+  • ALWAYS \`git fetch origin\` first (this CLI does it for you).
+  • NEVER --force / --force-with-lease / --no-verify on shared branches.
+    The ${C_BOLD}ONE${C_RESET} sanctioned exception is a CTO-authorized canary promotion:
+      ${C_DIM}git push --force-with-lease=canary:<prior-sha> origin <target>:canary${C_RESET}
+    This CLI ${C_BOLD}never${C_RESET} runs that — \`ff-all\` only pushes clean fast-forwards
+    and skips anything that isn't one.
+
+${C_BOLD}SUBCOMMANDS${C_RESET}
+  topology
+      Table of \`git worktree list\` rows joined to their checked-out branch and
+      that branch's target env. Spots two worktrees on the same branch, detached
+      HEADs, and which worktrees map to a live deploy.
+
+  extra <a> <b>
+      Commits reachable from <a> but not <b> — WITH squash-merge dedup via
+      \`git patch-id\`. If <a> was squash-merged into <b>, the raw
+      \`git log b..a\` shows phantom commits; this filters those out by patch
+      identity so you see only the commits whose CHANGES aren't already in <b>.
+      Accepts local or remote refs (e.g. \`extra dev origin/canary\`).
+
+  ff-all [--from <branch>] [--yes]
+      Fast-forward fan-out. For each env branch (qa, canary, main) other than
+      --from (default: dev): if <from> fast-forwards cleanly onto it, FF the
+      local branch and (after confirm) push. Any branch that is NOT a clean
+      fast-forward is SKIPPED and listed — never forced. Read-only preview
+      unless you confirm. --yes skips the prompt (still never forces).
+
+  confine <worktree> <branch>
+      Verify a worktree's work stays on its own branch. Refuses (exit 2) if any
+      commit unique to <branch> has also landed on a shared env branch
+      (dev/canary/main) — i.e. work leaked off-branch. Warns on detached HEAD or
+      branch mismatch.
+
+  deploy-status <branch>
+      Branch → env, plus ahead/behind of local HEAD vs origin/<branch>. For an
+      auto-deploy branch, origin/<branch> ≈ the deployed SHA, so "ahead" = local
+      commits not yet deployed, "behind" = deploy is ahead of you (someone else
+      pushed / hotfix on canary).
+
+${C_BOLD}EXAMPLES${C_RESET}
+  pharmia-git topology
+  pharmia-git extra dev canary
+  pharmia-git deploy-status fix/tool-reliability
+  pharmia-git ff-all --from dev
+  pharmia-git confine /tmp/pharmamate-chat-form-fix fix/chat-form-disable-durable
+
+${C_BOLD}ENV${C_RESET}
+  PHARMIA_GIT_NO_FETCH=1   skip \`git fetch origin\` (offline / tests)
+EOF
+}
+
+# ── topology ──────────────────────────────────────────────────────────────────
+cmd_topology() {
+  fetch_origin
+  echo "${C_BOLD}WORKTREE                                          BRANCH                                  ENV     HEAD${C_RESET}"
+  # Track branch -> count to flag duplicates.
+  declare -A seen_branch=()
+  local path head branch
+  while IFS= read -r line; do
+    # `git worktree list --porcelain` blocks: worktree <path>\nHEAD <sha>\nbranch refs/heads/<b> (or 'detached')
+    :
+  done < /dev/null
+  # Parse porcelain into rows.
+  local cur_path="" cur_head="" cur_branch=""
+  flush_row() {
+    [[ -z "$cur_path" ]] && return 0
+    local b="$cur_branch"
+    [[ "$b" == "(detached)" ]] && b="$(yel '(detached)')"
+    local env; env="$(env_for "$cur_branch")"
+    local env_disp="$env"
+    case "$env" in
+      prod)   env_disp="$(red prod)" ;;
+      canary) env_disp="$(yel canary)" ;;
+      dev|qa) env_disp="$(grn "$env")" ;;
+      *)      env_disp="$(dim "$env")" ;;
+    esac
+    # dup-branch flag
+    local flag=""
+    if [[ "$cur_branch" != "(detached)" ]]; then
+      seen_branch["$cur_branch"]=$(( ${seen_branch["$cur_branch"]:-0} + 1 ))
+      [[ ${seen_branch["$cur_branch"]} -gt 1 ]] && flag=" $(red '⚠ dup-branch')"
+    fi
+    printf '%-48s %-39s %-7s %s%s\n' \
+      "$cur_path" "$b" "$env_disp" "${cur_head:0:8}" "$flag"
+    cur_path=""; cur_head=""; cur_branch=""
+  }
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *) flush_row; cur_path="${line#worktree }" ;;
+      HEAD\ *)     cur_head="${line#HEAD }" ;;
+      branch\ *)   cur_branch="${line#branch refs/heads/}" ;;
+      detached)    cur_branch="(detached)" ;;
+    esac
+  done < <(git -C "$REPO_ROOT" worktree list --porcelain)
+  flush_row
+  echo
+  echo "$(dim "ENV column = Dokploy auto-deploy target for that branch; push ⇒ deploy.")"
+}
+
+# ── extra <a> <b> (squash-aware) ──────────────────────────────────────────────
+cmd_extra() {
+  [[ $# -eq 2 ]] || die "usage: pharmia-git extra <a> <b>"
+  local a="$1" b="$2"
+  git -C "$REPO_ROOT" rev-parse --verify -q "$a" >/dev/null || die "unknown ref: $a"
+  git -C "$REPO_ROOT" rev-parse --verify -q "$b" >/dev/null || die "unknown ref: $b"
+  fetch_origin
+
+  # Patch-id set already present in <b> (changes already in target by content).
+  # `git patch-id` reads DIFFS on stdin, not commit hashes — feed `log -p`.
+  local b_patch_ids
+  b_patch_ids="$(git -C "$REPO_ROOT" log "$b" --no-merges -p -n 4000 \
+    | git -C "$REPO_ROOT" patch-id --stable 2>/dev/null | awk '{print $1}' | sort -u)"
+
+  local raw real=() phantom=()
+  mapfile -t raw < <(git -C "$REPO_ROOT" rev-list --no-merges "$b..$a")
+
+  local sha pid
+  for sha in "${raw[@]}"; do
+    pid="$(git -C "$REPO_ROOT" show "$sha" 2>/dev/null \
+      | git -C "$REPO_ROOT" patch-id --stable 2>/dev/null | awk '{print $1}')"
+    if [[ -n "$pid" ]] && grep -qxF "$pid" <<<"$b_patch_ids"; then
+      phantom+=("$sha")
+    else
+      real+=("$sha")
+    fi
+  done
+
+  echo "${C_BOLD}commits on $(cyn "$a") not on $(cyn "$b")${C_RESET}  $(dim "(squash-merge aware via patch-id)")"
+  echo
+  if [[ ${#real[@]} -eq 0 ]]; then
+    if [[ ${#phantom[@]} -gt 0 ]]; then
+      echo "$(grn "✓ no REAL diff") — ${#phantom[@]} commit(s) differ in sha but are already in $b by content (squash-merged)."
+    else
+      echo "$(grn "✓ no commits") — $a is not ahead of $b."
+    fi
+  else
+    echo "$(yel "${#real[@]} real commit(s)") not yet in $b by content:"
+    git -C "$REPO_ROOT" --no-pager log --no-walk --format="  %C(auto)%h%Creset %s %C(dim)(%an, %ar)%Creset" "${real[@]}"
+  fi
+  if [[ ${#phantom[@]} -gt 0 ]]; then
+    echo
+    echo "$(dim "${#phantom[@]} phantom commit(s) suppressed — same changes already in $b (squash-merge):")"
+    git -C "$REPO_ROOT" --no-pager log --no-walk --format="  $(dim '%h %s')" "${phantom[@]}" 2>/dev/null || true
+  fi
+}
+
+# ── ff-all ────────────────────────────────────────────────────────────────────
+cmd_ff_all() {
+  local from="dev" assume_yes=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --from) from="${2:?--from needs a branch}"; shift 2 ;;
+      --yes|-y) assume_yes=1; shift ;;
+      *) die "unknown flag for ff-all: $1" ;;
+    esac
+  done
+  git -C "$REPO_ROOT" rev-parse --verify -q "$from" >/dev/null || die "unknown --from branch: $from"
+  fetch_origin
+
+  echo "${C_BOLD}fast-forward fan-out from $(cyn "$from")${C_RESET}  $(dim "(clean FF only — never forces)")"
+  echo
+
+  local can_ff=() blocked=()
+  local target
+  for target in "${ENV_BRANCHES[@]}"; do
+    [[ "$target" == "$from" ]] && continue
+    git -C "$REPO_ROOT" rev-parse --verify -q "$target" >/dev/null || continue
+    # Clean FF iff target is an ancestor of from (target..from has commits, from..target empty).
+    if git -C "$REPO_ROOT" merge-base --is-ancestor "$target" "$from"; then
+      local n; n="$(git -C "$REPO_ROOT" rev-list --count "$target..$from")"
+      if [[ "$n" -eq 0 ]]; then
+        echo "  $(dim "= $target already at $from (no-op)")"
+      else
+        can_ff+=("$target")
+        echo "  $(grn "→ $target") can fast-forward +$n commit(s) to $(env_for "$target")"
+      fi
+    else
+      local ahead; ahead="$(git -C "$REPO_ROOT" rev-list --count "$from..$target")"
+      blocked+=("$target")
+      echo "  $(red "✗ $target") NOT a fast-forward — $target has $ahead commit(s) $from lacks $(dim '(diverged)')"
+    fi
+  done
+
+  echo
+  if [[ ${#blocked[@]} -gt 0 ]]; then
+    echo "$(yel "skipped (diverged, would need force — refused):") ${blocked[*]}"
+    echo "$(dim "  Reconcile those manually. The only sanctioned force is a CTO-authorized")"
+    echo "$(dim "  canary promotion: git push --force-with-lease=canary:<sha> origin <src>:canary")"
+    echo
+  fi
+  if [[ ${#can_ff[@]} -eq 0 ]]; then
+    echo "$(dim "nothing to fast-forward.")"
+    return 0
+  fi
+
+  if [[ "$assume_yes" -ne 1 ]]; then
+    printf '%s' "Fast-forward + push [${can_ff[*]}] from $from? [y/N] "
+    read -r ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { echo "aborted (read-only)."; return 0; }
+  fi
+
+  for target in "${can_ff[@]}"; do
+    echo "$(cyn "→ $target")"
+    # FF the local branch ref without checkout (update-ref is safe + worktree-agnostic).
+    git -C "$REPO_ROOT" branch -f "$target" "$from" 2>/dev/null \
+      || git -C "$REPO_ROOT" update-ref "refs/heads/$target" "$from"
+    # Push as a plain fast-forward (no force). origin rejects if not FF — by design.
+    if git -C "$REPO_ROOT" push origin "$target:$target"; then
+      echo "  $(grn "✓ pushed $target") → deploys to $(env_for "$target")"
+    else
+      echo "  $(red "✗ push $target failed (not a fast-forward on origin — left local ref moved, NOT forced)")"
+    fi
+  done
+}
+
+# ── confine <worktree> <branch> ───────────────────────────────────────────────
+cmd_confine() {
+  [[ $# -eq 2 ]] || die "usage: pharmia-git confine <worktree> <branch>"
+  local wt="$1" branch="$2"
+  [[ -d "$wt" ]] || die "not a directory: $wt"
+  fetch_origin
+
+  # What branch is actually checked out in that worktree?
+  local actual
+  actual="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || echo '(detached)')"
+  echo "${C_BOLD}confine${C_RESET}  worktree=$(cyn "$wt")  expected-branch=$(cyn "$branch")"
+  if [[ "$actual" == "(detached)" ]]; then
+    echo "  $(yel "⚠ worktree HEAD is detached") — no branch to confine."
+  elif [[ "$actual" != "$branch" ]]; then
+    echo "  $(yel "⚠ worktree is on '$actual', not '$branch'") — checking '$branch' anyway."
+  else
+    echo "  $(grn "✓ worktree is on $branch")"
+  fi
+
+  git -C "$REPO_ROOT" rev-parse --verify -q "$branch" >/dev/null || die "unknown branch: $branch"
+
+  # Commits unique to this branch vs its merge-base with dev (its likely origin).
+  local base_ref="origin/dev"
+  git -C "$REPO_ROOT" rev-parse --verify -q "$base_ref" >/dev/null || base_ref="dev"
+  local own
+  own="$(git -C "$REPO_ROOT" rev-list "$base_ref..$branch" 2>/dev/null || true)"
+  if [[ -z "$own" ]]; then
+    echo "  $(dim "no commits unique to $branch vs $base_ref — nothing to confine.")"
+    return 0
+  fi
+  local own_count; own_count="$(wc -l <<<"$own" | tr -d ' ')"
+  echo "  $own_count commit(s) unique to $branch (vs $base_ref)."
+
+  # Did any of those commits leak onto a shared env branch?
+  local leaked=0 shared sha
+  for shared in dev canary main; do
+    [[ "$shared" == "$branch" ]] && continue
+    local sref="origin/$shared"
+    git -C "$REPO_ROOT" rev-parse --verify -q "$sref" >/dev/null || sref="$shared"
+    git -C "$REPO_ROOT" rev-parse --verify -q "$sref" >/dev/null || continue
+    while IFS= read -r sha; do
+      [[ -z "$sha" ]] && continue
+      if git -C "$REPO_ROOT" merge-base --is-ancestor "$sha" "$sref" 2>/dev/null; then
+        echo "  $(red "✗ LEAK") ${sha:0:8} $(git -C "$REPO_ROOT" log -1 --format='%s' "$sha") → present on $(red "$shared")"
+        leaked=1
+      fi
+    done <<<"$own"
+  done
+
+  if [[ "$leaked" -eq 1 ]]; then
+    echo
+    echo "$(red "REFUSED:") commits from $branch have leaked onto a shared env branch."
+    return 2
+  fi
+  echo "  $(grn "✓ confined") — no $branch commits on dev/canary/main."
+}
+
+# ── deploy-status <branch> ────────────────────────────────────────────────────
+cmd_deploy_status() {
+  [[ $# -eq 1 ]] || die "usage: pharmia-git deploy-status <branch>"
+  local branch="$1"
+  git -C "$REPO_ROOT" rev-parse --verify -q "$branch" >/dev/null || die "unknown branch: $branch"
+  fetch_origin
+
+  local env; env="$(env_for "$branch")"
+  echo "${C_BOLD}deploy-status${C_RESET}  branch=$(cyn "$branch")  env=$([[ "$env" == "—" ]] && dim "$env" || cyn "$env")"
+
+  local oref="origin/$branch"
+  if ! git -C "$REPO_ROOT" rev-parse --verify -q "$oref" >/dev/null; then
+    echo "  $(yel "no origin/$branch") — never pushed; nothing deployed."
+    echo "  local HEAD: $(git -C "$REPO_ROOT" rev-parse --short "$branch")"
+    return 0
+  fi
+
+  local local_sha origin_sha
+  local_sha="$(git -C "$REPO_ROOT" rev-parse "$branch")"
+  origin_sha="$(git -C "$REPO_ROOT" rev-parse "$oref")"
+  local ahead behind
+  ahead="$(git -C "$REPO_ROOT" rev-list --count "$oref..$branch")"
+  behind="$(git -C "$REPO_ROOT" rev-list --count "$branch..$oref")"
+
+  echo "  local  HEAD : ${local_sha:0:8}  $(git -C "$REPO_ROOT" log -1 --format='%s' "$branch")"
+  if [[ "$env" != "—" ]]; then
+    echo "  origin/$branch (≈ $env deployed) : ${origin_sha:0:8}  $(git -C "$REPO_ROOT" log -1 --format='%s' "$oref")"
+  else
+    echo "  origin/$branch : ${origin_sha:0:8}  $(dim '(no auto-deploy target)')"
+  fi
+  echo
+
+  if [[ "$ahead" -eq 0 && "$behind" -eq 0 ]]; then
+    echo "  $(grn "✓ in sync") with origin/$branch."
+  else
+    [[ "$ahead"  -gt 0 ]] && echo "  $(yel "↑ $ahead ahead")  — local commit(s) NOT yet deployed (push to ship)."
+    [[ "$behind" -gt 0 ]] && echo "  $(red "↓ $behind behind") — origin is ahead (someone pushed / hotfix). Rebase before pushing."
+    if [[ "$ahead" -gt 0 && "$behind" -gt 0 ]]; then
+      echo "  $(red "⚠ diverged") — a plain push would be rejected. Do NOT force unless this is"
+      echo "    a CTO-authorized canary promotion. Otherwise rebase onto origin/$branch."
+    fi
+  fi
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+[[ -n "$REPO_ROOT" ]] || die "not inside a git repository"
+
+case "${1:-}" in
+  ""|-h|--help|help) show_help; exit 0 ;;
+esac
+sub="$1"; shift
+case "$sub" in
+  topology)       cmd_topology "$@" ;;
+  extra)          cmd_extra "$@" ;;
+  ff-all)         cmd_ff_all "$@" ;;
+  confine)        cmd_confine "$@" ;;
+  deploy-status)  cmd_deploy_status "$@" ;;
+  *) die "unknown subcommand: $sub (try: pharmia-git --help)" ;;
+esac

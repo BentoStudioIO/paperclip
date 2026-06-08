@@ -1,0 +1,445 @@
+#!/usr/bin/env bash
+# search-ai-sessions
+# Search across AI session artifacts, with optional direct Codex log querying.
+
+set -euo pipefail
+
+SCRIPT_NAME="search-ai-sessions"
+DEFAULT_CODEX_LOG="$HOME/.codex/log/codex-tui.log"
+
+print_usage() {
+  cat <<'USAGE'
+Usage:
+  search-ai-sessions <pattern> [max-results] [show-content]
+  search-ai-sessions --codex [--log /path/to/codex-tui.log] [--pattern REGEX] [--extract REGEX] [--expected /path/to/file] [--max-results N] [--json]
+  search-ai-sessions --codex-slices [...]  # legacy alias: pattern=report_agent_job_result, extract=SLICE-[0-9]{3}
+
+Examples:
+  search-ai-sessions 'bug-hunter'
+  search-ai-sessions 'error' 100 true
+  search-ai-sessions --codex --log /home/vortex/.codex/log/codex-tui.log
+  search-ai-sessions --codex --pattern 'report_agent_job_result' --extract 'SLICE-[0-9]{3}' --expected /tmp/batch-slices.csv
+  search-ai-sessions --codex-slices --expected /tmp/batch-slices.csv
+USAGE
+}
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  print_usage
+  exit 0
+fi
+
+CODEX_MODE=0
+CODEX_EXTRACT=""
+if [ "${1:-}" = "--codex-slices" ]; then
+  CODEX_MODE=1
+  CODEX_EXTRACT="SLICE-[0-9]{3}"
+  shift
+elif [ "${1:-}" = "--codex" ]; then
+  CODEX_MODE=1
+  shift
+fi
+
+if [ "$CODEX_MODE" -eq 1 ]; then
+  CODEX_LOG="$DEFAULT_CODEX_LOG"
+  CODEX_PATTERN="report_agent_job_result"
+  CODEX_MAX_RESULTS=120
+  CODEX_JSON=0
+  EXPECTED_FILE=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --codex-slices)
+        CODEX_EXTRACT="SLICE-[0-9]{3}"
+        shift
+        ;;
+      --codex)
+        shift
+        ;;
+      --log)
+        CODEX_LOG="$2"
+        shift 2
+        ;;
+      --pattern)
+        CODEX_PATTERN="$2"
+        shift 2
+        ;;
+      --extract)
+        CODEX_EXTRACT="$2"
+        shift 2
+        ;;
+      --expected|--expected-slices)
+        EXPECTED_FILE="$2"
+        shift 2
+        ;;
+      --max-results|--limit)
+        CODEX_MAX_RESULTS="$2"
+        shift 2
+        ;;
+      --json)
+        CODEX_JSON=1
+        shift
+        ;;
+      --help|-h)
+        print_usage
+        exit 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      --*)
+        echo "⚠️  Ignored unknown codex option: $1"
+        shift
+        ;;
+      *)
+        CODEX_PATTERN="$1"
+        shift
+        ;;
+    esac
+  done
+
+  export CODEX_LOG CODEX_PATTERN CODEX_EXTRACT CODEX_MAX_RESULTS CODEX_JSON EXPECTED_FILE
+
+python3 << 'PYTHON_EOF'
+import csv
+import json
+import re
+import os
+from pathlib import Path
+
+from typing import Iterable
+
+
+def collect_expected_values(path: str, extract_regex: str) -> list[str]:
+  if not path:
+    return []
+
+  expected_path = Path(path)
+  if not expected_path.exists():
+    return []
+
+  if extract_regex:
+    extractor = re.compile(extract_regex)
+  else:
+    extractor = None
+
+  values: list[str] = []
+  if expected_path.suffix.lower() == ".csv":
+    with expected_path.open("r", encoding="utf-8", errors="replace") as handle:
+      reader = csv.reader(handle)
+      for row in reader:
+        for cell in row:
+          if extractor:
+            for match in extractor.findall(cell):
+              values.append(match if isinstance(match, str) else match[0])
+          else:
+            value = cell.strip()
+            if value:
+              values.append(value)
+  else:
+    with expected_path.open("r", encoding="utf-8", errors="replace") as handle:
+      for raw in handle:
+        if extractor:
+          for match in extractor.findall(raw):
+            values.append(match if isinstance(match, str) else match[0])
+        else:
+          value = raw.strip()
+          if value:
+            values.append(value)
+
+  return values
+
+
+def first_n(value: Iterable[str], limit: int) -> list[str]:
+  return list(value)[:limit]
+
+
+def timestamp_like(text: str) -> str:
+  for token in text.split():
+    if re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", token):
+      return token
+  return ""
+
+
+codex_log = Path(os.environ["CODEX_LOG"])
+pattern = os.environ.get("CODEX_PATTERN", "report_agent_job_result")
+extract_pat = os.environ.get("CODEX_EXTRACT", "")
+max_results = int(os.environ.get("CODEX_MAX_RESULTS", "120"))
+expected_file = os.environ.get("EXPECTED_FILE", "")
+output_json = os.environ.get("CODEX_JSON", "0") == "1"
+
+if not codex_log.exists():
+  msg = f"❌ Codex log not found: {codex_log}"
+  if output_json:
+    print(json.dumps({"ok": False, "error": msg}))
+  else:
+    print(msg)
+  raise SystemExit(1)
+
+try:
+  pattern_regex = re.compile(pattern) if pattern else re.compile(".*")
+except re.error as error:
+  msg = f"Invalid --pattern regex: {error}"
+  if output_json:
+    print(json.dumps({"ok": False, "error": msg}))
+  else:
+    print(msg)
+  raise SystemExit(1)
+
+extract_regex = None
+if extract_pat:
+  try:
+    extract_regex = re.compile(extract_pat)
+  except re.error as error:
+    msg = f"Invalid --extract regex: {error}"
+    if output_json:
+      print(json.dumps({"ok": False, "error": msg}))
+    else:
+      print(msg)
+    raise SystemExit(1)
+
+matches = []
+extracted_counts: dict[str, int] = {}
+
+for line_no, raw_line in enumerate(codex_log.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+  if not pattern_regex.search(raw_line):
+    continue
+
+  extracted = []
+  if extract_regex is not None:
+    for match in extract_regex.findall(raw_line):
+      item = match[0] if isinstance(match, tuple) else match
+      if item:
+        extracted.append(item)
+        extracted_counts[item] = extracted_counts.get(item, 0) + 1
+
+  matches.append({
+    "line_no": line_no,
+    "timestamp": timestamp_like(raw_line),
+    "text": raw_line,
+    "extracted": extracted,
+  })
+
+expected_missing = None
+expected_total = 0
+if expected_file:
+  expected_path = Path(expected_file)
+  if not expected_path.exists():
+    if output_json:
+      print(json.dumps({"ok": False, "error": f"Expected file not found: {expected_file}"}))
+    else:
+      print(f"⚠️  Expected file not found: {expected_file}")
+    raise SystemExit(1)
+
+  expected_values = collect_expected_values(expected_file, extract_pat)
+  expected_set = set(expected_values)
+  expected_total = len(expected_set)
+  found_set = set(extracted_counts.keys())
+  expected_missing = sorted(expected_set - found_set)
+
+payload = {
+  "ok": True,
+  "count": len(matches),
+  "pattern": pattern,
+  "extract": extract_pat,
+  "showed_lines": min(len(matches), max_results),
+  "top": first_n(
+    (
+      {
+        "line_no": item["line_no"],
+        "timestamp": item["timestamp"],
+        "text": item["text"],
+        "extracted": item["extracted"],
+      }
+      for item in matches
+    ),
+    max_results,
+  ),
+  "extracted": [{"value": key, "count": value} for key, value in sorted(extracted_counts.items())],
+}
+
+if expected_file:
+  payload["expected_count"] = expected_total
+  payload["found_count"] = len(found_set)
+  payload["missing_count"] = len(expected_missing)
+  payload["missing_values"] = expected_missing
+
+if output_json:
+  print(json.dumps(payload, ensure_ascii=False))
+  raise SystemExit(0)
+
+if not matches:
+  print("ℹ️  No matching events found in codex log.")
+  if expected_file:
+    print(f"Expected values: {expected_total}")
+    print("Found values: 0")
+    print(f"Missing values: {expected_total}")
+  else:
+    print(f"Expected values: {expected_total}")
+    print("Found values: 0")
+    print(f"Missing values: {expected_total}")
+  raise SystemExit(0)
+
+print("🔎 Codex log scan")
+print(f"Log: {codex_log}")
+print(f"Pattern: {pattern}")
+if extract_pat:
+  print(f"Extract: {extract_pat}")
+print(f"Matched lines: {len(matches)}")
+print(f"Showing first {payload['showed_lines']} lines")
+print()
+
+for item in payload["top"]:
+  prefix = f"[{item['line_no']}]"
+  if item["timestamp"]:
+    prefix = f"{item['timestamp']} {prefix}"
+  extracted = f" {item['extracted']}" if item["extracted"] else ""
+  text = item["text"]
+  if len(text) > 180:
+    text = text[:180] + "..."
+  print(f"{prefix}{extracted}\n  {text}")
+
+if extracted_counts:
+  print()
+  print("Extracted values:")
+  for key, value in sorted(extracted_counts.items()):
+    print(f"  - {key} ({value})")
+
+if expected_file:
+  print()
+  print(f"Expected values: {expected_total}")
+  print(f"Found values: {len(found_set)}")
+  print(f"Missing values: {len(expected_missing)}")
+  if expected_missing:
+    print("Missing:")
+    print("  - " + ", ".join(expected_missing))
+PYTHON_EOF
+  exit 0
+fi
+
+PATTERN="${1:-}"
+MAX_RESULTS="${2:-50}"
+SHOW_CONTENT="${3:-false}"
+
+if [ -z "$PATTERN" ]; then
+  print_usage
+  exit 1
+fi
+
+INDEX_DIR="$HOME/.cache/ai-sessions-index"
+INDEX_FILE="$INDEX_DIR/index.pkl.gz"
+
+if [ ! -f "$INDEX_FILE" ]; then
+  echo "❌ Index non trouvé. Construction en cours..."
+  index-ai-sessions.sh
+fi
+
+echo "🔍 Recherche: '$PATTERN'"
+echo ""
+
+python3 << PYTHON_EOF
+import gzip
+import pickle
+import re
+import os
+from pathlib import Path
+
+PATTERN = "$PATTERN"
+MAX_RESULTS = int("$MAX_RESULTS")
+SHOW_CONTENT = "$SHOW_CONTENT".lower() == "true"
+INDEX_FILE = Path(os.path.expanduser("$INDEX_FILE"))
+
+def clean_line_prefixes(text):
+    lines = text.split('\n')
+    cleaned = []
+    for line in lines:
+        m = re.match(r'^\s*\d+[→\t](.*)$', line)
+        if m:
+            cleaned.append(m.group(1))
+        else:
+            cleaned.append(line)
+    return '\n'.join(cleaned)
+
+with gzip.open(INDEX_FILE, 'rb') as f:
+    index_data = pickle.load(f)
+
+word_index = index_data['word_index']
+stats = index_data['stats']
+
+print(f"📚 Index chargé: {stats['total_words']} mots")
+print(f"   ({stats['claude_files']} fichiers Claude, {stats['opencode_files']} fichiers OpenCode)")
+print()
+
+pattern_lower = PATTERN.lower()
+words = re.findall(r'\b[a-z]{3,}\b', pattern_lower)
+
+if not words:
+    print("⚠️  Pattern trop court pour recherche indexée")
+    exit(1)
+
+candidates = None
+for word in words:
+    if word in word_index:
+        if candidates is None:
+            candidates = set(word_index[word])
+        else:
+            candidates &= set(word_index[word])
+    else:
+        candidates = None
+        break
+
+if candidates is None:
+    print("❌ Pattern non trouvé dans l'index")
+    exit(1)
+
+print(f"✅ {len(candidates)} fichiers candidats trouvés")
+print()
+
+results = []
+for filepath in list(candidates)[:MAX_RESULTS * 2]:
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+            if pattern_lower in content.lower():
+                count = content.lower().count(pattern_lower)
+                results.append((filepath, count, content))
+                if len(results) >= MAX_RESULTS:
+                    break
+    except:
+        continue
+
+print(f"✅ {len(results)} match(s) confirmé(s)")
+print()
+
+if results:
+    print("="*80)
+    for i, (filepath, count, content) in enumerate(results[:MAX_RESULTS], 1):
+        if '.claude' in filepath:
+            source = "Claude"
+        elif 'opencode' in filepath:
+            source = "OpenCode"
+        else:
+            source = "Unknown"
+        
+        filename = os.path.basename(filepath)
+        print(f"\n📄 Résultat #{i} ({source})")
+        print(f"   Fichier: {filename}")
+        print(f"   Chemin: {filepath}")
+        print(f"   Occurrences: {count}")
+        
+        if SHOW_CONTENT:
+            print()
+            print("   Contenu:")
+            lines = content.split('\n')
+            for line in lines:
+                if pattern_lower in line.lower():
+                    cleaned = clean_line_prefixes(line)
+                    if len(cleaned) > 100:
+                        cleaned = cleaned[:100] + "..."
+                    print(f"   → {cleaned}")
+        
+        print("-"*80)
+
+print()
+print(f"💡 Pour voir le contenu: search-ai-sessions '{PATTERN}' {MAX_RESULTS} true")
+PYTHON_EOF

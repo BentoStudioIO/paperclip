@@ -1,0 +1,2253 @@
+#!/usr/bin/env bash
+# threads — inspect a Pharmia Atlas/agent thread via Mastra Postgres.
+# Accepts a full admin URL or an explicit <env> <thread-id> pair.
+# Renders the conversation in readable form by default; flags narrow the view.
+#
+# AGENT NOTE — ALWAYS IMPROVE THIS CLI WHEN INFO IS MISSING.
+# If you ran `threads <url>` (or any sub-mode) and had to fetch additional
+# information from another tool (langfuse, loki, tempo, prom, raw SQL, …) to
+# answer the user's question, that's a gap in this CLI. Edit this file in the
+# same task to surface that information by default. Examples of past gaps:
+#   - Models used per turn was hidden behind --langfuse-detail; default mode
+#     fetched only trace headers. Fixed by always fetching observations and
+#     adding a "Models used" summary at the top of the langfuse block.
+#   - Pyroscope / Tempo span trees / TTFT timing were added the same way.
+# The default invocation `threads <url>` should answer "what happened in this
+# thread?" without needing follow-up CLIs. Anything less is a bug.
+
+set -euo pipefail
+
+show_help() {
+  cat <<'EOF'
+threads — inspect a Pharmia agent thread by URL or ID.
+
+USAGE
+  threads <url>                          # env auto-detected from admin.<env>.pharmia.ca
+  threads <env> <thread-id>              # env: dev | qa | canary
+  threads <env> --trace <trace-id>       # resolve thread from an OTel trace id
+                                          # (oncall flow: copy trace_id from a
+                                          #  Grafana log → land on the thread)
+  threads list <env> [filters]           # list ALL threads in the window with
+                                          # a STATUS column; problems (ring
+                                          # flips, aborts, LLM errors, no-reply)
+                                          # annotated inline. --problems-only to
+                                          # filter. Defaults to today; --from /
+                                          # --to widen. `threads list` for help.
+  threads modelmix <env> [--since DUR]   # fleet model mix: which provider/model
+                                          # actually served + fallback rate/why.
+                                          # Answers "Gemini or Kimi right now?"
+                                          # in one command. `threads modelmix`
+                                          # for full help.
+
+OUTPUT MODES (pick one, default = full RCA-grade transcript)
+  --rca                                  RCA digest: per-tool YIELD (ok/empty/error
+                                          + median result size), citation→source map
+                                          (flags fabricated cites), and per-turn
+                                          prompt-size estimate. Automates the manual
+                                          single-thread audit (the fleet version is
+                                          `threads list` / `modelmix`).
+  --tools                                tool calls only (full args + full result)
+  --last                                 just the final assistant text
+  --summary                              compressed timeline + per-tool counts
+  --raw                                  all raw message JSON, one per line
+  --json                                 structured JSON (for pipelines)
+
+LANGFUSE INTEGRATION (per-observation timing rendered by default)
+  --langfuse-summary                     trace headers only (1 API call, faster)
+  --no-langfuse                          skip Langfuse entirely (offline)
+  --langfuse                             ONLY Langfuse traces (skip Mastra DB)
+
+OBSERVABILITY INTEGRATION (Loki logs + Tempo traces + Prometheus + Pyroscope)
+  Around the thread's time window (±30s by default). Defaults to a compact
+  summary appended after the transcript / Langfuse traces. Silent skip if a
+  CLI (loki / tempo / prom / pyro) is not installed. Pyroscope queries the
+  exact window via `pyro top --from/--to`; auto-skipped when the thread is
+  beyond pyroscope retention (~14d). Tempo also renders the SPAN TREE for
+  each OTel trace this thread participated in (extracted from the Atlas
+  Subscription log lines), so you can see which model POST hung, how long
+  buffering took, etc — `--obs-detail` widens the trees.
+  --obs-detail                           full dumps (top error lines, slowest spans, metric timeseries)
+  --no-obs                               skip Loki / Tempo / Prom entirely
+  --obs-pad <dur>                        time padding around thread window (default 30s)
+                                          accepts ms/s/m/h, e.g. 5s, 2m, 1h
+
+EXAMPLES
+  threads https://admin.qa.pharmia.ca/atlas?thread=aeef7810-...%7C...
+  threads https://app.pharmia.ca/share/c0c66506-4366-41dd-b22c-66ac4b4c3e68
+  threads qa 'aeef7810-16f5-4172-9e01-f90c30f86b6d-atlas-email|68f3fb3adb088215b1cb9eeb-2026-04-22T23:33:28.100Z'
+  threads qa <thread-id> --rca                           # single-thread RCA digest
+  threads qa <thread-id> --tools
+  threads qa <thread-id> --last | jq .
+  threads dev <thread-id> --summary --langfuse-detail   # full triage view
+
+NOTES
+  Uses `pg <env> mastra` for the Postgres query. Thread IDs from the UI are
+  URL-encoded (`|` -> `%7C`); URLs are decoded automatically.
+
+  `/share/<shareId>` URLs are resolved via `pg <env> app` (atlas_share.id →
+  threadId, active shares only) before the normal mastra flow. app.<env>.pharmia.ca
+  maps to that env; app.pharmia.ca (no env prefix) maps to canary.
+
+  Langfuse traces are matched by sessionId == thread-id (set in agent
+  tracingOptions.metadata.sessionId). If the `langfuse` CLI is not installed
+  or the API call fails, Langfuse output is silently skipped.
+EOF
+}
+
+if [[ $# -eq 0 ]]; then
+  show_help
+  exit 0
+fi
+
+# ───────────────────────────────────────────────────────────────────────
+# `threads list <env> [filters]` — surface recently-problematic threads
+# (ring flips, stream aborts, LLM errors). One row per thread, latest
+# event wins, sorted by time desc.
+# ───────────────────────────────────────────────────────────────────────
+if [[ "${1:-}" == "modelmix" ]]; then
+  shift
+  if [[ $# -eq 0 || ( "$1" != "dev" && "$1" != "qa" && "$1" != "canary" ) ]]; then
+    cat >&2 <<'EOF'
+threads modelmix <env> [--since DUR]
+
+Fleet-wide Atlas model mix from the `[Atlas] stream-result` log: which
+provider/model actually SERVED each turn, plus the fallback rate and why it
+fired. Answers "is Atlas serving Gemini or Kimi right now?" in one command.
+
+Reads the structured `servedProvider` field, scoped to the pharmia-api
+service — so it is immune to the two things that pollute a bare
+`loki count "<model-id>"`: Loki's own querier logs (which echo your search
+string back) and the ring-config lines that mention every tier's model id.
+NEVER answer "which model is serving" by grepping model ids in Loki.
+
+ENV (required)   dev | qa | canary
+  --since <dur>  lookback window (default 3h). e.g. 30m, 6h, 24h.
+
+EXAMPLES
+  threads modelmix canary
+  threads modelmix canary --since 24h
+EOF
+    exit 1
+  fi
+  ENV_MM="$1"; shift
+  MM_SINCE="3h"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --since) shift; MM_SINCE="${1:-3h}"; shift ;;
+      *) echo "unknown flag: $1" >&2; exit 1 ;;
+    esac
+  done
+  command -v loki >/dev/null 2>&1 || { echo "loki CLI not found — required for modelmix." >&2; exit 1; }
+  loki "$ENV_MM" search '[Atlas] stream-result' --since "$MM_SINCE" --limit 5000 2>/dev/null \
+    | MM_SINCE="$MM_SINCE" python3 -c '
+import sys, os, json
+from collections import Counter
+served=Counter(); fb_reasons=Counter()
+n=fb=tmo=err=guard=0
+for ln in sys.stdin:
+    try:
+        j=json.loads(json.loads(ln)["line"])
+    except Exception:
+        continue
+    if not str(j.get("message","")).startswith("[Atlas] stream-result"):
+        continue
+    n+=1
+    sp=j.get("servedProvider")
+    if sp is None:  # pre-servedProvider log lines: derive it
+        sp=("fallback:"+str(j.get("fallbackModel"))) if j.get("fallbackFired") else j.get("primaryProvider")
+    served[sp]+=1
+    if j.get("fallbackFired"):
+        fb+=1
+        r=[k for k,c in (("timedOut",j.get("primaryTimedOut")),("errored",j.get("primaryErrored")),("guardTripped",j.get("guardTripped"))) if c]
+        fb_reasons["+".join(r) or "other(finish=%s)"%j.get("primaryFinishReason")]+=1
+    tmo+=bool(j.get("primaryTimedOut")); err+=bool(j.get("primaryErrored")); guard+=bool(j.get("guardTripped"))
+if n==0:
+    print("No [Atlas] stream-result turns in window (idle env or out of Loki retention)."); sys.exit(0)
+print("Atlas turns (window=%s): %d" % (os.environ.get("MM_SINCE","?"), n))
+print("served provider:")
+for k,v in served.most_common():
+    print("  %-22s %5d  (%2.0f%%)" % (k, v, 100*v/n))
+print("fallback fired: %d (%.0f%%)   [primaryTimedOut=%d errored=%d guardTripped=%d]" % (fb,100*fb/n,tmo,err,guard))
+if fb_reasons: print("  fallback reasons:", dict(fb_reasons))
+'
+  exit 0
+fi
+
+if [[ "$1" == "list" ]]; then
+  shift
+  if [[ $# -eq 0 || ( "$1" != "dev" && "$1" != "qa" && "$1" != "canary" ) ]]; then
+    cat >&2 <<'EOF'
+threads list <env> [filters]
+
+List ALL Atlas threads with activity in the window (sourced from the Mastra
+DB), one row per thread, newest first. Each row shows a STATUS: 'ok', or
+'! <reasons>' when a problem signal fired. Problems are detected from:
+  • Loki   — ring flips (model fallback), stream aborts, LLM errors
+  • DB     — 'no-reply': the thread's last stored message is a user turn that
+             went quiet >120s ago, i.e. no assistant answer was ever persisted
+             (the Atlas silent-loss signature)
+Use --problems-only to collapse the list to just the flagged threads.
+
+ENV (required)        dev | qa | canary
+
+TIME WINDOW
+  --from <when>       window start (default: today, i.e. start of local day).
+                      Accepts: today, yesterday, a duration (24h, 30m, 7d),
+                      or an ISO date/datetime (2026-05-09, 2026-05-09 14:30).
+                      Naive datetimes use local timezone.
+  --to <when>         window end (default: now). Same formats as --from.
+
+FILTERS
+  --reason <pat>      substring match on ring-flip reason
+                      (ttft-stall, slow-toks-per-sec, thrown-error,
+                       provider-error, empty-tool-calls). Comma-separates OR.
+  --errors-only       only threads with `Error in LLM execution` log.
+  --aborted           only threads where the stream aborted (cancelled mid-flight).
+  --flips-only        only threads with `[Atlas] Ring advanced` (default = all 3 sources).
+  --problems-only     only threads with a problem (flip/abort/error/no-reply).
+  --limit <n>         max rows (default 30).
+  --json              one line per thread as JSON (for piping).
+
+EXAMPLES
+  threads list canary                                # today's events
+  threads list canary --from yesterday               # since yesterday 00:00 local
+  threads list canary --from 24h --reason ttft-stall # last 24h, only ttft stalls
+  threads list canary --from 2026-05-08 --to 2026-05-09
+  threads list dev --aborted --json | jq '.[].threadUrl'
+  threads list canary --errors-only --from 7d --limit 100
+EOF
+    exit 1
+  fi
+  ENV_LIST="$1"; shift
+  LIST_FROM="today"
+  LIST_TO="now"
+  LIST_REASON=""
+  LIST_ERRORS_ONLY=0
+  LIST_ABORTED_ONLY=0
+  LIST_FLIPS_ONLY=0
+  LIST_PROBLEMS_ONLY=0
+  LIST_LIMIT=30
+  LIST_JSON=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --from) shift; LIST_FROM="${1:-today}"; shift ;;
+      --to) shift; LIST_TO="${1:-now}"; shift ;;
+      --reason) shift; LIST_REASON="${1:-}"; shift ;;
+      --errors-only) LIST_ERRORS_ONLY=1; shift ;;
+      --aborted) LIST_ABORTED_ONLY=1; shift ;;
+      --flips-only) LIST_FLIPS_ONLY=1; shift ;;
+      --problems-only|--problems) LIST_PROBLEMS_ONLY=1; shift ;;
+      --limit) shift; LIST_LIMIT="${1:-30}"; shift ;;
+      --json) LIST_JSON=1; shift ;;
+      --help|-h) "$0" list >&2; exit 0 ;;
+      *) echo "threads list: unexpected flag '$1'" >&2; exit 1 ;;
+    esac
+  done
+
+  # Resolve --from / --to into absolute UTC ISO timestamps. Loki only accepts
+  # `--since <dur>`, so we compute a duration big enough to cover [from, to]
+  # and post-filter in python by `to`. Local-time parsing for date words like
+  # "today" / "yesterday" matches operator intuition (Quebec ≈ UTC-4 in May).
+  RESOLVE_OUT=$(LIST_FROM_ENV="$LIST_FROM" LIST_TO_ENV="$LIST_TO" python3 - <<'RESOLVE_PY'
+import os, re, sys
+from datetime import datetime, timedelta, timezone
+
+def parse(s):
+    s = (s or '').strip().lower()
+    now_utc = datetime.now(timezone.utc)
+    now_local = datetime.now()
+    local_tz = now_local.astimezone().tzinfo
+    if s in ('now', ''):
+        return now_utc
+    if s == 'today':
+        d = now_local.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=local_tz)
+        return d.astimezone(timezone.utc)
+    if s == 'yesterday':
+        d = (now_local - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=local_tz)
+        return d.astimezone(timezone.utc)
+    # Duration like 24h / 30m / 7d → now - dur (when used as --from) or now (--to is meaningless duration)
+    m = re.fullmatch(r'(\d+)([smhd])', s)
+    if m:
+        n, u = int(m.group(1)), m.group(2)
+        delta = timedelta(seconds=n) if u=='s' else timedelta(minutes=n) if u=='m' else timedelta(hours=n) if u=='h' else timedelta(days=n)
+        return now_utc - delta
+    # ISO date or datetime; treat naive as local time.
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+        try:
+            d = datetime.strptime(s, fmt)
+            d = d.replace(tzinfo=local_tz)
+            return d.astimezone(timezone.utc)
+        except ValueError:
+            continue
+    raise SystemExit(f"threads list: cannot parse time '{s}' (try today, yesterday, 24h, or YYYY-MM-DD[ HH:MM])")
+
+f = parse(os.environ['LIST_FROM_ENV'])
+t = parse(os.environ['LIST_TO_ENV'])
+if t < f:
+    raise SystemExit(f"threads list: --to {t.isoformat()} is before --from {f.isoformat()}")
+# Loki since needs to cover from→now (we always query up to now, then post-filter to `to`).
+now = datetime.now(timezone.utc)
+since_seconds = max(60, int((now - f).total_seconds()) + 60)  # +60s pad
+print(f.isoformat())
+print(t.isoformat())
+print(f"{since_seconds}s")
+RESOLVE_PY
+)
+  if [[ -z "$RESOLVE_OUT" ]]; then exit 1; fi
+  LIST_FROM_ISO=$(echo "$RESOLVE_OUT" | sed -n '1p')
+  LIST_TO_ISO=$(echo "$RESOLVE_OUT" | sed -n '2p')
+  LIST_SINCE=$(echo "$RESOLVE_OUT" | sed -n '3p')
+
+  # Pull each event class from loki in parallel-ish (sequential calls; loki
+  # is fast). Each helper emits one log line per event as raw stdout. The
+  # python aggregator below dedupes by threadId, picks the latest event,
+  # and renders the table.
+  LOKI_LIMIT=$(( LIST_LIMIT * 8 + 200 ))
+  LOKI_RAW=""
+  fetch_loki() {
+    local pattern="$1"
+    loki "$ENV_LIST" search "$pattern" --since "$LIST_SINCE" --limit "$LOKI_LIMIT" 2>/dev/null
+  }
+
+  # Always fetch ring flips. Skip the others when --flips-only.
+  RING_FLIPS=$(fetch_loki "[Atlas] Ring advanced")
+  STREAM_ABORTS=""
+  LLM_ERRORS=""
+  if [[ $LIST_FLIPS_ONLY -eq 0 ]]; then
+    STREAM_ABORTS=$(fetch_loki "[Atlas] Subscription ended")
+    LLM_ERRORS=$(fetch_loki "Error in LLM execution")
+  fi
+
+  # Enumerate EVERY thread that had activity in the window straight from the
+  # Mastra DB — this is the spine of the listing; the Loki problem signals
+  # (flips / aborts / errors) are merged on top as annotations. Without this
+  # the list could only ever show problematic threads. Columns (literal '\t'
+  # delimited): thread_id, last-activity (UTC ISO), msg count, last role.
+  THREADS_DB_F=$(mktemp)
+  pg "$ENV_LIST" mastra "copy (
+    select thread_id || E'\t'
+        || to_char(max(\"createdAtZ\") at time zone 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') || E'\t'
+        || count(*)::text || E'\t'
+        || (array_agg(role order by \"createdAtZ\" desc))[1]
+    from mastra_messages
+    where \"createdAtZ\" >= '${LIST_FROM_ISO}' and \"createdAtZ\" <= '${LIST_TO_ISO}'
+    group by thread_id
+  ) to stdout;" 2>/dev/null | grep -v '^SET$' > "$THREADS_DB_F" || true
+
+  # Aggregate + render in python — bash + jq becomes brittle past N>2 sources.
+  # Pass loki blobs via temp files (not argv) — they exceed ARG_MAX otherwise.
+  RING_BLOB_F=$(mktemp); ABORT_BLOB_F=$(mktemp); ERROR_BLOB_F=$(mktemp)
+  printf '%s' "$RING_FLIPS" > "$RING_BLOB_F"
+  printf '%s' "$STREAM_ABORTS" > "$ABORT_BLOB_F"
+  printf '%s' "$LLM_ERRORS" > "$ERROR_BLOB_F"
+  trap 'rm -f "$RING_BLOB_F" "$ABORT_BLOB_F" "$ERROR_BLOB_F" "$THREADS_DB_F"' EXIT
+  LIST_PROBLEMS_ONLY_ENV="$LIST_PROBLEMS_ONLY" \
+  ENV_LIST_ENV="$ENV_LIST" \
+  LIST_REASON_ENV="$LIST_REASON" \
+  LIST_ERRORS_ONLY_ENV="$LIST_ERRORS_ONLY" \
+  LIST_ABORTED_ONLY_ENV="$LIST_ABORTED_ONLY" \
+  LIST_FLIPS_ONLY_ENV="$LIST_FLIPS_ONLY" \
+  LIST_LIMIT_ENV="$LIST_LIMIT" \
+  LIST_JSON_ENV="$LIST_JSON" \
+  LIST_FROM_ISO_ENV="$LIST_FROM_ISO" \
+  LIST_TO_ISO_ENV="$LIST_TO_ISO" \
+  python3 - "$RING_BLOB_F" "$ABORT_BLOB_F" "$ERROR_BLOB_F" "$THREADS_DB_F" <<'PYEOF'
+import json, os, sys, urllib.parse
+from datetime import datetime, timezone
+
+env = os.environ['ENV_LIST_ENV']
+reason_filter = os.environ.get('LIST_REASON_ENV') or ''
+errors_only = os.environ.get('LIST_ERRORS_ONLY_ENV') == '1'
+aborted_only = os.environ.get('LIST_ABORTED_ONLY_ENV') == '1'
+flips_only = os.environ.get('LIST_FLIPS_ONLY_ENV') == '1'
+problems_only = os.environ.get('LIST_PROBLEMS_ONLY_ENV') == '1'
+limit = int(os.environ.get('LIST_LIMIT_ENV') or '30')
+as_json = os.environ.get('LIST_JSON_ENV') == '1'
+from_iso = os.environ.get('LIST_FROM_ISO_ENV') or ''
+to_iso = os.environ.get('LIST_TO_ISO_ENV') or ''
+
+def to_dt(iso):
+    if not iso: return None
+    s = iso.replace('Z', '+00:00')
+    try:
+        return datetime.fromisoformat(s).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+from_dt = to_dt(from_iso)
+to_dt_v = to_dt(to_iso)
+
+with open(sys.argv[1]) as _f: ring_blob = _f.read()
+with open(sys.argv[2]) as _f: abort_blob = _f.read()
+with open(sys.argv[3]) as _f: error_blob = _f.read()
+
+def parse_loki(blob):
+    """Yield (timestamp_str, parsed_inner_dict) for each loki line, filtered to [from, to]."""
+    for raw in blob.splitlines():
+        raw = raw.strip()
+        if not raw: continue
+        try:
+            outer = json.loads(raw)
+            inner = json.loads(outer['line'])
+        except Exception:
+            continue
+        ts = inner.get('timestamp') or outer.get('timestamp') or ''
+        # Window filter: drop events outside [from, to]. Handles both
+        # `2026-05-09T00:09:23.919Z` and `2026-05-09T00:09:23` shapes.
+        if (from_dt or to_dt_v) and ts:
+            ts_dt = to_dt(ts)
+            if ts_dt is not None:
+                if from_dt and ts_dt < from_dt: continue
+                if to_dt_v and ts_dt > to_dt_v: continue
+        yield ts, inner
+
+# Build per-thread aggregate: latest event wins, but track which sources fired.
+threads = {}  # threadId -> {ts, source, reason, fromTier, toTier, fromModel, toModel,
+              #              advanceCount, ringTiers, error, aborted, completedNormally,
+              #              elapsedMs, sources(set)}
+
+def upsert(tid, payload, source):
+    if not tid: return
+    rec = threads.setdefault(tid, {'sources': set()})
+    rec['sources'].add(source)
+    # Newest event wins for the displayed fields — but never let an older Loki
+    # event clobber the DB last-activity timestamp (kept in 'lastActivity').
+    prev_ts = rec.get('ts', '')
+    if payload.get('ts', '') >= prev_ts:
+        for k, v in payload.items():
+            rec[k] = v
+
+# 0. Seed the full thread universe from the Mastra DB (argv[4]). Every thread
+# that saw activity in the window lands here as 'ok' until a problem signal
+# annotates it. A thread whose LAST stored message is a `user` turn (and that
+# went quiet >120s ago) never got a persisted assistant answer — the Atlas
+# silent-loss signature — so we flag it 'no-reply' with no Loki dependency.
+now_utc = datetime.now(timezone.utc)
+try:
+    db_lines = open(sys.argv[4]).read().splitlines() if len(sys.argv) > 4 else []
+except Exception:
+    db_lines = []
+for raw in db_lines:
+    if '\\t' not in raw: continue
+    parts = raw.split('\\t')
+    if len(parts) < 4: continue
+    tid, last_ts, count_s, last_role = parts[0], parts[1], parts[2], parts[3]
+    try: msg_count = int(count_s)
+    except ValueError: msg_count = 0
+    rec = threads.setdefault(tid, {'sources': set()})
+    rec['ts'] = last_ts
+    rec['lastActivity'] = last_ts
+    rec['msgCount'] = msg_count
+    rec['lastRole'] = last_role.strip()
+    ts_dt = to_dt(last_ts)
+    if rec['lastRole'] == 'user' and ts_dt is not None and (now_utc - ts_dt).total_seconds() > 120:
+        rec['sources'].add('no-reply')
+        rec.setdefault('reason', 'no assistant reply (silent loss?)')
+
+# 1. Ring flips
+for ts, inner in parse_loki(ring_blob):
+    tid = inner.get('threadId')
+    if not tid: continue
+    reason = inner.get('reason', '')
+    if reason_filter:
+        wanted = [r.strip() for r in reason_filter.split(',') if r.strip()]
+        if not any(w in reason for w in wanted):
+            continue
+    upsert(tid, {
+        'ts': ts,
+        'source': 'flip',
+        'reason': reason,
+        'fromTier': inner.get('fromTier'),
+        'toTier': inner.get('toTier'),
+        'fromModel': inner.get('fromModel') or '?',
+        'toModel': inner.get('toModel') or '?',
+        'advanceCount': inner.get('advanceCount'),
+        'ringTiers': inner.get('ringTiers') or '',
+    }, 'flip')
+
+# 2. Stream aborts (filter on aborted:true)
+if not flips_only:
+    for ts, inner in parse_loki(abort_blob):
+        tid = inner.get('threadId')
+        if not tid: continue
+        if not inner.get('aborted'): continue  # Only true aborts
+        upsert(tid, {
+            'ts': ts,
+            'source': 'abort',
+            'reason': 'stream-aborted',
+            'aborted': True,
+            'completedNormally': inner.get('completedNormally'),
+            'elapsedMs': inner.get('elapsedMs'),
+        }, 'abort')
+
+# 3. LLM errors — these often lack threadId directly. Use trace_id to bridge
+# back to a thread by matching against ring flip / abort entries we already
+# collected (same trace_id).
+if not flips_only:
+    trace_to_thread = {}
+    for ts, inner in parse_loki(ring_blob):
+        tid = inner.get('threadId'); trace = inner.get('trace_id')
+        if tid and trace: trace_to_thread[trace] = tid
+    for ts, inner in parse_loki(abort_blob):
+        tid = inner.get('threadId'); trace = inner.get('trace_id')
+        if tid and trace: trace_to_thread[trace] = tid
+    for ts, inner in parse_loki(error_blob):
+        trace = inner.get('trace_id')
+        tid = inner.get('threadId') or trace_to_thread.get(trace, '')
+        if not tid: continue
+        err = inner.get('error') or {}
+        msg = err.get('message') if isinstance(err, dict) else str(err)
+        upsert(tid, {
+            'ts': ts,
+            'source': 'error',
+            'reason': msg or 'llm-error',
+            'errorName': (err.get('name') if isinstance(err, dict) else None) or '',
+            'modelId': inner.get('modelId') or '',
+            'provider': inner.get('provider') or '',
+        }, 'error')
+
+# Apply post-filters that depend on the merged record.
+PROBLEM_SOURCES = {'flip', 'abort', 'error', 'no-reply'}
+
+def keep(rec):
+    sources = rec.get('sources', set())
+    if errors_only and 'error' not in sources: return False
+    if aborted_only and 'abort' not in sources: return False
+    # --reason filters flip events; if set, the thread must have a matching flip.
+    if reason_filter and 'flip' not in sources: return False
+    if problems_only and not (sources & PROBLEM_SOURCES): return False
+    return True
+
+rows = [(tid, rec) for tid, rec in threads.items() if keep(rec)]
+rows.sort(key=lambda x: x[1].get('ts', ''), reverse=True)
+rows = rows[:limit]
+
+def thread_url(tid):
+    return f"https://admin.{env}.pharmia.ca/atlas?thread={urllib.parse.quote(tid, safe='')}"
+
+if as_json:
+    out = []
+    for tid, rec in rows:
+        rec_copy = {k: (sorted(v) if isinstance(v, set) else v) for k, v in rec.items()}
+        rec_copy['threadId'] = tid
+        rec_copy['threadUrl'] = thread_url(tid)
+        out.append(rec_copy)
+    print(json.dumps(out, indent=2))
+    sys.exit(0)
+
+if not rows:
+    what = "problematic threads" if problems_only else "threads"
+    print(f"threads list: no {what} on {env} in window {from_iso} → {to_iso}")
+    sys.exit(0)
+
+# Table render. Wider terminals get wider model column.
+def fmt_ts(ts):
+    if not ts: return '?'
+    # Loki timestamps are like 2026-05-09T00:09:23.919Z or 2026-05-08 23:55:09.286
+    return ts.replace('T', ' ')[:19]
+
+def short_model(s):
+    # Collapse provider noise like `fireworks.chat/accounts/fireworks/models/kimi-k2p6`
+    # → `fireworks/kimi-k2p6` for readability. Keep full string in --json output.
+    if not s: return ''
+    s = s.replace('.chat/', '/').replace('accounts/fireworks/models/', '')
+    s = s.replace('moonshotai/', '')  # drop org prefix on baseten/ollama models
+    return s
+
+def fmt_model_pair(rec):
+    # Tier and model transition are sourced from a `flip` event whenever one
+    # has been observed for this thread, even if the latest event is an
+    # error/abort. Falls back to error's modelId when there's no flip data.
+    ft, tt = rec.get('fromTier'), rec.get('toTier')
+    tier_str = f"{ft}→{tt}" if ft is not None and tt is not None else ''
+    fm, tm = rec.get('fromModel'), rec.get('toModel')
+    if fm and tm and fm != '?' and tm != '?':
+        return (f"{short_model(fm)} → {short_model(tm)}", tier_str)
+    if rec.get('source') == 'abort':
+        elapsed = rec.get('elapsedMs')
+        return (f"abort after {elapsed}ms" if elapsed else "stream aborted", tier_str)
+    # Error-only row, or pre-enrichment flip: show whatever model we have.
+    prov = rec.get('provider', '')
+    model = rec.get('modelId', '')
+    if prov or model:
+        return (short_model(f"{prov}/{model}".strip('/')), tier_str)
+    return ('—', tier_str)
+
+def short_reason(rec, maxlen=28):
+    r = rec.get('reason') or ''
+    return (r[:maxlen-1] + '…') if len(r) > maxlen else r
+
+def status_str(rec):
+    probs = sorted(rec.get('sources', set()) & PROBLEM_SOURCES)
+    return '! ' + '+'.join(probs) if probs else 'ok'
+
+def detail_str(rec):
+    # Prefer the model transition for flips; else surface the problem reason;
+    # else, for healthy threads, the last role so the row isn't blank.
+    sources = rec.get('sources', set())
+    if 'flip' in sources:
+        model_str, tier_str = fmt_model_pair(rec)
+        return f"[{tier_str}] {model_str}" if tier_str else model_str
+    if sources & PROBLEM_SOURCES:
+        return short_reason(rec, 48)
+    return f"last: {rec.get('lastRole','?')}"
+
+problem_count = sum(1 for _, rec in rows if rec.get('sources', set()) & PROBLEM_SOURCES)
+print(f"{'TIME':<19}  {'STATUS':<16} {'MSGS':>4}  {'DETAIL':<50} THREAD")
+print('─' * 150)
+for tid, rec in rows:
+    print(f"{fmt_ts(rec.get('ts','')):<19}  {status_str(rec):<16} {rec.get('msgCount','?'):>4}  {detail_str(rec)[:50]:<50} {thread_url(tid)}")
+
+print(f"\n{len(rows)} thread(s) shown · {problem_count} flagged (!) · "
+      f"{len(rows)-problem_count} ok. Inspect any with: threads {env} <thread-id>  (or paste the URL)")
+PYEOF
+  exit 0
+fi
+
+MODE="readable"
+ENV=""
+THREAD_ID=""
+TRACE_ID=""
+# Langfuse: full per-observation timing rendered by default. Each trace adds
+# one extra API call (~200-500ms). --langfuse-summary skips observations for
+# faster output; --no-langfuse skips Langfuse entirely.
+LANGFUSE="detail"   # detail | summary | off | only
+OBS="summary"       # summary | detail | off
+OBS_PAD="30s"
+SKIP_PG=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --rca) MODE="rca"; shift ;;
+    --tools) MODE="tools"; shift ;;
+    --last) MODE="last"; shift ;;
+    --summary) MODE="summary"; shift ;;
+    --raw) MODE="raw"; shift ;;
+    --json) MODE="json"; shift ;;
+    --langfuse) LANGFUSE="only"; SKIP_PG=1; shift ;;
+    --langfuse-detail) LANGFUSE="detail"; shift ;;  # back-compat (now default)
+    --langfuse-summary) LANGFUSE="summary"; shift ;;
+    --no-langfuse) LANGFUSE="off"; shift ;;
+    --obs-detail) OBS="detail"; shift ;;
+    --no-obs) OBS="off"; shift ;;
+    --obs-pad) shift; OBS_PAD="${1:-30s}"; shift ;;
+    --trace) shift; TRACE_ID="${1:-}"; shift ;;
+    --trace=*) TRACE_ID="${1#*=}"; shift ;;
+    --help|-h) show_help; exit 0 ;;
+    http*)
+      URL="$1"
+      HOST="${URL#*//}"; HOST="${HOST%%/*}"
+      PATHQ="${URL#*//}"; PATHQ="${PATHQ#*/}"   # everything after host (path?query)
+      case "$HOST" in
+        admin.dev.pharmia.ca|admin.dev.pharmamate.ca|app.dev.pharmia.ca|app.dev.pharmamate.ca)         ENV="dev" ;;
+        admin.qa.pharmia.ca|admin.qa.pharmamate.ca|app.qa.pharmia.ca|app.qa.pharmamate.ca)             ENV="qa" ;;
+        admin.canary.pharmia.ca|admin.canary.pharmamate.ca)   ENV="canary" ;;
+        app.pharmia.ca|app.pharmamate.ca)                     ENV="canary" ;;
+        *)
+          echo "threads: unknown host '$HOST'. Expected admin.<env>.pharmia.ca, app.<env>.pharmia.ca, or app.pharmia.ca (canary)" >&2
+          exit 1
+          ;;
+      esac
+      # Two URL shapes carry a thread:
+      #   /atlas?thread=<id>           — direct thread link (UI deep-link)
+      #   /share/<shareId>            — public share link; shareId → threadId
+      #                                 lives in `atlas_share` (app DB), so we
+      #                                 resolve it before the normal flow.
+      case "$PATHQ" in
+        share/*)
+          SHARE_ID="${PATHQ#share/}"
+          SHARE_ID="${SHARE_ID%%[/?#]*}"
+          SHARE_ID=$(python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.argv[1]))" "$SHARE_ID")
+          # atlas_share.id (uuid) → threadId. Active shares only (revokedAt IS NULL),
+          # matching atlasShareRouter.get's gate. The share row lives in the *app*
+          # DB; the thread it points at lives in *mastra* (queried downstream).
+          SHARE_ESC=$(printf '%s' "$SHARE_ID" | sed "s/'/''/g")
+          # `|| true` + read-first-line in python keeps a no-match (grep exit 1)
+          # or SIGPIPE from aborting the script under `set -euo pipefail`, so the
+          # friendly "share not found" message below is what the user actually sees.
+          SHARE_OUT=$(pg "$ENV" app "copy (select \"threadId\" from atlas_share where id = '${SHARE_ESC}' and \"revokedAt\" is null limit 1) to stdout;" 2>/dev/null || true)
+          THREAD_ID=$(printf '%s\n' "$SHARE_OUT" | python3 -c "import sys;[print(l.rstrip()) or sys.exit(0) for l in sys.stdin if l.strip() and l.strip()!='SET']" || true)
+          if [[ -z "$THREAD_ID" ]]; then
+            echo "threads: share id '$SHARE_ID' not found or revoked on $ENV (atlas_share)." >&2
+            exit 1
+          fi
+          echo "threads: resolved share '$SHARE_ID' → thread '$THREAD_ID'" >&2
+          ;;
+        *)
+          THREAD_RAW="${URL#*thread=}"
+          THREAD_RAW="${THREAD_RAW%%&*}"
+          THREAD_ID=$(python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.argv[1]))" "$THREAD_RAW")
+          ;;
+      esac
+      shift
+      ;;
+    dev|qa|canary)
+      ENV="$1"; shift
+      if [[ $# -gt 0 && "$1" != --* ]]; then
+        THREAD_ID="$1"; shift
+      fi
+      ;;
+    *)
+      if [[ -n "$ENV" && -z "$THREAD_ID" ]]; then
+        THREAD_ID="$1"; shift
+      else
+        echo "threads: unexpected argument '$1'" >&2
+        echo "  hint: pass a URL, or <env> <thread-id>. See --help." >&2
+        exit 1
+      fi
+      ;;
+  esac
+done
+
+if [[ -n "$TRACE_ID" && -z "$THREAD_ID" ]]; then
+  if [[ -z "$ENV" ]]; then
+    echo "threads: --trace requires <env>" >&2
+    exit 1
+  fi
+  # Resolve trace_id → thread_id by searching Loki. Atlas log lines such as
+  # `[Atlas] Subscription ended` and tRPC handlers carry both `trace_id` and
+  # `threadId` in the same log line, so a substring grep is enough. Fall
+  # back to a wider 7d window if the default 24h doesn't hit.
+  RESOLVED_TID=""
+  for since in 6h 24h 7d; do
+    RESOLVED_TID=$(loki "$ENV" search "$TRACE_ID" --since "$since" --limit 200 2>/dev/null \
+      | python3 -c "
+import sys, re
+trace_id = sys.argv[1]
+# loki search emits JSON wrappers where the inner log line is escaped,
+# so the threadId field appears as \\\"threadId\\\":\\\"...\\\". We try both
+# the doubly-escaped form (wrapper) and the bare form (raw line passes).
+patterns = [
+    re.compile(r'\\\\\"threadId\\\\\":\\\\\"([^\\\\\"]+)\\\\\"'),
+    re.compile(r'\"threadId\"\s*:\s*\"([^\"]+)\"'),
+]
+preferred = None
+fallback = None
+# Drain stdin fully so loki doesn't take SIGPIPE under pipefail.
+for line in sys.stdin:
+    if preferred is not None or trace_id not in line:
+        continue
+    for pat in patterns:
+        m = pat.search(line)
+        if not m:
+            continue
+        tid = m.group(1)
+        if any(tag in tid for tag in ('-atlas-', '-consultation-', '-chat-')):
+            preferred = tid
+            break
+        if fallback is None:
+            fallback = tid
+print(preferred or fallback or '')
+" "$TRACE_ID")
+    if [[ -n "$RESOLVED_TID" ]]; then
+      break
+    fi
+  done
+  if [[ -z "$RESOLVED_TID" ]]; then
+    echo "threads: could not resolve trace_id '$TRACE_ID' to a thread (searched 6h/24h/7d)" >&2
+    echo "  hint: the trace may be from a non-thread codepath, or the log retention has rolled past it." >&2
+    exit 1
+  fi
+  echo "threads: resolved trace_id '$TRACE_ID' → thread '$RESOLVED_TID'" >&2
+  THREAD_ID="$RESOLVED_TID"
+fi
+
+if [[ -z "$ENV" || -z "$THREAD_ID" ]]; then
+  echo "threads: missing env or thread-id" >&2
+  echo "  run 'threads --help' for usage." >&2
+  exit 1
+fi
+
+ESCAPED_ID=$(printf '%s' "$THREAD_ID" | sed "s/'/''/g")
+QUERY="COPY (SELECT id, role, \"createdAtZ\"::text, content::text FROM mastra_messages WHERE thread_id = '${ESCAPED_ID}' ORDER BY \"createdAtZ\") TO STDOUT (FORMAT csv, QUOTE '\"', ESCAPE '\"')"
+
+# Render the CSV payload. Embed Python via -c (not a heredoc) so the pipe
+# from pg is not captured by the heredoc redirection.
+RENDER_SCRIPT=$(cat <<'PYEOF'
+import os, sys, csv, json, io, shutil, subprocess
+from datetime import datetime
+
+# Atlas threads routinely carry multi-hundred-KB fields (PDF/image uploads
+# inline in user messages, large tool results). Python csv's default cap is
+# 131072 bytes — without this, threads crashes on any image-heavy thread.
+csv.field_size_limit(sys.maxsize)
+
+mode = os.environ["MODE"]
+tid = os.environ["THREAD_ID"]
+env = os.environ["ENV"]
+langfuse_mode = os.environ.get("LANGFUSE", "auto")  # auto | off | detail | only
+obs_mode = os.environ.get("OBS", "summary")        # summary | detail | off
+obs_pad = os.environ.get("OBS_PAD", "30s")
+skip_pg = os.environ.get("SKIP_PG", "0") == "1"
+
+
+def _parse_dur(s):
+    """Parse a short duration string (e.g. '30s', '5m', '2h', '1d', '500ms') -> seconds."""
+    s = (s or "").strip().lower()
+    if not s:
+        return 30.0
+    try:
+        if s.endswith("ms"):
+            return float(s[:-2]) / 1000.0
+        if s.endswith("s"):
+            return float(s[:-1])
+        if s.endswith("m"):
+            return float(s[:-1]) * 60
+        if s.endswith("h"):
+            return float(s[:-1]) * 3600
+        if s.endswith("d"):
+            return float(s[:-1]) * 86400
+        return float(s)
+    except ValueError:
+        return 30.0
+
+
+def _fmt_iso(dt):
+    """ISO-8601 with Z suffix that all three CLIs accept."""
+    return dt.astimezone(tz=None).strftime("%Y-%m-%dT%H:%M:%SZ") if dt.tzinfo is None \
+        else dt.astimezone(tz=__import__('datetime').timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _run_langfuse_json(args, timeout=15):
+    """Invoke `langfuse api ... --json`; return parsed body or None on any failure.
+
+    Note: the langfuse CLI returns `ok: true` for any non-network failure and
+    puts the actual HTTP status in `status`. A 4xx/5xx returns `body.error`
+    instead of `body.data`, so callers must check for the data they expect.
+    """
+    if not shutil.which("langfuse"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["langfuse", "api", *args, "--json"],
+            check=False, capture_output=True, text=True, timeout=timeout,
+        )
+        if proc.returncode != 0:
+            return None
+        payload = json.loads(proc.stdout)
+        if not payload.get("ok"):
+            return None
+        if payload.get("status", 200) >= 400:
+            return None
+        return payload.get("body")
+    except Exception:
+        return None
+
+
+def fetch_langfuse_traces(thread_id, with_observations=False):
+    """Return list of traces (with optional sorted observations) for a sessionId."""
+    body = _run_langfuse_json([
+        "traces", "list", "--session-id", thread_id, "--limit", "50",
+    ])
+    if not body:
+        return []
+    traces = body.get("data") or []
+    traces.sort(key=lambda t: t.get("timestamp", ""))
+    if with_observations:
+        # Langfuse caps observations list at limit=100 (returns 400 above that).
+        # 100 is enough for ~all Atlas traces (richest dev incident had 59).
+        # Pagination via `page` is available if a future trace exceeds 100.
+        for t in traces:
+            obs_body = _run_langfuse_json([
+                "observations", "list", "--trace-id", t["id"], "--limit", "100",
+            ])
+            obs = (obs_body or {}).get("data") or []
+            obs.sort(key=lambda o: o.get("startTime", ""))
+            t["_observations"] = obs
+    return traces
+
+
+def fmt_cost(c):
+    if c is None:
+        return ""
+    try:
+        v = float(c)
+    except (TypeError, ValueError):
+        return ""
+    if v == 0:
+        return "$0"
+    if v < 0.01:
+        return f"${v:.4f}"
+    return f"${v:.3f}"
+
+
+def fmt_lat(s):
+    if s is None:
+        return ""
+    try:
+        v = float(s)
+    except (TypeError, ValueError):
+        return ""
+    if v < 1:
+        return f"{int(v * 1000)}ms"
+    if v < 60:
+        return f"{v:.2f}s"
+    return f"{int(v // 60)}m{int(v % 60)}s"
+
+
+def _summarize_models_used(traces):
+    """Aggregate generations by model name across all traces.
+
+    Returns a list of (model_name, call_count, total_output_tokens) sorted by
+    output tokens descending, so the model that did the heavy lifting (the
+    actual answer) shows up first. Returns [] if no observations available.
+    """
+    by_model = {}
+    for t in traces:
+        for o in (t.get("_observations") or []):
+            if o.get("type") != "GENERATION":
+                continue
+            name = o.get("model") or o.get("name") or "?"
+            usage = o.get("usageDetails") or {}
+            out = int(usage.get("output") or 0)
+            if name not in by_model:
+                by_model[name] = {"calls": 0, "output": 0}
+            by_model[name]["calls"] += 1
+            by_model[name]["output"] += out
+    rows = [(m, v["calls"], v["output"]) for m, v in by_model.items()]
+    rows.sort(key=lambda r: r[2], reverse=True)
+    return rows
+
+
+def render_langfuse(traces, with_observations):
+    if not traces:
+        if langfuse_mode in ("only", "detail"):
+            print("threads: no Langfuse traces matched this thread (sessionId).", file=sys.stderr)
+        return
+    print()
+    print("=" * 80)
+    print(f"Langfuse traces ({len(traces)}):")
+    print("=" * 80)
+    if with_observations:
+        models = _summarize_models_used(traces)
+        if models:
+            print("\nModels used (most output first):")
+            for name, calls, out in models:
+                print(f"  {name:<60} calls={calls:>3}  output={out:>6} tok")
+    total_cost = sum(float(t.get("totalCost") or 0) for t in traces)
+    total_lat = sum(float(t.get("latency") or 0) for t in traces)
+    for ti, t in enumerate(traces):
+        tags = ",".join(t.get("tags") or []) or "-"
+        cost = fmt_cost(t.get("totalCost"))
+        lat = fmt_lat(t.get("latency"))
+        ts = (t.get("timestamp") or "")[:19].replace("T", " ")
+        print(f"\n[{ti+1}/{len(traces)}] id={t['id']}")
+        print(f"  ts={ts}  lat={lat}  cost={cost}  tags=[{tags}]")
+        if t.get("htmlPath"):
+            print(f"  url=https://langfuse.bentostudio.io{t['htmlPath']}")
+        obs = t.get("_observations") or []
+        if obs:
+            agents = [o for o in obs if o.get("type") == "AGENT"]
+            gens = [o for o in obs if o.get("type") == "GENERATION"]
+            tools = [o for o in obs if o.get("type") == "TOOL"]
+            if agents:
+                print(f"  agents ({len(agents)}):")
+                for o in agents:
+                    print(f"    {(o.get('startTime') or '')[11:23]} → {(o.get('endTime') or '')[11:23]}  "
+                          f"lat={fmt_lat(o.get('latency')):>7}  {o.get('name', '?')}")
+            if gens:
+                print(f"  generations ({len(gens)}):")
+                for o in gens:
+                    name = o.get("name", "?")
+                    cost_g = fmt_cost(o.get("calculatedTotalCost") or o.get("totalCost"))
+                    print(f"    {(o.get('startTime') or '')[11:23]} → {(o.get('endTime') or '')[11:23]}  "
+                          f"lat={fmt_lat(o.get('latency')):>7}  cost={cost_g:>7}  {name}")
+            if tools:
+                print(f"  tools ({len(tools)}):")
+                for o in tools:
+                    print(f"    {(o.get('startTime') or '')[11:23]} → {(o.get('endTime') or '')[11:23]}  "
+                          f"lat={fmt_lat(o.get('latency')):>7}  {o.get('name', '?')}")
+    print()
+    print(f"Total: latency≈{fmt_lat(total_lat)}  cost≈{fmt_cost(total_cost)}")
+
+
+# --- Loki / Tempo / Prom integration -----------------------------------------
+# Each helper shells out to the env-aware CLI, parses JSON, and degrades
+# silently when the CLI is missing or returns nothing — same UX contract as
+# Langfuse. The window is the thread's first→last message ts, padded by
+# `obs_pad` on each side. All times are ISO-8601 UTC with a Z suffix.
+
+
+def _parse_loki_line(line):
+    """Normalize a single line from `loki <env> ...` to (datetime, message_str).
+
+    The CLI emits two shapes depending on env / output config:
+      - JSON-per-line:   {"labels":{...},"line":"...","timestamp":"YYYY-...-04:00"}
+      - logcli legacy:   "YYYY-MM-DDTHH:MM:SS.000Z {labels} message..."
+
+    Returns (None, None) on a line that doesn't fit either shape so callers
+    can drop it without knowing the format.
+    """
+    from datetime import datetime
+    if not line:
+        return None, None
+    if line.lstrip().startswith("{"):
+        try:
+            payload = json.loads(line)
+        except Exception:
+            return None, None
+        ts_str = payload.get("timestamp") or ""
+        msg = payload.get("line") or ""
+        # ts may be `+00`/`-04:00` style — normalize trailing zone width
+        try:
+            iso = ts_str.replace("Z", "+00:00")
+            # `+00` (no minutes) is not ISO-8601 — pad to `+00:00`
+            if len(iso) >= 3 and iso[-3] in ("+", "-") and ":" not in iso[-3:]:
+                iso = iso + ":00"
+            ts = datetime.fromisoformat(iso)
+        except Exception:
+            return None, None
+        return ts, msg
+    # legacy shape — first whitespace-delimited token is the iso ts.
+    try:
+        ts_str, rest = line.split(" ", 1)
+        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    except Exception:
+        return None, None
+    return ts, rest
+
+
+def _run_cmd_json(args, timeout=10):
+    """Invoke a CLI returning JSON on stdout. Returns parsed JSON or None."""
+    if not shutil.which(args[0]):
+        return None
+    try:
+        proc = subprocess.run(
+            args, check=False, capture_output=True, text=True, timeout=timeout,
+        )
+        if proc.returncode != 0:
+            return None
+        return json.loads(proc.stdout)
+    except Exception:
+        return None
+
+
+def _run_cmd_text(args, timeout=10):
+    """Invoke a CLI returning plain text. Returns stdout or None."""
+    if not shutil.which(args[0]):
+        return None
+    try:
+        proc = subprocess.run(
+            args, check=False, capture_output=True, text=True, timeout=timeout,
+        )
+        if proc.returncode != 0:
+            return None
+        return proc.stdout
+    except Exception:
+        return None
+
+
+def fetch_loki_errors(env_name, start_dt, end_dt, thread_id):
+    """Fetch ERROR + WARN logs in the window via `loki <env> errors/warnings`.
+
+    The loki CLI only supports `--since DUR`. We compute the duration from
+    `now() - start` (with padding) and filter results client-side to the
+    window. Two passes (errors + warnings) so both are tagged distinctly.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    since_secs = max(60, int((now - start_dt).total_seconds()) + 60)
+    if since_secs > 14 * 86400:
+        # Loki CLI default retention varies; bail rather than scan weeks.
+        return None
+    since = f"{since_secs}s"
+
+    def _pull(level_cmd):
+        out = _run_cmd_text([
+            "loki", env_name, level_cmd, "--since", since, "--limit", "300",
+        ], timeout=20)
+        if not out:
+            return []
+        rows = []
+        for line in out.splitlines():
+            line = line.rstrip()
+            if not line or line.startswith("Common labels:"):
+                continue
+            ts, rest = _parse_loki_line(line)
+            if ts is None:
+                continue
+            if ts < start_dt or ts > end_dt:
+                continue
+            rows.append({"ts": ts, "level": level_cmd, "line": rest})
+        return rows
+
+    errs = _pull("errors")
+    warns = _pull("warnings")
+    if errs is None and warns is None:
+        return None
+    return {"errors": errs or [], "warnings": warns or []}
+
+
+def fetch_atlas_activity(env_name, start_dt, end_dt, thread_id):
+    """Mine Loki for Atlas-specific structured signals around the thread.
+
+    Surfaces the patterns oncall actually cares about during an LLM
+    incident (where vanilla error/warn dumps lose the structured fields):
+
+      - "Error in LLM execution"  → provider/model/runId aggregation
+      - "[Atlas] Subscription ended" → completedNormally / aborted /
+        elapsedMs / msSinceLastChunk for THIS thread
+      - "Time to first chunk"     → TTFT outliers for this thread
+
+    Each pattern is a separate `loki search`; we filter to the window
+    in Python because the loki CLI only takes --since.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    since_secs = max(60, int((now - start_dt).total_seconds()) + 60)
+    if since_secs > 14 * 86400:
+        return None
+    since = f"{since_secs}s"
+
+    def _search(needle, limit=200):
+        out = _run_cmd_text([
+            "loki", env_name, "search", needle, "--since", since, "--limit", str(limit),
+        ], timeout=20)
+        if not out:
+            return []
+        rows = []
+        for line in out.splitlines():
+            line = line.rstrip()
+            if not line or line.startswith("Common labels:"):
+                continue
+            ts, rest = _parse_loki_line(line)
+            if ts is None:
+                continue
+            if ts < start_dt or ts > end_dt:
+                continue
+            rows.append({"ts": ts, "line": rest})
+        return rows
+
+    def _payload(line):
+        # Mastra emits both a structured JSON line AND a colored
+        # human-readable line for the same event. The structured line is
+        # the one we want; the colored one returns {} and we ignore it.
+        s = (line or "").lstrip()
+        if not s.startswith("{"):
+            return {}
+        try:
+            return json.loads(s)
+        except Exception:
+            return {}
+
+    # 1. LLM errors during the window — aggregate by provider/model so a
+    #    multi-provider blast radius is obvious at a glance.
+    err_rows = _search('Error in LLM execution', limit=300)
+    by_provider = {}
+    for r in err_rows:
+        payload = _payload(r["line"])
+        if not payload:
+            continue  # the colored sibling line; the structured one carries the fields
+        prov = payload.get("provider") or "?"
+        model = payload.get("modelId") or "?"
+        key = f"{prov} / {model}"
+        by_provider.setdefault(key, []).append(payload.get("runId") or "")
+
+    # 2. Atlas subscription endings for THIS thread. The line carries
+    #    threadId as a JSON field, so substring match keeps it cheap.
+    #    We also capture the OTel trace_id so render_obs can pull the
+    #    matching span tree from Tempo without a second loki round-trip.
+    sub_rows = []
+    for r in _search('[Atlas] Subscription ended', limit=200):
+        if thread_id and thread_id not in r["line"]:
+            continue
+        payload = _payload(r["line"])
+        if not payload:
+            continue
+        sub_rows.append({
+            "ts": r["ts"],
+            "completedNormally": payload.get("completedNormally"),
+            "aborted": payload.get("aborted"),
+            "elapsedMs": payload.get("elapsedMs"),
+            "chunkCount": payload.get("chunkCount"),
+            "msSinceLastChunk": payload.get("msSinceLastChunk"),
+            "trace_id": payload.get("trace_id"),
+        })
+
+    # 3. TTFT lines for this thread — highlights model / network warmup.
+    ttft_rows = []
+    for r in _search('Time to first chunk', limit=200):
+        if thread_id and thread_id not in r["line"]:
+            continue
+        # Line format: `Time to first chunk: <ms>ms (<thread_id>)`
+        import re as _re
+        m = _re.search(r'Time to first chunk:\s*(\d+)\s*ms', r["line"])
+        if not m:
+            continue
+        ttft_rows.append({"ts": r["ts"], "ms": int(m.group(1))})
+
+    # 4. `[Atlas] stream-result` ERROR lines — these are the post-stream
+    #    verdict log emitted when the user received no text after all
+    #    fallbacks. The structured payload carries primaryFinishReason,
+    #    primaryHadText, primaryTotalTextLength, fallbackFired,
+    #    primaryModel, primaryProvider — exactly the verdict fields a
+    #    reader needs to triage "why did the user see nothing?" in 5
+    #    seconds. Captured separately from generic LLM errors because
+    #    these are deliberately emitted by atlasChatRouter and have a
+    #    rich payload.
+    stream_result_errs = []
+    for r in _search('[Atlas] stream-result', limit=200):
+        if thread_id and thread_id not in r["line"]:
+            continue
+        payload = _payload(r["line"])
+        if not payload:
+            continue
+        if (payload.get("level") or "").lower() != "error":
+            # only the error-level lines mean "user got nothing" — the
+            # info-level stream-result lines are happy-path logs
+            continue
+        stream_result_errs.append({
+            "ts": r["ts"],
+            "message": payload.get("message") or "",
+            "primaryFinishReason": payload.get("primaryFinishReason"),
+            "primaryHadText": payload.get("primaryHadText"),
+            "primaryTotalTextLength": payload.get("primaryTotalTextLength"),
+            "primaryModel": payload.get("primaryModel"),
+            "primaryProvider": payload.get("primaryProvider"),
+            "fallbackFired": payload.get("fallbackFired"),
+            "fallbackErrored": payload.get("fallbackErrored"),
+            "fallbackTotalTextLength": payload.get("fallbackTotalTextLength"),
+            "guardTripped": payload.get("guardTripped"),
+        })
+
+    if (not by_provider and not sub_rows and not ttft_rows
+            and not stream_result_errs):
+        return None
+    return {
+        "llm_errors_by_provider": by_provider,
+        "subscriptions": sub_rows,
+        "ttft": ttft_rows,
+        "stream_result_errors": stream_result_errs,
+    }
+
+
+def fetch_tempo_span_tree(env_name, trace_id, max_lines):
+    """Pull the rendered span tree for one OTel trace_id from Tempo.
+
+    Uses `tempo <env> trace <id>` which already prints a compact indented
+    tree (SERVICE  OPERATION  DURATION). We just shell out and truncate
+    so a single huge trace can't dominate the obs section.
+    """
+    if not trace_id:
+        return None
+    out = _run_cmd_text([
+        "tempo", env_name, "trace", trace_id,
+    ], timeout=15)
+    if not out:
+        return None
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    truncated = len(lines) > max_lines
+    return {
+        "lines": lines[:max_lines],
+        "total_lines": len(lines),
+        "truncated": truncated,
+    }
+
+
+def fetch_tempo_summary(env_name, start_dt, end_dt):
+    """Fetch span search results in the window."""
+    body = _run_cmd_json([
+        "tempo", env_name, "search", "{}",
+        "--start", _fmt_iso(start_dt), "--end", _fmt_iso(end_dt),
+        "--limit", "50", "--json",
+    ], timeout=20)
+    if body is None:
+        return None
+    traces = body.get("traces") if isinstance(body, dict) else body
+    if not isinstance(traces, list):
+        return {"traces": []}
+    return {"traces": traces}
+
+
+def fetch_pyro_top(env_name, start_dt, end_dt, top_n=8):
+    """Top CPU/wall functions from Pyroscope across the thread window.
+
+    Uses `pyro top --from/--to` for a precise window so the aggregate
+    reflects only what ran during the thread, not everything between the
+    thread start and "now". Skip entirely when Pyroscope retention can't
+    reach the window (>14d) — beyond that the query just returns empty.
+    """
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    if now - end_dt > timedelta(days=14):
+        return None  # outside typical pyroscope retention
+    out = _run_cmd_text([
+        "pyro", env_name, "top",
+        "--from", _fmt_iso(start_dt),
+        "--to", _fmt_iso(end_dt),
+        "--nodes", str(top_n),
+        "--query", '{service_name="pharmia-api"}',
+    ], timeout=20)
+    if not out:
+        return None
+    rows = []
+    in_table = False
+    for line in out.splitlines():
+        # Skip header lines until we hit the dashed separator
+        if "─" in line or "---" in line:
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        # Stop at blank line / footer
+        if not line.strip() or line.strip().startswith("unresolved:"):
+            break
+        # Row shape: "    Self  Self%      Cum   Cum%  Function"
+        # Self values can have units (s, ms, min). Parse columns by whitespace
+        # but keep the function name (last column) which may contain spaces
+        # and source location.
+        parts = line.split(None, 4)
+        if len(parts) < 5:
+            continue
+        rows.append({
+            "self": parts[0],
+            "selfp": parts[1].rstrip("%"),
+            "cum": parts[2],
+            "cump": parts[3].rstrip("%"),
+            "func": parts[4],
+        })
+    if not rows:
+        return None
+    return {"rows": rows}
+
+
+def fetch_prom_window(env_name, start_dt, end_dt):
+    """Snapshot a couple of obvious health metrics across the window.
+
+    Each query is a small `query-range` over the window. We render the
+    min/max/last for each. Skips silently if a metric isn't scraped on the
+    target env.
+    """
+    # Use __name__ regex matchers so the queries work across envs that use
+    # OTel-native metric names with dots ("http.server.request.duration_seconds_count")
+    # and envs that use the Prometheus-translated underscore form
+    # ("http_server_request_duration_seconds_count").
+    queries = {
+        "http_request_rate (rps)": 'sum(rate({__name__=~"http[._]server[._]request[._]duration_seconds_count"}[1m]))',
+        "http_p95 (s)":            'histogram_quantile(0.95, sum by (le) (rate({__name__=~"http[._]server[._]request[._]duration_seconds_bucket"}[5m])))',
+        "node_cpu_busy":           'sum(rate({__name__=~"node_cpu_seconds_total",mode!="idle"}[1m]))',
+        "process_rss_bytes":       'avg({__name__=~"process_resident_memory_bytes"})',
+    }
+    out = {}
+    span = max(15.0, (end_dt - start_dt).total_seconds())
+    step = "15s" if span <= 600 else ("1m" if span <= 3600 else "5m")
+    for label, q in queries.items():
+        body = _run_cmd_json([
+            "prom", env_name, "query-range", q,
+            "--start", _fmt_iso(start_dt), "--end", _fmt_iso(end_dt),
+            "--step", step, "--format", "json",
+        ], timeout=10)
+        if not body:
+            continue
+        # `prom <env> query-range --format json` strips the Prometheus
+        # envelope and returns the bare result array
+        # ([{metric, values:[[ts,val]]}, …]). Older builds may still emit
+        # the full {data:{result:[…]}} shape — handle both.
+        if isinstance(body, list):
+            results = body
+        elif isinstance(body, dict):
+            results = body.get("data", {}).get("result", [])
+        else:
+            results = []
+        series_summary = []
+        for s in results[:3]:
+            vals = [float(v[1]) for v in (s.get("values") or []) if v and v[1] not in (None, "NaN")]
+            if not vals:
+                continue
+            series_summary.append({
+                "metric": s.get("metric", {}),
+                "min": min(vals),
+                "max": max(vals),
+                "last": vals[-1],
+                "n": len(vals),
+            })
+        if series_summary:
+            out[label] = series_summary
+    return out or None
+
+
+def render_obs(env_name, start_dt, end_dt, thread_id, mode_label):
+    """Render the consolidated observability section."""
+    # Pad window
+    pad = _parse_dur(obs_pad)
+    from datetime import timedelta
+    s = start_dt - timedelta(seconds=pad)
+    e = end_dt + timedelta(seconds=pad)
+
+    print()
+    print("=" * 80)
+    print(f"Observability around thread window  [{_fmt_iso(s)} → {_fmt_iso(e)}]  pad=±{int(pad)}s")
+    print("=" * 80)
+
+    # Loki ----------------------------------------------------------------
+    loki = fetch_loki_errors(env_name, s, e, thread_id)
+    if loki is None:
+        print("\nLoki: skipped (cli missing or window > 14d)")
+    else:
+        errs = loki["errors"]
+        warns = loki["warnings"]
+        # Filter to lines that mention the thread id when possible — that's
+        # the highest-signal subset; fall back to the full window when none.
+        tid_short = (thread_id or "").split("-atlas-")[0][:36]
+        related_errs = [r for r in errs if tid_short and tid_short in r["line"]] or errs
+        related_warns = [r for r in warns if tid_short and tid_short in r["line"]] or warns
+        print(f"\nLoki:  errors={len(errs)} ({len(related_errs)} thread-related)  "
+              f"warnings={len(warns)} ({len(related_warns)} thread-related)")
+        cap = 8 if mode_label == "detail" else 3
+        for r in related_errs[:cap]:
+            ts_short = r["ts"].strftime("%H:%M:%S")
+            print(f"  ERR {ts_short}  {r['line'][:240]}")
+        for r in related_warns[:cap]:
+            ts_short = r["ts"].strftime("%H:%M:%S")
+            print(f"  WARN {ts_short}  {r['line'][:240]}")
+
+    # Atlas / LLM activity (structured signals from Loki) -----------------
+    atlas = fetch_atlas_activity(env_name, s, e, thread_id)
+    if atlas is None:
+        print("\nLLM:   skipped (loki cli missing or no matching activity)")
+    else:
+        prov = atlas["llm_errors_by_provider"]
+        subs = atlas["subscriptions"]
+        ttfts = atlas["ttft"]
+        print("\nLLM activity:")
+        if prov:
+            print(f"  errors by provider/model in window:")
+            for key, runs in sorted(prov.items(), key=lambda kv: -len(kv[1])):
+                print(f"    {len(runs):>3}x  {key}")
+        else:
+            print("  errors by provider/model in window: 0")
+        if subs:
+            print("  Atlas subscription endings (this thread):")
+            for r in subs:
+                ok = "OK" if r["completedNormally"] else "ABORT" if r["aborted"] else "INCOMPLETE"
+                ts = r["ts"].strftime("%H:%M:%S")
+                ms_chunk = r["msSinceLastChunk"]
+                tail = f"  msSinceLastChunk={ms_chunk}ms" if ms_chunk is not None else ""
+                print(f"    {ts}  {ok:<10}  elapsed={r['elapsedMs']}ms  chunks={r['chunkCount']}{tail}")
+        if ttfts:
+            ms_vals = [r["ms"] for r in ttfts]
+            print(f"  TTFT (this thread): n={len(ms_vals)}  min={min(ms_vals)}ms  "
+                  f"max={max(ms_vals)}ms  last={ms_vals[-1]}ms")
+
+    # Tempo ---------------------------------------------------------------
+    tempo = fetch_tempo_summary(env_name, s, e)
+    thread_trace_ids = []
+    if atlas and isinstance(atlas.get("subscriptions"), list):
+        # Trace ids of THIS thread's subscription endings — already
+        # harvested by fetch_atlas_activity. Preserve order, dedupe.
+        for sub in atlas["subscriptions"]:
+            t = sub.get("trace_id")
+            if t and t not in thread_trace_ids:
+                thread_trace_ids.append(t)
+    if tempo is None:
+        print("\nTempo: skipped (cli missing or query failed)")
+    else:
+        traces = tempo["traces"]
+        # Sort by duration desc (durationMs may be 'durationMs' or 'duration')
+        def _dur(t):
+            return float(t.get("durationMs") or t.get("duration") or 0)
+        slow = sorted(traces, key=_dur, reverse=True)
+        errored = [t for t in traces
+                   if (t.get("rootSpanStatus") or t.get("status") or "").lower() == "error"]
+        print(f"\nTempo: traces_in_window={len(traces)}  errored={len(errored)}")
+        cap = 8 if mode_label == "detail" else 3
+        for t in slow[:cap]:
+            tid_t = t.get("traceID") or t.get("traceId") or "?"
+            svc = t.get("rootServiceName") or "?"
+            op = t.get("rootTraceName") or t.get("rootSpanName") or "?"
+            mark = " *thread" if tid_t in thread_trace_ids else ""
+            print(f"  {_dur(t):>8.0f}ms  {svc}/{op}  trace={tid_t}{mark}")
+        for t in errored[:cap]:
+            tid_t = t.get("traceID") or t.get("traceId") or "?"
+            print(f"  ERROR  trace={tid_t}  {t.get('rootTraceName') or t.get('rootSpanName') or '?'}")
+
+    # Tempo span trees for THIS thread's traces. The summary above tells
+    # you _which_ traces ran; the tree tells you _what blew up inside_
+    # (e.g. an LLM POST hung for 70s before abort). Skip silently if no
+    # trace_ids were captured from the Atlas Subscription logs.
+    if thread_trace_ids:
+        tree_cap = 3 if mode_label == "detail" else 2
+        line_cap = 60 if mode_label == "detail" else 25
+        rendered = 0
+        for tid_t in thread_trace_ids:
+            if rendered >= tree_cap:
+                break
+            tree = fetch_tempo_span_tree(env_name, tid_t, line_cap)
+            if not tree:
+                continue
+            print(f"\nTempo span tree  trace={tid_t}  ({tree['total_lines']} spans"
+                  f"{', truncated' if tree['truncated'] else ''}):")
+            for ln in tree["lines"]:
+                print(f"  {ln}")
+            rendered += 1
+        if rendered == 0:
+            print("\nTempo span trees: no thread-scoped traces resolved (Tempo may be offline or trace ids stale).")
+
+    # Prometheus -----------------------------------------------------------
+    prom_out = fetch_prom_window(env_name, s, e)
+    if prom_out is None:
+        print("\nProm:  skipped (cli missing or no matching metrics)")
+    else:
+        print("\nProm:")
+        for label, series_list in prom_out.items():
+            for s_summary in series_list:
+                metric_keys = {k: v for k, v in (s_summary["metric"] or {}).items()
+                               if k not in ("__name__",)}
+                tag = ",".join(f"{k}={v}" for k, v in list(metric_keys.items())[:2]) or "(global)"
+                print(f"  {label:<28}  min={s_summary['min']:.3g}  "
+                      f"max={s_summary['max']:.3g}  last={s_summary['last']:.3g}  "
+                      f"n={s_summary['n']}  [{tag}]")
+
+    # Pyroscope ------------------------------------------------------------
+    cap_pyro = 8 if mode_label == "detail" else 5
+    pyro_out = fetch_pyro_top(env_name, s, e, top_n=cap_pyro)
+    if pyro_out is None:
+        from datetime import datetime, timezone, timedelta
+        if datetime.now(timezone.utc) - e > timedelta(days=14):
+            print("\nPyro:  skipped (thread > 14d old, outside pyroscope retention)")
+        else:
+            print("\nPyro:  skipped (cli missing or no profile data)")
+    else:
+        print(f"\nPyro:  top CPU funcs in window")
+        for r in pyro_out["rows"][:cap_pyro]:
+            print(f"  self={r['self']:>8}  ({r['selfp']:>5}%)  cum={r['cum']:>8}  "
+                  f"({r['cump']:>5}%)  {r['func'][:120]}")
+
+
+def maybe_render_obs(env_name, messages):
+    """Compute window from messages and render if obs_mode != off."""
+    if obs_mode == "off" or not messages:
+        return
+    first = parse_ts(messages[0]["ts"])
+    last = parse_ts(messages[-1]["ts"])
+    if not first or not last:
+        return
+    if first == last:
+        from datetime import timedelta
+        last = first + timedelta(seconds=1)
+    render_obs(env_name, first, last, tid, obs_mode)
+
+
+# --- Langfuse-only mode short-circuits the rest of the script ---
+
+if langfuse_mode == "only":
+    traces = fetch_langfuse_traces(tid, with_observations=True)
+    if not traces:
+        print(f"threads: no Langfuse traces for sessionId {tid!r}", file=sys.stderr)
+        sys.exit(1)
+    render_langfuse(traces, with_observations=True)
+    sys.exit(0)
+
+raw = sys.stdin.read()
+lines = raw.split('\n')
+start = None
+for i, line in enumerate(lines):
+    if line in ("SET", "") or line.startswith("Pager "):
+        continue
+    if "," in line:
+        start = i
+        break
+
+if start is None:
+    print(f"threads: no rows returned for thread {tid!r} in {env}", file=sys.stderr)
+    sys.exit(1)
+
+body = '\n'.join(lines[start:])
+reader = csv.reader(io.StringIO(body))
+messages = []
+for row in reader:
+    if len(row) != 4:
+        continue
+    mid, role, ts, content = row
+    try:
+        c = json.loads(content)
+    except json.JSONDecodeError:
+        c = {"parts": [{"type": "text", "text": content}]}
+    messages.append({"id": mid, "role": role, "ts": ts, "content": c})
+
+if not messages:
+    print(f"threads: no messages for thread {tid!r} in {env}", file=sys.stderr)
+    sys.exit(1)
+
+
+def parts_of(msg):
+    c = msg.get("content")
+    if isinstance(c, dict):
+        return c.get("parts") or []
+    return []
+
+
+def parse_ts(s):
+    # "2026-04-22 23:33:29.145+00" -> datetime
+    try:
+        return datetime.fromisoformat(s.replace(" ", "T").replace("+00", "+00:00"))
+    except Exception:
+        return None
+
+
+def fmt_delta(prev_ts, ts):
+    if not prev_ts or not ts:
+        return ""
+    a = parse_ts(prev_ts)
+    b = parse_ts(ts)
+    if not a or not b:
+        return ""
+    delta = (b - a).total_seconds()
+    if delta < 1:
+        return f"+{int(delta * 1000)}ms"
+    if delta < 60:
+        return f"+{delta:.2f}s"
+    return f"+{delta / 60:.1f}m"
+
+
+def token_estimate(part):
+    md = (part or {}).get("providerMetadata") or {}
+    mastra = md.get("mastra") or {}
+    te = mastra.get("tokenEstimate") or {}
+    return te.get("tokens")
+
+
+# ----- RED VERDICT — top-of-summary signal extractor -------------------
+# Goal: when a thread failed (user got no text, hung subscription, provider
+# error), surface that verdict in the FIRST 5 lines of `threads --summary`
+# so a reader doesn't have to scroll past Timeline + Tool counts + Bytes
+# to discover that the thread was actually broken.
+#
+# Signals consumed (all already collected by fetch_atlas_activity):
+#   - stream_result_errors  → `[Atlas] stream-result` ERROR lines
+#       (most authoritative — server explicitly logged "user got nothing")
+#   - subscriptions         → `[Atlas] Subscription ended` events
+#       (ABORT or OK-with-no-text or OK-with-long-idle)
+#   - llm_errors_by_provider → provider-side errors (gateway timeout,
+#       rate limit, 5xx) aggregated by provider/model
+#
+# The verdict is rendered ONLY when at least one red signal fires; healthy
+# threads get no extra noise.
+
+def _build_red_verdict(activity, messages_text_total):
+    """Return a list of verdict lines (or empty list if thread looks healthy).
+
+    Each line is a single string, ready to print. The function is
+    intentionally side-effect free so the same logic can be reused by
+    `threads list` later if we want at-a-glance verdicts there too.
+    """
+    if not activity:
+        return []
+    lines = []
+    sr_errs = activity.get("stream_result_errors") or []
+    subs = activity.get("subscriptions") or []
+    by_provider = activity.get("llm_errors_by_provider") or {}
+
+    # 1. Authoritative server-side "no text" verdict — highest priority
+    #    because atlasChatRouter only emits this after exhausting fallbacks.
+    for sr in sr_errs:
+        ts = sr["ts"].strftime("%H:%M:%S")
+        model = sr.get("primaryModel") or "?"
+        prov = sr.get("primaryProvider") or "?"
+        reason = sr.get("primaryFinishReason") or "?"
+        had_text = sr.get("primaryHadText")
+        total = sr.get("primaryTotalTextLength")
+        fb_fired = sr.get("fallbackFired")
+        fb_total = sr.get("fallbackTotalTextLength")
+        guard = sr.get("guardTripped")
+        lines.append(f"  [{ts}] ❌ Server logged: {sr.get('message','')[:120]}")
+        primary_bits = [f"finish={reason}"]
+        if had_text is not None:
+            primary_bits.append(f"hadText={had_text}")
+        if total is not None:
+            primary_bits.append(f"textLen={total}")
+        if guard:
+            primary_bits.append("guardTripped=true")
+        lines.append(f"           primary: {prov}/{model}  " + "  ".join(primary_bits))
+        if fb_fired:
+            fb_bits = ["fired=true"]
+            if fb_total is not None:
+                fb_bits.append(f"textLen={fb_total}")
+            if sr.get("fallbackErrored"):
+                fb_bits.append("errored=true")
+            lines.append(f"           fallback: " + "  ".join(fb_bits))
+        else:
+            lines.append(f"           fallback: NOT fired (likely silent hang — primary stream did not error)")
+
+    # 2. Subscription-level oddities not covered by stream-result errors
+    #    (e.g. thread that aborted without ever reaching the verdict log,
+    #    or sub closed OK with chunks=2 and msSinceLastChunk small but no
+    #    text persisted to messages).
+    sr_ts = {sr["ts"] for sr in sr_errs}
+    for sub in subs:
+        # Skip if a stream-result already covered the same window (±5s)
+        from datetime import timedelta
+        already = any(abs((sub["ts"] - st).total_seconds()) < 5 for st in sr_ts)
+        if already:
+            continue
+        ok = sub.get("completedNormally")
+        aborted = sub.get("aborted")
+        chunks = sub.get("chunkCount") or 0
+        elapsed = sub.get("elapsedMs") or 0
+        ts = sub["ts"].strftime("%H:%M:%S")
+        if aborted:
+            lines.append(f"  [{ts}] ⚠ Subscription ABORT after {elapsed}ms, chunks={chunks}")
+        elif ok and chunks <= 5 and elapsed >= 10000:
+            # OK close but only framing chunks emitted in 10s+ — silent hang
+            lines.append(f"  [{ts}] ⚠ Subscription closed OK but only {chunks} chunks in {elapsed}ms (silent hang)")
+
+    # 3. Provider-side errors (gateway timeout, 5xx) during the window
+    if by_provider:
+        for key, runs in sorted(by_provider.items(), key=lambda kv: -len(kv[1])):
+            lines.append(f"  Provider error: {len(runs)}× {key}")
+
+    if not lines:
+        return []
+    header = ["", "=" * 80, "RED VERDICT — failure signals detected in this thread", "=" * 80]
+    footer = ["", "(See 'Atlas subscription endings' below for raw signal data.)"]
+    return header + lines + footer
+
+
+# ----- short modes -----
+
+if mode == "raw":
+    for m in messages:
+        print(json.dumps(m, ensure_ascii=False))
+    sys.exit(0)
+
+if mode == "last":
+    for m in reversed(messages):
+        if m["role"] != "assistant":
+            continue
+        text = "\n".join(p.get("text", "") for p in parts_of(m) if p.get("type") == "text").strip()
+        if text:
+            print(text)
+            sys.exit(0)
+    print("threads: no assistant text found in thread", file=sys.stderr)
+    sys.exit(1)
+
+if mode == "tools":
+    any_tool = False
+    for m in messages:
+        for p in parts_of(m):
+            if p.get("type") != "tool-invocation":
+                continue
+            any_tool = True
+            ti = p.get("toolInvocation") or {}
+            print(f"[{m['ts']}] {ti.get('toolName')} ({ti.get('state')})  msg={m['id']}  callId={ti.get('toolCallId', '')}")
+            if ti.get("args") is not None:
+                print("  args:")
+                print("    " + json.dumps(ti["args"], indent=2, ensure_ascii=False).replace("\n", "\n    "))
+            if ti.get("result") is not None:
+                print("  result:")
+                print("    " + json.dumps(ti["result"], indent=2, ensure_ascii=False).replace("\n", "\n    "))
+            print()
+    if not any_tool:
+        print("threads: no tool calls in thread", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+
+if mode == "summary":
+    tool_counts = {}
+    bytes_in = 0
+    bytes_out = 0
+    obs_count = 0
+    text_chars = 0
+    first_ts = messages[0]["ts"]
+    last_ts = messages[-1]["ts"]
+    print(f"Thread:    {tid}")
+    print(f"Env:       {env}")
+    print(f"Messages:  {len(messages)}")
+    print(f"Span:      {first_ts}  ->  {last_ts}  ({fmt_delta(first_ts, last_ts).lstrip('+')})")
+
+    # Fetch obs activity once UPFRONT so the RED VERDICT can render before
+    # the Timeline. parse_ts handles the Postgres "+00" suffix that
+    # datetime.fromisoformat would reject; matches what maybe_render_obs
+    # uses downstream so the windows align.
+    from datetime import timedelta
+    _verdict_pad = _parse_dur(obs_pad)
+    _verdict_start_raw = parse_ts(first_ts)
+    _verdict_end_raw = parse_ts(last_ts)
+    _verdict_lines = []
+    if _verdict_start_raw and _verdict_end_raw:
+        _verdict_start = _verdict_start_raw - timedelta(seconds=_verdict_pad)
+        _verdict_end = _verdict_end_raw + timedelta(seconds=_verdict_pad)
+        _verdict_activity = fetch_atlas_activity(env, _verdict_start, _verdict_end, tid)
+        _verdict_lines = _build_red_verdict(_verdict_activity, text_chars)
+    if _verdict_lines:
+        for line in _verdict_lines:
+            print(line)
+
+    print()
+    print("Timeline:")
+    prev_ts = None
+    for m in messages:
+        delta = fmt_delta(prev_ts, m["ts"]) if prev_ts else ""
+        events = []
+        for p in parts_of(m):
+            t = p.get("type")
+            if t == "text":
+                txt = p.get("text", "")
+                text_chars += len(txt)
+                events.append(f"text({len(txt)} ch)")
+            elif t == "tool-invocation":
+                ti = p.get("toolInvocation") or {}
+                name = ti.get("toolName", "?")
+                tool_counts[name] = tool_counts.get(name, 0) + 1
+                args_s = json.dumps(ti.get("args"), ensure_ascii=False) if ti.get("args") else ""
+                bytes_in += len(args_s)
+                res_s = json.dumps(ti.get("result"), ensure_ascii=False) if ti.get("result") else ""
+                bytes_out += len(res_s)
+                events.append(f"tool:{name}({len(args_s)}->{len(res_s)} ch)")
+            elif t == "data-om-buffering-end":
+                d = p.get("data") or {}
+                obs_count += 1
+                events.append(f"obs(buffered={d.get('bufferedTokens')}, dur={d.get('durationMs')}ms)")
+            elif t and t.startswith("data-om-"):
+                events.append(t.replace("data-om-", ""))
+            else:
+                events.append(t or "?")
+        prefix = f"  {m['ts']} {delta:>7} {m['role']:>9}"
+        if events:
+            print(f"{prefix}  | " + ", ".join(events))
+        prev_ts = m["ts"]
+    print()
+    print("Tool counts:")
+    for name, n in sorted(tool_counts.items(), key=lambda x: -x[1]):
+        print(f"  {n:>3}  {name}")
+    print()
+    print(f"Bytes (tool args -> results):  {bytes_in} -> {bytes_out}")
+    print(f"Assistant text chars:          {text_chars}")
+    print(f"Observation cycles:            {obs_count}")
+    if langfuse_mode in ("detail", "summary"):
+        traces = fetch_langfuse_traces(tid, with_observations=(langfuse_mode == "detail"))
+        render_langfuse(traces, with_observations=(langfuse_mode == "detail"))
+    maybe_render_obs(env, messages)
+    sys.exit(0)
+
+# ----- RCA digest (threads --rca v1) -----------------------------------
+# Automates the manual single-thread audit the CTO runs repeatedly:
+#   1. Per-tool YIELD — did each tool actually return useful data, or did it
+#      come back empty / errored? An agent that calls 6 tools and gets 5 empties
+#      is reasoning over nothing — this is the #1 silent-quality failure.
+#   2. Citation → source map — does each citation in the FINAL answer trace
+#      back to a tool result, or did the model fabricate it?
+#   3. Per-turn prompt size — how big was the prefill on each turn (the cost
+#      driver). Read from data-om-status window tokens when present, else
+#      estimate from message chars (≈4 chars/token).
+
+def _result_text(result):
+    """Flatten a tool result to a single searchable/measurable string."""
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        return result
+    try:
+        return json.dumps(result, ensure_ascii=False)
+    except Exception:
+        return str(result)
+
+
+# Anchored error PHRASES. Bare words like "exception"/"error"/"failed" are
+# UNSAFE as substring markers — clinical payloads legitimately contain them
+# (e.g. RAMQ "médicaments d'exception", isException, exceptionCodes), which
+# false-positives a 41KB found:true drug result as an error. These phrases are
+# specific enough to only appear in an actual failure message.
+_ERROR_PHRASES = (
+    "[error]", "hpsc search failed", "search failed", "400 bad request",
+    "400 bad", "internal server error", "request failed", "tool execution failed",
+)
+# Empty markers: tool ran fine but returned no usable data.
+_EMPTY_MARKERS = (
+    '"totalresults":0', '"totalresults": 0', '"totalfound":0', '"totalfound": 0',
+    '"found":false', '"found": false', "products[#0",
+    "no web search results", "no medications found", "no results found",
+    "aucun résultat",
+)
+
+
+def classify_result(result):
+    """Return 'ok' | 'empty' | 'error' for a single tool result.
+
+    Strategy: prefer STRUCTURE (parse JSON, inspect top-level error/found
+    fields) over naive substring scans, because tool payloads are large and
+    full of clinical vocabulary that collides with bare error words. Only fall
+    back to anchored phrase markers, never bare 'error'/'exception'/'failed'.
+    """
+    # Hard-empty shapes first (None / '' / [] / {} / null).
+    if result is None:
+        return "empty"
+    if isinstance(result, (list, dict)) and len(result) == 0:
+        return "empty"
+
+    blob = _result_text(result)
+    s = blob.strip()
+    sl = s.lower()
+    if sl in ("", "''", '""', "[]", "{}", "null", "none"):
+        return "empty"
+
+    # Structured inspection — most Pharmia tools return a dict.
+    obj = result if isinstance(result, (dict, list)) else None
+    if obj is None and s.startswith(("{", "[")):
+        try:
+            obj = json.loads(s)
+        except Exception:
+            obj = None
+    if isinstance(obj, dict):
+        # Explicit error envelope: {error: ...} or {ok/success: false}.
+        if obj.get("error") not in (None, "", False):
+            return "error"
+        if obj.get("ok") is False or obj.get("success") is False:
+            return "error"
+        # Empty-yield envelopes: {found:false}, {totalResults:0}, {results:[]}.
+        if obj.get("found") is False:
+            return "empty"
+        for k in ("totalResults", "totalFound", "count"):
+            if obj.get(k) == 0:
+                return "empty"
+        res = obj.get("results")
+        if isinstance(res, list):
+            if len(res) == 0:
+                return "empty"
+            # Multi-query tools: every sub-result found:false / 0 hits → empty.
+            def _sub_empty(r):
+                if not isinstance(r, dict):
+                    return False
+                if r.get("found") is False:
+                    return True
+                return r.get("totalResults") == 0 or r.get("totalFound") == 0
+            if all(_sub_empty(r) for r in res):
+                return "empty"
+        return "ok"
+
+    # Non-JSON / plain-string results: anchored phrase markers only.
+    for mk in _ERROR_PHRASES:
+        if mk in sl:
+            return "error"
+    for mk in _EMPTY_MARKERS:
+        if mk in sl:
+            return "empty"
+    return "ok"
+
+
+def _median(xs):
+    if not xs:
+        return 0
+    ys = sorted(xs)
+    n = len(ys)
+    mid = n // 2
+    return ys[mid] if n % 2 else (ys[mid - 1] + ys[mid]) // 2
+
+
+def _final_assistant_text(msgs):
+    """Concatenated text parts of the LAST assistant message that has text."""
+    for m in reversed(msgs):
+        if m["role"] != "assistant":
+            continue
+        txt = "\n".join(
+            p.get("text", "") for p in parts_of(m) if p.get("type") == "text"
+        ).strip()
+        if txt:
+            return txt
+    return ""
+
+
+def _extract_citations(text):
+    """Pull <cite>/<pharmia-source>/<pharmia-act> tags from the final answer.
+
+    Returns a list of dicts: {tag, raw, refs} where refs is a list of the
+    human-meaningful attribute values (title/url/referenceTitle/source) we can
+    try to match against tool results.
+    """
+    import re as _re
+    cites = []
+    # Match opening tag with attributes (self-closing or with inner text).
+    tag_re = _re.compile(
+        r'<(cite|pharmia-source|pharmia-act)\b([^>]*?)/?>', _re.IGNORECASE
+    )
+    attr_re = _re.compile(r'([\w:-]+)\s*=\s*"([^"]*)"')
+    KEYS = ("referencetitle", "title", "url", "source", "name", "href", "id")
+    for m in tag_re.finditer(text):
+        tag = m.group(1).lower()
+        attrs = {k.lower(): v for k, v in attr_re.findall(m.group(2) or "")}
+        refs = [attrs[k] for k in KEYS if k in attrs and attrs[k].strip()]
+        cites.append({"tag": tag, "raw": m.group(0)[:120], "attrs": attrs, "refs": refs})
+    return cites
+
+
+def _per_turn_prompt_sizes(msgs):
+    """Estimate the input prefill size at each assistant turn.
+
+    Prefer the authoritative `data-om-status` active-window token count carried
+    on the assistant message itself; fall back to a char/4 estimate of every
+    message at-or-before this turn (the running context the model saw).
+    """
+    turns = []
+    running_chars = 0
+    for m in msgs:
+        # running_chars accumulates the conversation prefix up to (not incl.)
+        # this message's own assistant generation.
+        msg_chars = 0
+        om_tokens = None
+        for p in parts_of(m):
+            t = p.get("type")
+            if t == "text":
+                msg_chars += len(p.get("text", "") or "")
+            elif t == "tool-invocation":
+                ti = p.get("toolInvocation") or {}
+                msg_chars += len(_result_text(ti.get("args")))
+                msg_chars += len(_result_text(ti.get("result")))
+            elif t == "data-om-status":
+                d = p.get("data") or {}
+                active = (d.get("windows") or {}).get("active") or {}
+                mw = (active.get("messages") or {}).get("tokens")
+                ow = (active.get("observations") or {}).get("tokens")
+                if mw is not None or ow is not None:
+                    om_tokens = (mw or 0) + (ow or 0)
+        if m["role"] == "assistant":
+            est_tokens = om_tokens if om_tokens is not None else running_chars // 4
+            turns.append({
+                "ts": m["ts"],
+                "tokens": est_tokens,
+                "source": "data-om-status" if om_tokens is not None else "est(chars/4)",
+            })
+        running_chars += msg_chars
+    return turns
+
+
+if mode == "rca":
+    # Collect every tool-invocation across the thread.
+    per_tool = {}   # name -> {calls, ok, empty, error, sizes:[chars], results:[(text)]}
+    all_results = []  # (toolName, result_text) for citation matching
+    for m in messages:
+        for p in parts_of(m):
+            if p.get("type") != "tool-invocation":
+                continue
+            ti = p.get("toolInvocation") or {}
+            name = ti.get("toolName", "?")
+            res = ti.get("result")
+            blob = _result_text(res)
+            cls = classify_result(res)
+            rec = per_tool.setdefault(
+                name, {"calls": 0, "ok": 0, "empty": 0, "error": 0, "sizes": []}
+            )
+            rec["calls"] += 1
+            rec[cls] += 1
+            rec["sizes"].append(len(blob))
+            all_results.append((name, blob))
+
+    print(f"Thread:   {tid}")
+    print(f"Env:      {env}")
+    print(f"Messages: {len(messages)}  |  Tool calls: {sum(r['calls'] for r in per_tool.values())}")
+    print("=" * 80)
+
+    # 1. Per-tool yield ----------------------------------------------------
+    print("\nPER-TOOL YIELD  (ok = returned data · empty = no results · error = failed call)")
+    print(f"  {'TOOL':<34} {'CALLS':>5} {'OK':>4} {'EMPTY':>6} {'ERR':>4} {'MED-CHARS':>10}")
+    print("  " + "─" * 70)
+    total = {"calls": 0, "ok": 0, "empty": 0, "error": 0}
+    for name, rec in sorted(per_tool.items(), key=lambda kv: -kv[1]["calls"]):
+        med = _median(rec["sizes"])
+        flag = ""
+        if rec["calls"] and (rec["empty"] + rec["error"]) / rec["calls"] >= 0.5:
+            flag = "  ⚠ low-yield"
+        print(f"  {name[:34]:<34} {rec['calls']:>5} {rec['ok']:>4} {rec['empty']:>6} {rec['error']:>4} {med:>10}{flag}")
+        for k in total:
+            total[k] += rec[k]
+    if per_tool:
+        print("  " + "─" * 70)
+        print(f"  {'TOTAL':<34} {total['calls']:>5} {total['ok']:>4} {total['empty']:>6} {total['error']:>4}")
+        useful = total["ok"]
+        if total["calls"]:
+            print(f"\n  Yield: {useful}/{total['calls']} calls returned data "
+                  f"({100*useful/total['calls']:.0f}%).  "
+                  f"{total['empty']} empty, {total['error']} errored.")
+    else:
+        print("  (no tool calls in this thread)")
+
+    # 2. Citation → source map --------------------------------------------
+    final_text = _final_assistant_text(messages)
+    cites = _extract_citations(final_text)
+    print("\n" + "=" * 80)
+    print(f"CITATION → SOURCE MAP  (in final answer; {len(cites)} citation(s))")
+    print("=" * 80)
+    if not cites:
+        print("  No <cite>/<pharmia-source>/<pharmia-act> tags in the final answer.")
+    else:
+        fabricated = 0
+        for i, c in enumerate(cites):
+            matched_tool = None
+            matched_ref = None
+            for ref in c["refs"]:
+                needle = ref.strip().lower()
+                if len(needle) < 4:
+                    continue
+                for tool_name, blob in all_results:
+                    if needle in blob.lower():
+                        matched_tool, matched_ref = tool_name, ref
+                        break
+                if matched_tool:
+                    break
+            label = c["refs"][0] if c["refs"] else c["raw"]
+            if matched_tool:
+                print(f"  [{i+1}] <{c['tag']}> {label[:60]}")
+                print(f"        ↳ matched in tool: {matched_tool}  (via {matched_ref[:50]!r})")
+            else:
+                fabricated += 1
+                print(f"  [{i+1}] <{c['tag']}> {label[:60]}")
+                print(f"        ↳ ⚠ UNMATCHED — no tool result contains this reference (possibly fabricated)")
+        if fabricated:
+            print(f"\n  ⚠ {fabricated}/{len(cites)} citation(s) unmatched — review for fabrication.")
+        else:
+            print(f"\n  All {len(cites)} citation(s) trace to a tool result.")
+
+    # 3. Per-turn prompt size ---------------------------------------------
+    turns = _per_turn_prompt_sizes(messages)
+    print("\n" + "=" * 80)
+    print(f"PROMPT SIZE PER TURN  ({len(turns)} assistant turn(s); input prefill estimate)")
+    print("=" * 80)
+    if not turns:
+        print("  (no assistant turns)")
+    else:
+        for i, t in enumerate(turns):
+            print(f"  turn {i+1:>2}  {t['ts'][:19]}  ~{t['tokens']:>7} tok  [{t['source']}]")
+        peak = max(turns, key=lambda x: x["tokens"])
+        print(f"\n  Peak prefill: ~{peak['tokens']} tok at {peak['ts'][:19]}.")
+    sys.exit(0)
+
+
+if mode == "json":
+    out = {"env": env, "threadId": tid, "messages": []}
+    for m in messages:
+        entry = {"id": m["id"], "role": m["role"], "ts": m["ts"], "parts": parts_of(m)}
+        out["messages"].append(entry)
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    sys.exit(0)
+
+
+# ----- DEFAULT: full RCA-grade rendering -----
+
+print(f"Thread:   {tid}")
+print(f"Env:      {env}")
+print(f"Messages: {len(messages)}")
+print(f"Span:     {messages[0]['ts']}  ->  {messages[-1]['ts']}")
+print("=" * 80)
+print()
+
+prev_ts = None
+for mi, m in enumerate(messages):
+    delta = fmt_delta(prev_ts, m["ts"]) if prev_ts else ""
+    role = m["role"].upper()
+    header = f"--- [{mi+1}/{len(messages)}] {role} | {m['ts']}"
+    if delta:
+        header += f" | {delta} after prev"
+    header += f" | id={m['id']}"
+    print(header)
+    print()
+
+    for pi, p in enumerate(parts_of(m)):
+        t = p.get("type") or "?"
+        prefix = f"  [{pi}] <{t}>"
+
+        if t == "text":
+            text = p.get("text", "")
+            tokens = token_estimate(p)
+            tok = f" ~{tokens}tok" if tokens else ""
+            print(f"{prefix}{tok}")
+            for line in text.splitlines() or [""]:
+                print(f"      {line}")
+            print()
+
+        elif t == "tool-invocation":
+            ti = p.get("toolInvocation") or {}
+            name = ti.get("toolName", "?")
+            state = ti.get("state", "?")
+            cid = ti.get("toolCallId", "")
+            print(f"{prefix} {name}  state={state}  callId={cid}")
+            if ti.get("args") is not None:
+                args_s = json.dumps(ti["args"], indent=2, ensure_ascii=False)
+                print(f"      args:")
+                for line in args_s.splitlines():
+                    print(f"        {line}")
+            if ti.get("result") is not None:
+                res_s = json.dumps(ti["result"], indent=2, ensure_ascii=False)
+                print(f"      result ({len(res_s)} ch):")
+                for line in res_s.splitlines():
+                    print(f"        {line}")
+            print()
+
+        elif t == "data-om-status":
+            d = p.get("data") or {}
+            windows = (d.get("windows") or {}).get("active") or {}
+            msgs = (windows.get("messages") or {})
+            obs = (windows.get("observations") or {})
+            buf = (d.get("windows") or {}).get("buffered") or {}
+            print(f"{prefix} step={d.get('stepNumber')} gen={d.get('generationCount')}")
+            print(f"      messages: {msgs.get('tokens')}/{msgs.get('threshold')} tok")
+            print(f"      observations: {obs.get('tokens')}/{obs.get('threshold')} tok")
+            buf_obs = (buf.get("observations") or {})
+            buf_ref = (buf.get("reflection") or {})
+            if buf_obs.get("status") and buf_obs.get("status") != "idle":
+                print(f"      buffered.observations: {buf_obs}")
+            if buf_ref.get("status") and buf_ref.get("status") != "idle":
+                print(f"      buffered.reflection: {buf_ref}")
+            print()
+
+        elif t == "data-om-buffering-start":
+            d = p.get("data") or {}
+            print(f"{prefix} cycleId={d.get('cycleId')} op={d.get('operationType')} startedAt={d.get('startedAt')} tokensToBuffer={d.get('tokensToBuffer')}")
+            print()
+
+        elif t == "data-om-buffering-end":
+            d = p.get("data") or {}
+            print(f"{prefix} cycleId={d.get('cycleId')} op={d.get('operationType')} dur={d.get('durationMs')}ms tokensBuffered={d.get('tokensBuffered')} bufferedTokens={d.get('bufferedTokens')}")
+            obs = d.get("observations")
+            if obs:
+                print(f"      observations:")
+                for line in obs.splitlines():
+                    print(f"        {line}")
+            print()
+
+        elif t and t.startswith("data-om-"):
+            d = p.get("data") or {}
+            print(f"{prefix}")
+            payload = json.dumps(d, indent=2, ensure_ascii=False)
+            for line in payload.splitlines():
+                print(f"      {line}")
+            print()
+
+        else:
+            # unknown part type - dump as JSON for visibility
+            print(f"{prefix}")
+            payload = json.dumps(p, indent=2, ensure_ascii=False)
+            for line in payload.splitlines():
+                print(f"      {line}")
+            print()
+
+    print()
+    prev_ts = m["ts"]
+
+# After the message-by-message render, append Langfuse trace summary so a
+# single `threads <url>` invocation gives both Mastra DB state and the
+# observability view (model latencies, costs, agent timing).
+if langfuse_mode in ("auto", "detail"):
+    # `auto` and `detail` both fetch observations so model names + per-gen
+    # tokens are always visible by default. `summary` is the fast-headers-only
+    # opt-out. The help text has long advertised "per-observation timing
+    # rendered by default" — this code now matches that contract.
+    with_obs = (langfuse_mode != "summary")
+    traces = fetch_langfuse_traces(tid, with_observations=with_obs)
+    render_langfuse(traces, with_observations=with_obs)
+maybe_render_obs(env, messages)
+PYEOF
+)
+
+if [[ "$SKIP_PG" == "1" ]]; then
+  : | MODE="$MODE" THREAD_ID="$THREAD_ID" ENV="$ENV" \
+      LANGFUSE="$LANGFUSE" SKIP_PG="$SKIP_PG" \
+      OBS="$OBS" OBS_PAD="$OBS_PAD" \
+      python3 -c "$RENDER_SCRIPT"
+else
+  pg "$ENV" mastra "$QUERY" 2>/dev/null | \
+    MODE="$MODE" THREAD_ID="$THREAD_ID" ENV="$ENV" \
+    LANGFUSE="$LANGFUSE" SKIP_PG="$SKIP_PG" \
+      OBS="$OBS" OBS_PAD="$OBS_PAD" \
+    python3 -c "$RENDER_SCRIPT"
+fi

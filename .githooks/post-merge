@@ -1,6 +1,8 @@
 #!/bin/sh
 # Auto-sync Paperclip agent definitions into ~/.claude/agents after pull/merge.
 # Paperclip is the source of truth; generated files are tagged `source: paperclip`.
+# CLI toolkit (sh, no node needed): symlink templates/pharmia/cli/bin/* into ~/.local/bin.
+sh "$(git rev-parse --show-toplevel)/templates/pharmia/cli/install.sh" >/dev/null 2>&1 || true
 command -v node >/dev/null 2>&1 || exit 0
 node "$(git rev-parse --show-toplevel)/scripts/sync-claude-agents.mjs" || true
 node "$(git rev-parse --show-toplevel)/scripts/sync-claude-skills.mjs" || true

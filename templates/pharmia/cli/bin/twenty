@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONF_DIR="${HOME}/.config/twenty"
+CONF_FILE="${CONF_DIR}/config"
+
+# Capture explicit env overrides BEFORE defaults/config overwrite them. Presence
+# of either flags the cache as tainted so `TWENTY_SSH_HOST=bogus twenty token`
+# actually tries bogus instead of returning whatever's cached.
+TWENTY_SSH_HOST_OVERRIDE="${TWENTY_SSH_HOST:-}"
+TWENTY_API_KEY_ID_OVERRIDE="${TWENTY_API_KEY_ID:-}"
+
+# Defaults (overridable via config file)
+TWENTY_URL="${TWENTY_URL:-https://twenty.bentostudio.io}"
+TWENTY_SSH_HOST="${TWENTY_SSH_HOST:-bento}"
+TWENTY_CONTAINER="${TWENTY_CONTAINER:-bento-studio-twenty-w9iq7f-twenty-server-1}"
+TWENTY_WORKSPACE_ID="${TWENTY_WORKSPACE_ID:-1475ef88-e279-4c28-8696-beefd02a2c87}"
+TWENTY_API_KEY_ID="${TWENTY_API_KEY_ID:-70256598-2eec-4e8d-b9eb-81222a69492d}"
+
+# Load config overrides (env overrides already captured above so config can't erase them)
+[[ -f "$CONF_FILE" ]] && source "$CONF_FILE"
+
+# Token cache (1h TTL)
+TOKEN_CACHE="${CONF_DIR}/.token_cache"
+
+usage() {
+  local code="${1:-0}"
+  cat <<'EOF'
+Usage: twenty [--json] [--dry-run] <command> [args]
+
+Global flags:
+  --json            Emit raw JSON instead of human-formatted tables
+                    (applies to: objects, fields)
+  --dry-run         Print the payload that would be sent without calling the API
+                    (applies to: field-create)
+
+Commands:
+  token             Generate and print a fresh API token
+  gql <query>       Execute GraphQL against /api (data API)
+  meta <query>      Execute GraphQL against /metadata (metadata API)
+  rest <method> <path> [json]
+                    Execute REST API call (e.g. GET /rest/metadata/objects)
+  objects           List all object metadata (name + id)
+  fields <object>   List fields on an object (by nameSingular)
+  field-create <objectId> <name> <label> <type> [json-extras]
+                    Create a custom field on an object
+
+Examples:
+  twenty token
+  twenty objects
+  twenty fields person
+  twenty fields company
+  twenty field-create 933a569d-... lastCheckedAt "Last Checked" DATE_TIME
+  twenty meta '{ objects(paging:{first:5}) { edges { node { id nameSingular } } } }'
+  twenty gql '{ people(first:3) { edges { node { id name { firstName lastName } } } } }'
+  twenty rest GET /rest/metadata/objects
+  twenty rest POST /rest/metadata/fields '{"objectMetadataId":"...","name":"foo","label":"Foo","type":"DATE_TIME"}'
+
+Token is auto-generated via SSH to the Twenty server container (1h cache).
+Config: ~/.config/twenty/config
+EOF
+  exit "$code"
+}
+
+ensure_conf_dir() {
+  [[ -d "$CONF_DIR" ]] || mkdir -p "$CONF_DIR"
+}
+
+get_token() {
+  ensure_conf_dir
+
+  # Explicit env overrides bypass cache — caller wants fresh auth against a
+  # different host/key ID, not whatever happened to be cached for the default.
+  local bypass_cache=0
+  if [[ -n "${TWENTY_SSH_HOST_OVERRIDE:-}" || -n "${TWENTY_API_KEY_ID_OVERRIDE:-}" ]]; then
+    bypass_cache=1
+  fi
+
+  # Cache hit = JWT's own `exp` is still >300s away. Ignores mtime entirely:
+  # stale clocks and long pauses between calls don't matter, only the token
+  # the server will actually accept.
+  if (( bypass_cache == 0 )) && [[ -f "$TOKEN_CACHE" ]]; then
+    local cached exp_ts now
+    cached=$(cat "$TOKEN_CACHE")
+    exp_ts=$(jwt_exp "$cached" || echo 0)
+    now=$(date +%s)
+    if (( exp_ts > 0 && now < exp_ts - 300 )); then
+      echo "$cached"
+      return
+    fi
+  fi
+
+  # Generate fresh token via SSH. Temporarily disable errexit so a bogus host
+  # doesn't nuke the whole script before we can emit the friendly diagnostic.
+  local token ssh_status
+  set +e
+  token=$(ssh "$TWENTY_SSH_HOST" "docker exec $TWENTY_CONTAINER node -e \"
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+const secret = crypto.createHash('sha256')
+  .update(process.env.APP_SECRET + '$TWENTY_WORKSPACE_ID' + 'API_KEY')
+  .digest('hex');
+console.log(jwt.sign(
+  { sub: '$TWENTY_WORKSPACE_ID', type: 'API_KEY', workspaceId: '$TWENTY_WORKSPACE_ID', jti: '$TWENTY_API_KEY_ID' },
+  secret,
+  { expiresIn: '1h' }
+));
+\"" 2>/dev/null)
+  ssh_status=$?
+  set -e
+
+  if (( ssh_status != 0 )) || [[ -z "$token" ]]; then
+    echo "twenty: SSH to $TWENTY_SSH_HOST failed — run 'ssh $TWENTY_SSH_HOST true' to diagnose" >&2
+    exit 1
+  fi
+
+  # Only cache when we're using the default host+key (caching an override'd
+  # token would poison subsequent default-host calls).
+  if (( bypass_cache == 0 )); then
+    echo "$token" > "$TOKEN_CACHE"
+  fi
+  echo "$token"
+}
+
+# Decode a JWT's `exp` claim. base64url -> base64, pad, decode, jq.
+jwt_exp() {
+  local jwt="$1" payload
+  payload="${jwt#*.}"       # strip header
+  payload="${payload%%.*}"  # strip signature
+  [[ -z "$payload" ]] && return 1
+  # base64url -> base64 + padding
+  payload="${payload//-/+}"
+  payload="${payload//_//}"
+  while (( ${#payload} % 4 )); do payload+="="; done
+  echo "$payload" | base64 -d 2>/dev/null | jq -r '.exp // empty'
+}
+
+api_call() {
+  local endpoint="$1"
+  local query="$2"
+  local token
+  token=$(get_token)
+
+  curl -s -X POST "${TWENTY_URL}${endpoint}" \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -d "$query"
+}
+
+rest_call() {
+  local method="$1"
+  local path="$2"
+  local body="${3:-}"
+  local token
+  token=$(get_token)
+
+  local curl_args=(-s -X "$method" "${TWENTY_URL}${path}" -H "Authorization: Bearer $token" -H "Content-Type: application/json")
+  [[ -n "$body" ]] && curl_args+=(-d "$body")
+
+  curl "${curl_args[@]}"
+}
+
+case "${1:-}" in
+  -h|--help|help)
+    usage 0
+    ;;
+esac
+
+[[ $# -lt 1 ]] && usage 1
+
+# Parse global flags (currently just --json). Kept simple: single-pass rewrite
+# of the arg list rather than dragging getopts in.
+JSON_OUT=0
+DRY_RUN=0
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    --json)    JSON_OUT=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    *)         args+=("$arg") ;;
+  esac
+done
+set -- "${args[@]}"
+
+CMD="$1"
+shift
+
+case "$CMD" in
+  token)
+    get_token
+    ;;
+
+  gql)
+    [[ $# -lt 1 ]] && echo "Usage: twenty gql <query>" >&2 && exit 1
+    api_call "/graphql" "$(jq -nc --arg q "$1" '{query: $q}')" | jq .
+    ;;
+
+  meta)
+    [[ $# -lt 1 ]] && echo "Usage: twenty meta <query>" >&2 && exit 1
+    api_call "/metadata" "$(jq -nc --arg q "$1" '{query: $q}')" | jq .
+    ;;
+
+  rest)
+    [[ $# -lt 2 ]] && echo "Usage: twenty rest <METHOD> <path> [json]" >&2 && exit 1
+    rest_call "$1" "$2" "${3:-}" | jq .
+    ;;
+
+  objects)
+    raw=$(api_call "/metadata" '{"query":"{ objects(paging:{first:100}) { edges { node { id nameSingular labelSingular isCustom } } } }"}')
+    if (( JSON_OUT )); then
+      echo "$raw" | jq .
+    else
+      echo "$raw" \
+        | jq -r '.data.objects.edges[].node | "\(.nameSingular)\t\(.id)\t\(.isCustom)"' \
+        | column -t -s $'\t'
+    fi
+    ;;
+
+  fields)
+    [[ $# -lt 1 ]] && echo "Usage: twenty fields <objectNameSingular>" >&2 && exit 1
+    obj_name="$1"
+    # REST /rest/metadata/objects returns all fields inline (no pagination cap),
+    # unlike the nested GraphQL `objects { fields { edges } }` which silently caps at ~7.
+    result=$(rest_call GET "/rest/metadata/objects")
+    # Fall back to the metadata GraphQL API when REST fails. REST
+    # /rest/metadata/objects intermittently 500s with "No data sources found"
+    # on some server versions while GraphQL /metadata stays healthy — don't let
+    # that block a field lookup. Normalize the GraphQL shape to the REST shape
+    # (.data.objects[] with .nameSingular and .fields[]) so the printers below
+    # are source-agnostic.
+    if ! echo "$result" | jq -e '.data.objects' >/dev/null 2>&1; then
+      # Two-step: the top-level objects list is uncapped (resolve nameSingular ->
+      # id), but the NESTED objects{fields} connection silently caps at ~7, so we
+      # then query the single object(id){fields} connection which returns them
+      # all. Normalize to the REST shape so the printers below stay source-agnostic.
+      objs_raw=$(api_call "/metadata" '{"query":"{ objects(paging:{first:200}) { edges { node { id nameSingular } } } }"}')
+      obj_id=$(echo "$objs_raw" | jq -r --arg obj "$obj_name" '.data.objects.edges[].node | select(.nameSingular==$obj) | .id' 2>/dev/null)
+      if [[ -z "$obj_id" || "$obj_id" == "null" ]]; then
+        echo "Error fetching object '$obj_name' (REST failed, GraphQL metadata had no match):" >&2
+        echo "REST:" >&2; echo "$result" | jq . >&2 2>/dev/null || echo "$result" >&2
+        echo "GraphQL objects:" >&2; echo "$objs_raw" | jq . >&2 2>/dev/null || echo "$objs_raw" >&2
+        exit 1
+      fi
+      fields_q=$(jq -nc --arg id "$obj_id" '{query: ("{ object(id:\"" + $id + "\"){ nameSingular fields(paging:{first:200}) { edges { node { id name type isCustom isActive } } } } }")}')
+      fields_raw=$(api_call "/metadata" "$fields_q")
+      if echo "$fields_raw" | jq -e '.data.object.fields.edges' >/dev/null 2>&1; then
+        result=$(echo "$fields_raw" | jq '{data:{objects:[{nameSingular:.data.object.nameSingular, fields:[.data.object.fields.edges[].node]}]}}')
+      else
+        echo "Error fetching fields for '$obj_name' (REST and GraphQL metadata both failed):" >&2
+        echo "REST:" >&2; echo "$result" | jq . >&2 2>/dev/null || echo "$result" >&2
+        echo "GraphQL fields:" >&2; echo "$fields_raw" | jq . >&2 2>/dev/null || echo "$fields_raw" >&2
+        exit 1
+      fi
+    fi
+    # Check the object exists before printing (so unknown names fail loudly)
+    found=$(echo "$result" | jq -r --arg obj "$obj_name" \
+      '[.data.objects[] | select(.nameSingular == $obj)] | length')
+    if [[ "$found" -eq 0 ]]; then
+      echo "Error: object '$obj_name' not found. Run 'twenty objects' to list available objects." >&2
+      exit 1
+    fi
+    if (( JSON_OUT )); then
+      echo "$result" | jq --arg obj "$obj_name" \
+        '.data.objects[] | select(.nameSingular == $obj) | .fields'
+    else
+      echo "$result" | jq -r --arg obj "$obj_name" \
+        '.data.objects[] | select(.nameSingular == $obj) | .fields[] | "\(.name)\t\(.type)\t\(.isCustom)\t\(.id)"' \
+        | column -t -s $'\t'
+    fi
+    ;;
+
+  field-create)
+    [[ $# -lt 4 ]] && echo "Usage: twenty field-create <objectMetadataId> <name> <label> <type> [json-extras]" >&2 && exit 1
+    obj_id="$1"
+    fname="$2"
+    flabel="$3"
+    ftype="$4"
+    extras="${5:-}"
+
+    # Build the mutation payload entirely via jq — user-provided label/name can
+    # contain ", \, $, newlines, anything, and it all survives cleanly because
+    # we never string-interpolate into the GraphQL source. `type` is enum so it
+    # stays inline in the query text (GraphQL enums aren't strings); the risky
+    # values all travel as a $field variable.
+    payload=$(jq -nc \
+      --arg objectMetadataId "$obj_id" \
+      --arg name "$fname" \
+      --arg label "$flabel" \
+      --arg type "$ftype" \
+      --argjson extras "${extras:-{\}}" \
+      '{
+        query: "mutation CreateField($field: CreateFieldInput!) { createOneField(input: { field: $field }) { id name label type } }",
+        variables: {
+          field: ({
+            objectMetadataId: $objectMetadataId,
+            type: $type,
+            name: $name,
+            label: $label,
+            isNullable: true
+          } + $extras)
+        }
+      }')
+
+    if (( DRY_RUN )); then
+      echo "$payload" | jq .
+    else
+      api_call "/metadata" "$payload" | jq .
+    fi
+    ;;
+
+  *)
+    echo "Unknown command: $CMD" >&2
+    usage 1
+    ;;
+esac

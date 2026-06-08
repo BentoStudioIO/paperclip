@@ -1,0 +1,650 @@
+#!/usr/bin/env bash
+# Multi-instance dispatcher around @dokploy/cli (npm i -g @dokploy/cli) plus
+# three convenience commands the official CLI does not provide:
+#   - logs <compose>   : SSH-tail a deployment's log file (incl. historical)
+#   - status [--broken]: flat health view across every service on an instance
+#   - apps [<project>] : flat list of services in a project (apps + compose + DBs)
+#
+# Anything else is forwarded verbatim to the official CLI:
+#   dokploy bento project all --json
+#   dokploy prod compose deploy --composeId X
+set -euo pipefail
+
+CONF_DIR="${HOME}/.config/dokploy"
+declare -A INSTANCES=()
+# shellcheck source=/dev/null
+source "${CONF_DIR}/instances"
+
+# Resolve the *other* `dokploy` on PATH — the official CLI installed by npm.
+SELF="$(realpath "$0")"
+OFFICIAL=""
+while IFS= read -r p; do
+  [[ -z "$p" ]] && continue
+  [[ "$(realpath "$p" 2>/dev/null)" == "$SELF" ]] && continue
+  OFFICIAL="$p"
+  break
+done < <(which -a dokploy 2>/dev/null || true)
+
+require_official() {
+  [[ -n "$OFFICIAL" ]] && return 0
+  echo "official @dokploy/cli not found on PATH (npm i -g @dokploy/cli)" >&2
+  exit 1
+}
+
+usage() {
+  cat <<EOF
+Usage:
+  dokploy <instance> <official-args...>          forward to @dokploy/cli
+  dokploy <instance> logs <compose> [--tail N] [--deployment N]
+                                                 SSH-tail a deployment log
+  dokploy <instance> status [--broken] [--json]  health view across services
+  dokploy <instance> apps [<project>] [--json]   flat service list in a project
+  dokploy <instance> env-backup <app>            snapshot full env -> local git history (verified)
+  dokploy <instance> env-set <app> KEY=VAL [...] [--dry-run]
+                                                 corruption-proof env upsert: backup(git) ->
+                                                 surgical upsert -> keydiff-guard (abort on any
+                                                 foreign key change) -> apply -> re-verify ->
+                                                 commit. Upsert-only; saves, does not deploy.
+  dokploy <instance> env-rm <app> KEY [KEY...] [--dry-run]
+                                                 corruption-proof env removal: backup(git) ->
+                                                 surgical delete -> keydiff-guard (only the named
+                                                 keys may disappear; abort on any other change) ->
+                                                 apply -> re-verify -> commit. Saves, does not deploy.
+  dokploy <instance> env-rollback <app> [<sha>] [--dry-run]
+                                                 restore env from git history (default HEAD~1)
+
+Instances: ${!INSTANCES[*]}
+
+Examples:
+  dokploy bento project all --json
+  dokploy bento compose deploy --composeId nUFOvsAnXcviI6MM9o98I
+  dokploy bento status --broken
+  dokploy bento apps orange                             # substring match
+  dokploy bento logs orange-connect-dev --tail 100
+  dokploy bento logs orange-connect-dev --deployment 1  # previous deployment
+
+The first positional arg selects which Dokploy instance to talk to. Credentials
+come from ${CONF_DIR}/instances. Everything after <instance> (other than the
+three custom commands above) is passed straight to @dokploy/cli with
+DOKPLOY_URL/DOKPLOY_API_KEY exported.
+EOF
+}
+
+case "${1:-}" in
+  ""|-h|--help|help) usage; exit 0 ;;
+esac
+
+INSTANCE="$1"; shift
+if [[ -z "${INSTANCES[$INSTANCE]+x}" ]]; then
+  echo "Unknown instance: $INSTANCE" >&2
+  echo "Available: ${!INSTANCES[*]}" >&2
+  exit 1
+fi
+
+IFS='|' read -r BASE_URL API_KEY SSH_HOST <<< "${INSTANCES[$INSTANCE]}"
+SSH_HOST="${SSH_HOST:-$INSTANCE}"
+export DOKPLOY_URL="$BASE_URL"
+export DOKPLOY_API_KEY="$API_KEY"
+
+# Direct tRPC GET. @dokploy/cli 0.29.2 has a bug: apiGet doesn't wrap params in
+# the {"json":...} envelope tRPC expects, so any parameterized query 400s. Used
+# only by cmd_logs to fetch deployment metadata. Drop this once upstream fixes.
+trpc_get() {
+  local endpoint="$1" params="$2"
+  local encoded
+  encoded=$(printf '%s' "{\"json\":${params}}" | jq -sRr @uri)
+  curl -fsS "${BASE_URL}/api/trpc/${endpoint}?input=${encoded}" -H "x-api-key: ${API_KEY}"
+}
+
+# Direct tRPC mutation. <proc> <inner-json-object>. Wraps in {"json":...} envelope.
+trpc_post() {
+  local proc="$1" inner="$2"
+  curl -fsS -X POST "${BASE_URL}/api/trpc/${proc}" \
+    -H "x-api-key: ${API_KEY}" -H 'content-type: application/json' \
+    -d "{\"json\":${inner}}"
+}
+
+# trpc_post_code <proc> <inner-json> : POST, print HTTP code on stderr-free stdout
+# tail line "HTTP <code>"; body precedes it. Used to detect a missing-procedure
+# 404 (older Dokploy: compose.saveEnvironment absent, env lives on compose.update).
+trpc_post_code() {
+  local proc="$1" inner="$2"
+  curl -s -w '\nHTTP %{http_code}' -X POST "${BASE_URL}/api/trpc/${proc}" \
+    -H "x-api-key: ${API_KEY}" -H 'content-type: application/json' \
+    -d "{\"json\":${inner}}"
+}
+
+# project_all_json: cached fetch of project list as a flat JSON array.
+# Prefer the official CLI; fall back to a direct tRPC GET when it's absent
+# (e.g. a non-interactive shell where nvm's bin isn't on PATH). Either way,
+# FAIL LOUDLY on empty/invalid output — a silent empty cache used to surface
+# downstream as a bogus "service is ambiguous" with an empty match list.
+PROJECT_ALL_CACHE=""
+project_all_json() {
+  if [[ -z "$PROJECT_ALL_CACHE" ]]; then
+    local out=""
+    if [[ -n "$OFFICIAL" ]]; then
+      out=$("$OFFICIAL" project all --json 2>/dev/null || true)
+    fi
+    # Fallback / repair: direct tRPC if the official CLI is missing or returned junk.
+    if ! printf '%s' "$out" | jq -e 'type=="array"' >/dev/null 2>&1; then
+      out=$(trpc_get project.all '{}' 2>/dev/null | jq -c '.result.data.json // .' 2>/dev/null || true)
+    fi
+    if ! printf '%s' "$out" | jq -e 'type=="array"' >/dev/null 2>&1; then
+      echo "dokploy: could not fetch project list from ${INSTANCE} (${BASE_URL})." >&2
+      echo "  Neither '@dokploy/cli project all --json' nor the tRPC project.all fallback returned a JSON array." >&2
+      echo "  Check the API key / URL in ${CONF_DIR}/instances and that the host is reachable." >&2
+      exit 7
+    fi
+    PROJECT_ALL_CACHE="$out"
+  fi
+  printf '%s' "$PROJECT_ALL_CACHE"
+}
+
+# resolve_compose <name-or-id> -> echoes composeId, errors if not found / ambiguous.
+resolve_compose() {
+  local query="$1"
+  local flat
+  flat=$(project_all_json | jq '
+    [ .[] as $p
+      | ($p.environments // [])[] as $e
+      | ($e.compose // [])[]
+      | {project: $p.name, composeId, name, appName}
+    ]')
+  local byid
+  byid=$(echo "$flat" | jq --arg q "$query" '[.[] | select(.composeId == $q)]')
+  if [[ "$(echo "$byid" | jq 'length')" == "1" ]]; then
+    echo "$byid" | jq -r '.[0].composeId'; return 0
+  fi
+  local matches count
+  matches=$(echo "$flat" | jq --arg q "$query" '
+    [.[] | select(
+      (.name // "" | ascii_downcase | contains($q | ascii_downcase))
+      or (.appName // "" | ascii_downcase | contains($q | ascii_downcase))
+    )]')
+  count=$(echo "$matches" | jq 'length')
+  if [[ "$count" == "1" ]]; then
+    echo "$matches" | jq -r '.[0].composeId'; return 0
+  fi
+  if [[ "$count" == "0" ]]; then
+    echo "compose '${query}' not found on ${INSTANCE}" >&2
+    echo "available:" >&2
+    echo "$flat" | jq -r 'group_by(.project)[] | "  \(.[0].project): \([.[].name] | join(", "))"' >&2
+    exit 3
+  fi
+  if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+    echo "resolve_compose: could not enumerate composes on ${INSTANCE} (got no project data)." >&2
+    exit 7
+  fi
+  echo "compose '${query}' is ambiguous on ${INSTANCE}, matches:" >&2
+  echo "$matches" | jq -r '.[] | "  \(.project)/\(.name)  (\(.composeId))"' >&2
+  exit 2
+}
+
+# flatten_services <jq-filter-expr-on-name-or-id> — emits one row per service.
+flatten_services() {
+  local filter="${1:-}"
+  project_all_json | jq --arg filter "$filter" '
+    map(select(
+      $filter == ""
+      or .projectId == $filter
+      or (.name | ascii_downcase | contains($filter | ascii_downcase))
+    ))
+    | [ .[] as $p
+        | ($p.environments // [])[] as $e
+        | (
+            ($e.applications // [] | map({type:"app",      status:.applicationStatus, id:.applicationId, name, appName, lastDeploy:(.updatedAt // .createdAt)})),
+            ($e.compose      // [] | map({type:"compose",  status:.composeStatus,     id:.composeId,     name, appName, lastDeploy:(.updatedAt // .createdAt)})),
+            ($e.mongo        // [] | map({type:"mongo",    status:.applicationStatus, id:.mongoId,       name, appName, lastDeploy:(.updatedAt // .createdAt)})),
+            ($e.postgres     // [] | map({type:"postgres", status:.applicationStatus, id:.postgresId,    name, appName, lastDeploy:(.updatedAt // .createdAt)})),
+            ($e.mysql        // [] | map({type:"mysql",    status:.applicationStatus, id:.mysqlId,       name, appName, lastDeploy:(.updatedAt // .createdAt)})),
+            ($e.mariadb      // [] | map({type:"mariadb",  status:.applicationStatus, id:.mariadbId,     name, appName, lastDeploy:(.updatedAt // .createdAt)})),
+            ($e.redis        // [] | map({type:"redis",    status:.applicationStatus, id:.redisId,       name, appName, lastDeploy:(.updatedAt // .createdAt)}))
+          ) as $svcs
+        | $svcs[] | . + {project: $p.name, environment: $e.name}
+      ]'
+}
+
+cmd_apps() {
+  local filter="" json=0
+  for a in "$@"; do
+    case "$a" in
+      --json) json=1 ;;
+      *)      filter="$a" ;;
+    esac
+  done
+  # Fetch all services unfiltered, then filter by project OR service name/appName
+  local rows; rows=$(flatten_services "" | jq --arg f "$filter" '
+    if $f == "" then . else
+      [.[] | select(
+        (.project // "" | ascii_downcase | contains($f | ascii_downcase))
+        or (.name // ""    | ascii_downcase | contains($f | ascii_downcase))
+        or (.appName // "" | ascii_downcase | contains($f | ascii_downcase))
+        or (.id // ""      | ascii_downcase | contains($f | ascii_downcase))
+      )]
+    end')
+  if (( json )); then echo "$rows"; return 0; fi
+  printf '%-9s  %-28s  %-22s  %-9s  %s\n' "TYPE" "NAME" "ID" "STATUS" "PROJECT/ENV"
+  echo "$rows" | jq -r '.[] | [.type, .name, .id, (.status // "-"), "\(.project)/\(.environment)"] | @tsv' \
+    | awk -F'\t' '{ printf "%-9s  %-28s  %-22s  %-9s  %s\n", $1, $2, $3, $4, $5 }'
+}
+
+cmd_status() {
+  local broken=0 json=0
+  for a in "$@"; do
+    case "$a" in
+      --broken) broken=1 ;;
+      --json)   json=1 ;;
+    esac
+  done
+  local rows; rows=$(flatten_services "")
+  if (( broken )); then
+    rows=$(echo "$rows" | jq '[.[] | select((.status // "") | IN("done","running","idle") | not)]')
+  fi
+  if (( json )); then echo "$rows"; return 0; fi
+  printf '%-40s  %-9s  %-9s  %s\n' "PROJECT/ENV/SERVICE" "TYPE" "STATUS" "LAST-DEPLOY"
+  echo "$rows" | jq -r '
+    sort_by(.project, .environment, .name)[]
+    | [ "\(.project)/\(.environment)/\(.name)", .type, (.status // "-"), (.lastDeploy // "-") ]
+    | @tsv' | awk -F'\t' '{ printf "%-40s  %-9s  %-9s  %s\n", $1, $2, $3, $4 }'
+}
+
+cmd_logs() {
+  local query="${1:-}"
+  [[ -z "$query" ]] && { echo "logs: compose name or ID required" >&2; exit 1; }
+  shift
+  local tail_lines=200 deploy_offset=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --tail)       tail_lines="$2"; shift 2 ;;
+      --deployment) deploy_offset="$2"; shift 2 ;;
+      *)            echo "logs: unknown flag $1" >&2; exit 1 ;;
+    esac
+  done
+
+  require_official
+  local compose_id; compose_id=$(resolve_compose "$query")
+  local deployments
+  deployments=$(trpc_get "deployment.allByCompose" "{\"composeId\":\"${compose_id}\"}")
+
+  local chosen
+  chosen=$(echo "$deployments" | jq --argjson i "$deploy_offset" '
+    (.result.data.json // .) | .[$i] // null')
+  if [[ "$chosen" == "null" ]]; then
+    echo "logs: no deployment at offset ${deploy_offset} for compose ${compose_id}" >&2
+    exit 3
+  fi
+  local log_path started status title
+  log_path=$(echo "$chosen" | jq -r '.logPath // empty')
+  started=$(echo  "$chosen" | jq -r '.startedAt // "-"')
+  status=$(echo   "$chosen" | jq -r '.status // "-"')
+  title=$(echo    "$chosen" | jq -r '.title // "-" | split("\n")[0]')
+  [[ -z "$log_path" ]] && { echo "logs: deployment has no logPath" >&2; exit 3; }
+
+  echo "# ${INSTANCE}:${compose_id}  deployment@${deploy_offset}  status=${status}  started=${started}" >&2
+  echo "# ${title}" >&2
+  echo "# ssh ${SSH_HOST} tail -n ${tail_lines} ${log_path}" >&2
+  ssh "$SSH_HOST" "tail -n ${tail_lines} '${log_path}'"
+}
+
+# ============================================================================
+# Corruption-proof, git-versioned env management.
+#
+# Dokploy's env WRITE is a FULL-REPLACE of the env column (compose.saveEnvironment /
+# application.saveEnvironment) — a partial write drops every other key. That is
+# exactly how Google creds got wiped before. These helpers make that IMPOSSIBLE by
+# construction:
+#   * env-set accepts ONLY KEY=VALUE upserts — a whole-env blob is not expressible.
+#   * READ full live blob -> surgical in-place upsert -> keydiff GUARD (abort if any
+#     non-target key is added/changed/removed) -> WRITE merged blob -> re-read &
+#     verify -> auto-restore on mismatch.
+#   * Every change is snapshotted into a LOCAL git repo (pre-state + verified-live
+#     state) for full history / diff / rollback. Repo is local-only (no remote, a
+#     pre-push hook hard-aborts), 700/600. Secrets stay plaintext under LUKS FDE —
+#     sops/age is YAGNI for a single-operator local repo (revisit if ever synced
+#     off-host). For applications, buildArgs/buildSecrets/createEnvFile are read and
+#     passed back unchanged (saveEnvironment overwrites them too).
+# ============================================================================
+ENV_BACKUP_DIR="${PHARMIA_ENV_BACKUP_DIR:-${HOME}/.config/pharmia-env-backups}"
+
+# resolve_service <name-or-id> -> "TYPE\tID\tNAME" (errors on not-found/ambiguous)
+resolve_service() {
+  local q="$1" flat byid matches count
+  flat=$(flatten_services "")
+  byid=$(echo "$flat" | jq --arg q "$q" '[.[]|select(.id==$q)]')
+  if [[ "$(echo "$byid" | jq 'length')" == "1" ]]; then
+    echo "$byid" | jq -r '.[0]|"\(.type)\t\(.id)\t\(.name)"'; return 0
+  fi
+  matches=$(echo "$flat" | jq --arg q "$q" '[.[]|select((.name//""|ascii_downcase|contains($q|ascii_downcase)) or (.appName//""|ascii_downcase|contains($q|ascii_downcase)))]')
+  count=$(echo "$matches" | jq 'length')
+  if [[ "$count" == "1" ]]; then echo "$matches" | jq -r '.[0]|"\(.type)\t\(.id)\t\(.name)"'; return 0; fi
+  if [[ "$count" == "0" ]]; then echo "service '$q' not found on $INSTANCE" >&2; return 3; fi
+  if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+    echo "resolve_service: could not enumerate services on $INSTANCE (got no project data)." >&2
+    return 7
+  fi
+  echo "service '$q' is ambiguous on $INSTANCE:" >&2
+  echo "$matches" | jq -r '.[]|"  \(.project)/\(.environment)/\(.name) [\(.type)] (\(.id))"' >&2
+  return 2
+}
+
+# _env_read_row <type> <id> -> inner row JSON (unwrapped from tRPC envelope)
+_env_read_row() {
+  case "$1" in
+    compose)     trpc_get compose.one     "{\"composeId\":\"$2\"}"     | jq '.result.data.json // .' ;;
+    application) trpc_get application.one  "{\"applicationId\":\"$2\"}" | jq '.result.data.json // .' ;;
+    *) echo "env: unsupported type '$1' (only application/compose have a safe env mutation)" >&2; return 1 ;;
+  esac
+}
+
+# _env_write <type> <id> <env-file> <row-json>  (full-replace; preserves app build fields)
+_env_write() {
+  local type="$1" id="$2" file="$3" row="$4"
+  case "$type" in
+    compose)
+      # Newer Dokploy exposes compose.saveEnvironment; older builds (e.g. prod
+      # dokploy.pharmia.ca) lack it and carry env on the generic compose.update.
+      # Try the dedicated mutation, fall back to compose.update on a 404.
+      local payload out code
+      payload="$(jq -n --arg id "$id" --rawfile env "$file" '{composeId:$id, env:$env}')"
+      out="$(trpc_post_code compose.saveEnvironment "$payload")"
+      code="$(printf '%s' "$out" | sed -n 's/^HTTP //p' | tail -1)"
+      if [[ "$code" == "404" ]]; then
+        out="$(trpc_post_code compose.update "$payload")"
+        code="$(printf '%s' "$out" | sed -n 's/^HTTP //p' | tail -1)"
+      fi
+      if [[ "$code" != "200" ]]; then
+        echo "env-write: compose env write failed (HTTP $code)" >&2
+        printf '%s\n' "$out" | grep -v '^HTTP ' | head -c 400 >&2; echo >&2
+        return 1
+      fi ;;
+    application)
+      local keep; keep=$(printf '%s' "$row" | jq '{buildArgs, buildSecrets, createEnvFile}')
+      trpc_post application.saveEnvironment \
+        "$(jq -n --arg id "$id" --rawfile env "$file" --argjson keep "$keep" '{applicationId:$id, env:$env} + $keep')" >/dev/null ;;
+    *) echo "env-write: unsupported type $type" >&2; return 1 ;;
+  esac
+}
+
+# _env_history_repo <service-name> -> ensures local git repo, echoes its dir
+_env_history_repo() {
+  local name="$1" safe dir
+  safe=$(printf '%s' "${INSTANCE}-${name}" | tr -c 'A-Za-z0-9_.-' '_')
+  dir="$ENV_BACKUP_DIR/$safe"
+  mkdir -p "$dir"; chmod 700 "$ENV_BACKUP_DIR" "$dir"
+  if [[ ! -d "$dir/.git" ]]; then
+    git -C "$dir" init -q
+    git -C "$dir" config user.email "dokploy-ops@${INSTANCE}.local"
+    git -C "$dir" config user.name  "dokploy-ops"
+    printf '#!/bin/sh\necho "pre-push BLOCKED: env history holds secrets — local-only, never push." >&2\nexit 1\n' > "$dir/.git/hooks/pre-push"
+    chmod 700 "$dir/.git/hooks/pre-push"
+    printf '%s\n' "# LOCAL-ONLY env history for ${INSTANCE}/${name}. Contains SECRETS. Never add a remote / push." > "$dir/README.md"
+    git -C "$dir" add README.md && git -C "$dir" commit -qm "init: local-only env history (secrets — do not push)"
+  fi
+  echo "$dir"
+}
+
+# _env_commit <dir> <env-file> <msg>  (snapshots app.env; values never in the message)
+_env_commit() {
+  cp "$2" "$1/app.env"; chmod 600 "$1/app.env"
+  git -C "$1" add app.env
+  git -C "$1" commit -qm "$3" >/dev/null 2>&1 || true
+  chmod -R go-rwx "$1"
+}
+
+# _env_keyparse_eq <a> <b> : exit 0 if KEY=VALUE maps are identical (ignores order/comments)
+_env_parse_eq() {
+  python3 - "$1" "$2" <<'PY'
+import sys, re
+def parse(p):
+    d={}
+    for ln in open(p).read().split('\n'):
+        m=re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$', ln)
+        if m: d[m.group(1)]=m.group(2)
+    return d
+sys.exit(0 if parse(sys.argv[1])==parse(sys.argv[2]) else 1)
+PY
+}
+
+cmd_env_backup() {
+  local q="${1:-}"; [[ -z "$q" ]] && { echo "env-backup: service name or ID required" >&2; exit 1; }
+  local res; res=$(resolve_service "$q") || exit $?
+  local TYPE ID NAME; IFS=$'\t' read -r TYPE ID NAME <<<"$res"
+  local row cur; row=$(_env_read_row "$TYPE" "$ID") || exit 1
+  cur=$(printf '%s' "$row" | jq -r '.env // empty')
+  local tmp; tmp=$(mktemp); printf '%s' "$cur" > "$tmp"
+  local keys; keys=$(grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' "$tmp" || true)
+  if [[ "${keys:-0}" -lt 1 ]]; then echo "env-backup: EMPTY env for $q ($ID) — refusing to save a bad backup" >&2; rm -f "$tmp"; exit 4; fi
+  local dir ts; dir=$(_env_history_repo "$NAME"); ts=$(date -u +%Y%m%dT%H%M%SZ)
+  _env_commit "$dir" "$tmp" "manual backup ${NAME} ${ts} — ${keys} keys"
+  {
+    echo "# env-backup ${INSTANCE}/${NAME} [${TYPE}] (${ID})"
+    echo "#   repo: ${dir} @ $(git -C "$dir" rev-parse --short HEAD)"
+    echo "#   keys: ${keys}   GOOGLE_*: $(grep -cE '^GOOGLE_' "$tmp" || true)"
+  } >&2
+  rm -f "$tmp"; echo "$dir"
+}
+
+cmd_env_set() {
+  local q="${1:-}"; [[ -z "$q" ]] && { echo "env-set: service name or ID required" >&2; exit 1; }
+  shift
+  local dry=0; local -a pairs=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry=1; shift ;;
+      *=*)       pairs+=("$1"); shift ;;
+      *) echo "env-set: expected KEY=VALUE (got '$1'). Upsert-only — a whole-env blob cannot be passed." >&2; exit 1 ;;
+    esac
+  done
+  [[ ${#pairs[@]} -eq 0 ]] && { echo "env-set: at least one KEY=VALUE required" >&2; exit 1; }
+  local res; res=$(resolve_service "$q") || exit $?
+  local TYPE ID NAME; IFS=$'\t' read -r TYPE ID NAME <<<"$res"
+  case "$TYPE" in application|compose) ;; *) echo "env-set: type '$TYPE' unsupported (only application/compose)" >&2; exit 1 ;; esac
+
+  local row cur; row=$(_env_read_row "$TYPE" "$ID") || exit 1
+  cur=$(printf '%s' "$row" | jq -r '.env // empty')
+  local pre; pre=$(mktemp); printf '%s' "$cur" > "$pre"
+  local kcount; kcount=$(grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' "$pre" || true)
+  if [[ "${kcount:-0}" -lt 1 ]]; then echo "env-set: live env EMPTY for $q — aborting (won't trust an empty baseline)" >&2; rm -f "$pre"; exit 4; fi
+
+  local keys_str ts dir
+  keys_str=$(printf '%s\n' "${pairs[@]}" | cut -d= -f1 | paste -sd, -)
+  ts=$(date -u +%Y%m%dT%H%M%SZ)
+  dir=$(_env_history_repo "$NAME")
+  _env_commit "$dir" "$pre" "pre env-set [${keys_str}] ${NAME} ${ts} — ${kcount} keys"
+
+  # surgical upsert (candidate built FROM live; every other line byte-for-byte)
+  local cand; cand=$(mktemp)
+  python3 - "$pre" "$cand" "${pairs[@]}" <<'PY'
+import sys, re
+src, dst = sys.argv[1], sys.argv[2]
+targets = [(kv.split('=',1)[0], kv.split('=',1)[1]) for kv in sys.argv[3:]]
+lines = open(src).read().split('\n')
+tnl = bool(lines) and lines[-1] == ''
+if tnl: lines = lines[:-1]
+seen = {k: False for k,_ in targets}
+out = []
+for ln in lines:
+    done = False
+    for k, v in targets:
+        if re.match(r'^'+re.escape(k)+r'=', ln):
+            out.append(f'{k}={v}'); seen[k] = True; done = True; break
+    if not done: out.append(ln)
+for k, v in targets:
+    if not seen[k]: out.append(f'{k}={v}')
+open(dst, 'w').write('\n'.join(out) + ('\n' if tnl else ''))
+PY
+
+  # keydiff GUARD — abort on ANY foreign add/change/remove (values masked in output)
+  if ! python3 - "$pre" "$cand" $(printf '%s\n' "${pairs[@]}" | cut -d= -f1) <<'PY'
+import sys, re
+bk, cand = sys.argv[1], sys.argv[2]; targets = set(sys.argv[3:])
+def parse(p):
+    d={}
+    for ln in open(p).read().split('\n'):
+        m=re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$', ln)
+        if m: d[m.group(1)]=m.group(2)
+    return d
+a, b = parse(bk), parse(cand)
+removed=[k for k in a if k not in b]; added=[k for k in b if k not in a]
+changed=[k for k in a if k in b and a[k]!=b[k]]
+foreign=[k for k in added+changed if k not in targets]+removed
+sys.stderr.write(f"#   keydiff: added={added} changed={changed} removed={removed}\n")
+sys.exit(0 if not foreign else 1)
+PY
+  then
+    echo "env-set: ABORT — foreign key add/change/remove detected. NOT applied. Pre-state snapshot kept: $dir" >&2
+    rm -f "$pre" "$cand"; exit 5
+  fi
+  if (( dry )); then echo "# env-set --dry-run OK — verified safe, NOT applied. repo=$dir" >&2; rm -f "$pre" "$cand"; exit 0; fi
+
+  # apply (full merged blob; app build fields preserved) then re-verify
+  _env_write "$TYPE" "$ID" "$cand" "$row"
+  local row2 live; row2=$(_env_read_row "$TYPE" "$ID") || exit 1
+  live=$(mktemp); printf '%s' "$(printf '%s' "$row2" | jq -r '.env // empty')" > "$live"
+  if ! _env_parse_eq "$cand" "$live"; then
+    echo "env-set: POST-APPLY MISMATCH — auto-restoring pre-state from snapshot" >&2
+    _env_write "$TYPE" "$ID" "$pre" "$row"
+    echo "env-set: restored. repo=$dir. Investigate before retrying." >&2
+    rm -f "$pre" "$cand" "$live"; exit 6
+  fi
+  _env_commit "$dir" "$live" "env-set [${keys_str}] ${NAME} ${ts} (verified live)"
+  local newk; newk=$(grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' "$live" || true)
+  echo "# env-set OK ${INSTANCE}/${NAME} [${TYPE}] (${ID}): keys ${kcount} -> ${newk}; set [${keys_str}]; repo=$dir @ $(git -C "$dir" rev-parse --short HEAD)" >&2
+  echo "# (saved, NOT deployed) deploy: dokploy ${INSTANCE} ${TYPE} deploy --${TYPE}Id ${ID}" >&2
+  rm -f "$pre" "$cand" "$live"
+}
+
+cmd_env_rollback() {
+  local q="${1:-}"; [[ -z "$q" ]] && { echo "env-rollback: service name or ID required" >&2; exit 1; }
+  shift; local sha="HEAD~1" dry=0
+  while [[ $# -gt 0 ]]; do case "$1" in --dry-run) dry=1; shift ;; *) sha="$1"; shift ;; esac; done
+  local res; res=$(resolve_service "$q") || exit $?
+  local TYPE ID NAME; IFS=$'\t' read -r TYPE ID NAME <<<"$res"
+  case "$TYPE" in application|compose) ;; *) echo "env-rollback: type '$TYPE' unsupported" >&2; exit 1 ;; esac
+  local dir; dir=$(_env_history_repo "$NAME")
+  local blob; blob=$(mktemp)
+  if ! git -C "$dir" show "${sha}:app.env" > "$blob" 2>/dev/null; then
+    echo "env-rollback: no app.env at '${sha}' in $dir. History:" >&2
+    git -C "$dir" --no-pager log --oneline >&2 || true
+    rm -f "$blob"; exit 3
+  fi
+  echo "# env-rollback ${NAME} -> ${sha} ($(git -C "$dir" log -1 --format='%h %s' "$sha" 2>/dev/null)) — $(grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' "$blob" || true) keys" >&2
+  if (( dry )); then echo "# --dry-run: not applied" >&2; rm -f "$blob"; exit 0; fi
+  local row; row=$(_env_read_row "$TYPE" "$ID") || exit 1
+  _env_write "$TYPE" "$ID" "$blob" "$row"
+  local row2 live; row2=$(_env_read_row "$TYPE" "$ID") || exit 1
+  live=$(mktemp); printf '%s' "$(printf '%s' "$row2" | jq -r '.env // empty')" > "$live"
+  if ! _env_parse_eq "$blob" "$live"; then echo "env-rollback: POST-APPLY MISMATCH — manual check needed" >&2; rm -f "$blob" "$live"; exit 6; fi
+  local ts; ts=$(date -u +%Y%m%dT%H%M%SZ)
+  _env_commit "$dir" "$live" "rollback to ${sha} ${NAME} ${ts} (verified live)"
+  echo "# env-rollback OK. deploy: dokploy ${INSTANCE} ${TYPE} deploy --${TYPE}Id ${ID}" >&2
+  rm -f "$blob" "$live"
+}
+
+cmd_env_rm() {
+  local q="${1:-}"; [[ -z "$q" ]] && { echo "env-rm: service name or ID required" >&2; exit 1; }
+  shift
+  local dry=0; local -a keys=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry=1; shift ;;
+      *=*) echo "env-rm: pass bare KEY names, not KEY=VALUE (got '$1')" >&2; exit 1 ;;
+      *) keys+=("$1"); shift ;;
+    esac
+  done
+  [[ ${#keys[@]} -eq 0 ]] && { echo "env-rm: at least one KEY required" >&2; exit 1; }
+  local res; res=$(resolve_service "$q") || exit $?
+  local TYPE ID NAME; IFS=$'\t' read -r TYPE ID NAME <<<"$res"
+  case "$TYPE" in application|compose) ;; *) echo "env-rm: type '$TYPE' unsupported (only application/compose)" >&2; exit 1 ;; esac
+
+  local row cur; row=$(_env_read_row "$TYPE" "$ID") || exit 1
+  cur=$(printf '%s' "$row" | jq -r '.env // empty')
+  local pre; pre=$(mktemp); printf '%s' "$cur" > "$pre"
+  local kcount; kcount=$(grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' "$pre" || true)
+  if [[ "${kcount:-0}" -lt 1 ]]; then echo "env-rm: live env EMPTY for $q — aborting (won't trust an empty baseline)" >&2; rm -f "$pre"; exit 4; fi
+
+  local keys_str ts dir
+  keys_str=$(printf '%s\n' "${keys[@]}" | paste -sd, -)
+  ts=$(date -u +%Y%m%dT%H%M%SZ)
+  dir=$(_env_history_repo "$NAME")
+  _env_commit "$dir" "$pre" "pre env-rm [${keys_str}] ${NAME} ${ts} — ${kcount} keys"
+
+  # surgical removal (drop only lines whose key is targeted; every other byte preserved)
+  local cand; cand=$(mktemp)
+  python3 - "$pre" "$cand" "${keys[@]}" <<'PY'
+import sys, re
+src, dst = sys.argv[1], sys.argv[2]
+targets = set(sys.argv[3:])
+lines = open(src).read().split('\n')
+tnl = bool(lines) and lines[-1] == ''
+if tnl: lines = lines[:-1]
+out = []
+for ln in lines:
+    m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=', ln)
+    if m and m.group(1) in targets:
+        continue
+    out.append(ln)
+open(dst, 'w').write('\n'.join(out) + ('\n' if tnl else ''))
+PY
+
+  # keydiff GUARD — only the targeted keys may be removed; no add/change/foreign-remove
+  if ! python3 - "$pre" "$cand" "${keys[@]}" <<'PY'
+import sys, re
+bk, cand = sys.argv[1], sys.argv[2]; targets = set(sys.argv[3:])
+def parse(p):
+    d={}
+    for ln in open(p).read().split('\n'):
+        m=re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$', ln)
+        if m: d[m.group(1)]=m.group(2)
+    return d
+a, b = parse(bk), parse(cand)
+removed=[k for k in a if k not in b]; added=[k for k in b if k not in a]
+changed=[k for k in a if k in b and a[k]!=b[k]]
+foreign=added+changed+[k for k in removed if k not in targets]
+sys.stderr.write(f"#   keydiff: added={added} changed={changed} removed={removed}\n")
+sys.exit(0 if not foreign else 1)
+PY
+  then
+    echo "env-rm: ABORT — foreign key add/change/remove detected. NOT applied. Pre-state snapshot kept: $dir" >&2
+    rm -f "$pre" "$cand"; exit 5
+  fi
+  if (( dry )); then echo "# env-rm --dry-run OK — verified safe, NOT applied. repo=$dir" >&2; rm -f "$pre" "$cand"; exit 0; fi
+
+  _env_write "$TYPE" "$ID" "$cand" "$row"
+  local row2 live; row2=$(_env_read_row "$TYPE" "$ID") || exit 1
+  live=$(mktemp); printf '%s' "$(printf '%s' "$row2" | jq -r '.env // empty')" > "$live"
+  if ! _env_parse_eq "$cand" "$live"; then
+    echo "env-rm: POST-APPLY MISMATCH — auto-restoring pre-state from snapshot" >&2
+    _env_write "$TYPE" "$ID" "$pre" "$row"
+    echo "env-rm: restored. repo=$dir. Investigate before retrying." >&2
+    rm -f "$pre" "$cand" "$live"; exit 6
+  fi
+  _env_commit "$dir" "$live" "env-rm [${keys_str}] ${NAME} ${ts} (verified live)"
+  local newk; newk=$(grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' "$live" || true)
+  echo "# env-rm OK ${INSTANCE}/${NAME} [${TYPE}] (${ID}): keys ${kcount} -> ${newk}; removed [${keys_str}]; repo=$dir @ $(git -C "$dir" rev-parse --short HEAD)" >&2
+  echo "# (saved, NOT deployed) deploy: dokploy ${INSTANCE} ${TYPE} deploy --${TYPE}Id ${ID}" >&2
+  rm -f "$pre" "$cand" "$live"
+}
+
+case "${1:-}" in
+  env-backup)   shift; cmd_env_backup "$@" ;;
+  env-set)      shift; cmd_env_set "$@" ;;
+  env-rm)       shift; cmd_env_rm "$@" ;;
+  env-rollback) shift; cmd_env_rollback "$@" ;;
+  logs)   shift; cmd_logs "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  apps)   shift; cmd_apps "$@" ;;
+  ""|-h|--help|help)
+    usage
+    if [[ -n "$OFFICIAL" ]]; then
+      echo
+      echo "--- @dokploy/cli ($OFFICIAL) ---"
+      "$OFFICIAL" --help
+    fi
+    ;;
+  *)
+    require_official
+    exec "$OFFICIAL" "$@"
+    ;;
+esac

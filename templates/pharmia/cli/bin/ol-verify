@@ -1,0 +1,960 @@
+#!/usr/bin/env python3
+"""
+ol-verify — Outline document validator.
+
+Generic checks (always run):
+  - URL liveness (HTTP status)
+  - Outline cross-refs (doc exists, not trashed, not orphaned)
+  - Relative Outline cross-refs missing the `/doc/` prefix (breaks in-app
+    redirect) — autofixable with --fix
+  - Empty markdown links `[text]()`
+
+Deep semantic checks (opt-in via --deep):
+  - Fetches academic links (DOI, PMID, PMC) and reference-section links
+  - Verifies page content matches the markdown label (token matching)
+  - Flags empty/near-empty pages (soft 404s, placeholder pages)
+  - Zero false-positive design: only flags clear mismatches (< 40% token hit)
+
+Corpus-based grounding (opt-in via --corpus NAME):
+  Loads profile from ~/.config/outline-cli/corpus/<name>/profile.json.
+  Extracts factual claims (regex patterns) and verifies each against
+  local source files + whitelists. Flags CONTRADICTED / UNVERIFIED.
+
+Usage:
+  ol-verify <id|slug|url> [--corpus NAME] [--json] [--strict] [--no-url-check] [--deep] [--fix]
+  ol-verify --all-collection <id> [--corpus NAME] [--json] [--strict] [--no-url-check] [--deep] [--fix]
+  ol-verify --file PATH [--corpus NAME] [--json] [--deep] [--fix]   # skip Outline fetch
+
+  --fix rewrites bare cross-refs (`[x](slug-Ab12Cd34Ef)`) to their canonical
+  `/doc/…` form — in place for --file, or via documents.update for a remote doc.
+
+Politeness (avoid WAF bans on gov sites — INESSS, MSSS, OPQ, RAMQ):
+  - per-host throttle: 1 req/1.5s (override via OL_VERIFY_HOST_INTERVAL=<sec>)
+  - persistent cache:  ~/.cache/outline-cli/url-checks.json, TTL 7 days
+                       (override via OL_VERIFY_CACHE / OL_VERIFY_CACHE_TTL)
+  - User-Agent:        identifies the tool + contact email
+  - --no-url-check:    skip HTTP entirely (cross-refs + corpus still run)
+
+Exit codes: 0=clean, 1=findings, 2=fetch/setup error.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+import html
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+CONFIG_DIR = Path.home() / ".config" / "outline-cli"
+CORPUS_ROOT = CONFIG_DIR / "corpus"
+API_TOKEN = None
+API_BASE = None
+
+
+# ── Colors ─────────────────────────────────────────────────────────────────────
+def _supports_color() -> bool:
+    return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+_COLOR = _supports_color()
+def c(text: str, code: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if _COLOR else text
+RED = lambda s: c(s, "31")
+YELLOW = lambda s: c(s, "33")
+GREEN = lambda s: c(s, "32")
+DIM = lambda s: c(s, "2")
+BOLD = lambda s: c(s, "1")
+
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+def load_config() -> None:
+    global API_TOKEN, API_BASE
+    cfg = CONFIG_DIR / "config.json"
+    if not cfg.exists():
+        die(f"Missing {cfg}")
+    data = json.loads(cfg.read_text())
+    API_TOKEN = os.environ.get("OUTLINE_API_TOKEN") or data.get("api_token")
+    API_BASE = os.environ.get("OUTLINE_URL") or data.get("base_url")
+    if not API_TOKEN or not API_BASE:
+        die("api_token or base_url missing")
+
+
+def die(msg: str, code: int = 2) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# ── Outline API ────────────────────────────────────────────────────────────────
+def api_post(endpoint: str, body: dict) -> dict:
+    req = urllib.request.Request(
+        f"{API_BASE}/api/{endpoint}",
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": f"Bearer {API_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "status": e.code, "error": e.read().decode("utf-8", "replace")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def normalize_id(s: str) -> str:
+    if s.startswith("http"):
+        s = s.split("/doc/", 1)[1].split("?")[0].split("#")[0]
+    return s
+
+
+def fetch_doc(doc_id: str) -> dict:
+    r = api_post("documents.info", {"id": normalize_id(doc_id)})
+    if not r.get("data"):
+        die(f"cannot fetch {doc_id}: {r.get('error', r)}")
+    return r["data"]
+
+
+def list_collection(collection_id: str) -> list[dict]:
+    docs, offset = [], 0
+    while True:
+        r = api_post("documents.list", {"collectionId": collection_id, "limit": 100, "offset": offset})
+        batch = r.get("data", [])
+        if not batch:
+            break
+        docs.extend(batch)
+        offset += len(batch)
+        if len(batch) < 100:
+            break
+    return docs
+
+
+# ── URL liveness cache ─────────────────────────────────────────────────────────
+# Two-layer cache: in-process dict (dedupes within a run) + persistent JSON on disk
+# (dedupes across runs, with TTL). Plus a per-host throttle so a batch run doesn't
+# look like a scraper to WAFs (INESSS, MSSS, OPQ, etc).
+import time as _time
+
+_URL_CACHE: dict[str, int] = {}
+_HOST_LAST_HIT: dict[str, float] = {}
+
+# Knobs (overridable via env)
+URL_CACHE_PATH = Path(os.environ.get("OL_VERIFY_CACHE", str(Path.home() / ".cache" / "outline-cli" / "url-checks.json")))
+URL_CACHE_TTL = int(os.environ.get("OL_VERIFY_CACHE_TTL", 7 * 24 * 3600))  # 7 days
+HOST_MIN_INTERVAL = float(os.environ.get("OL_VERIFY_HOST_INTERVAL", "1.5"))  # seconds between hits to same host
+URL_USER_AGENT = os.environ.get("OL_VERIFY_UA", "ol-verify/1.1 (+contact: amine@bentostudio.io; outline doc validator)")
+
+_DISK_CACHE: dict[str, dict] | None = None  # {url: {"code": int, "ts": float}}
+
+def _load_disk_cache() -> dict[str, dict]:
+    global _DISK_CACHE
+    if _DISK_CACHE is not None:
+        return _DISK_CACHE
+    try:
+        _DISK_CACHE = json.loads(URL_CACHE_PATH.read_text())
+        if not isinstance(_DISK_CACHE, dict):
+            _DISK_CACHE = {}
+    except Exception:
+        _DISK_CACHE = {}
+    return _DISK_CACHE
+
+def _save_disk_cache() -> None:
+    if _DISK_CACHE is None:
+        return
+    try:
+        URL_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        URL_CACHE_PATH.write_text(json.dumps(_DISK_CACHE))
+    except Exception:
+        pass
+
+def _throttle_host(url: str) -> None:
+    """Sleep just enough so we don't hit the same host more than once per HOST_MIN_INTERVAL."""
+    if HOST_MIN_INTERVAL <= 0:
+        return
+    host = urllib.parse.urlparse(url).netloc
+    if not host:
+        return
+    now = _time.monotonic()
+    last = _HOST_LAST_HIT.get(host, 0.0)
+    wait = HOST_MIN_INTERVAL - (now - last)
+    if wait > 0:
+        _time.sleep(wait)
+    _HOST_LAST_HIT[host] = _time.monotonic()
+
+def check_url(url: str, timeout: float = 8.0) -> int:
+    if url in _URL_CACHE:
+        return _URL_CACHE[url]
+    # Disk cache: only trust 2xx/3xx/404/410 (stable states). Don't cache 0 (unreachable)
+    # or 5xx — those are transient.
+    disk = _load_disk_cache()
+    entry = disk.get(url)
+    if entry and (_time.time() - entry.get("ts", 0)) < URL_CACHE_TTL:
+        code = entry.get("code", 0)
+        if code and (200 <= code < 400 or code in (404, 410)):
+            _URL_CACHE[url] = code
+            return code
+
+    _throttle_host(url)
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": URL_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            code = r.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+        if code in (403, 405):  # some servers reject HEAD — retry GET (after another polite pause)
+            _throttle_host(url)
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": URL_USER_AGENT})
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    code = r.status
+            except urllib.error.HTTPError as e2:
+                code = e2.code
+            except Exception:
+                code = 0
+    except Exception:
+        code = 0
+    _URL_CACHE[url] = code
+    if code and (200 <= code < 400 or code in (404, 410)):
+        disk[url] = {"code": code, "ts": _time.time()}
+    return code
+
+
+# ── Findings ──────────────────────────────────────────────────────────────────
+SEV_ERROR = "error"
+SEV_WARN = "warn"
+SEV_INFO = "info"
+
+@dataclass
+class Finding:
+    severity: str
+    category: str
+    message: str
+    evidence: str = ""
+    # Autofix payload (set by checks that know a deterministic rewrite).
+    # When --fix is active, every occurrence of fix_from is replaced with fix_to.
+    fixable: bool = False
+    fix_from: str = ""
+    fix_to: str = ""
+
+@dataclass
+class DocReport:
+    doc_id: str
+    title: str
+    url: str
+    findings: list[Finding] = field(default_factory=list)
+    checks_passed: int = 0
+
+
+# ── Generic validators ────────────────────────────────────────────────────────
+def validate_urls(text: str, report: DocReport) -> None:
+    # Match URLs that stop at any character that would close a markdown link,
+    # autolink, parenthetical, or quoted attribute: whitespace, ()[]<>"'.
+    # Then strip trailing punctuation (.,;:!?) — common at sentence ends.
+    # Also unescape markdown backslash-escapes like \~ \_ \* that Outline
+    # auto-applies on save; the unescaped chars are valid in URLs.
+    raw = re.findall(r"\bhttps?://[^\s()\[\]<>\"']+", text)
+    cleaned = {
+        re.sub(r"\\([~_*`])", r"\1", re.sub(r"[.,;:!?*]+$", "", u))
+        for u in raw
+    }
+    for u in sorted(cleaned):
+        if not u or "localhost" in u or "127.0.0.1" in u:
+            continue
+        code = check_url(u)
+        if code in (0,):
+            report.findings.append(Finding(SEV_WARN, "url", f"unreachable: {u}"))
+        elif code in (404, 410):
+            report.findings.append(Finding(SEV_ERROR, "url", f"HTTP {code}: {u}"))
+        elif code >= 500:
+            report.findings.append(Finding(SEV_WARN, "url", f"HTTP {code}: {u}"))
+        else:
+            report.checks_passed += 1
+
+
+def validate_outline_refs(text: str, report: DocReport) -> None:
+    if not API_BASE:
+        return
+    # /doc/<slug> or full URL
+    host = urllib.parse.urlparse(API_BASE).netloc
+    pattern = rf"{re.escape(host)}/doc/([a-zA-Z0-9-]+)"
+    slugs = set(re.findall(pattern, text))
+    for slug in slugs:
+        r = api_post("documents.info", {"id": slug})
+        data = r.get("data")
+        if not data:
+            report.findings.append(Finding(SEV_ERROR, "outline-ref", f"cross-ref points to missing doc: /doc/{slug}"))
+            continue
+        if data.get("deletedAt"):
+            report.findings.append(Finding(SEV_ERROR, "outline-ref", f"cross-ref points to trashed doc: /doc/{slug} ({data.get('title','?')})"))
+            continue
+        report.checks_passed += 1
+
+
+def validate_empty_links(text: str, report: DocReport) -> None:
+    empties = re.findall(r"\[([^\]]+)\]\(\s*\)", text)
+    for lbl in empties:
+        report.findings.append(Finding(SEV_WARN, "markdown", f"empty link: [{lbl}]()"))
+
+
+# A bare Outline reference is a markdown link target that points at another
+# Outline doc but lacks the leading `/doc/` prefix, e.g. `[x](some-slug-Ab12Cd34Ef)`
+# instead of `[x](/doc/some-slug-Ab12Cd34Ef)`. Outline resolves these relative to
+# the *current* page URL, so the in-app redirect silently breaks. The fix is to
+# rewrite the target to the canonical `.url` the API returns for that doc.
+_SLUG_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*-[A-Za-z0-9]{10,}$")
+_UUID_SHAPE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_MD_LINK = re.compile(r"\[([^\]]*)\]\(([^)\s]+)\)")
+_HAS_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")  # http:, https:, mailto:, tel:, ftp:…
+
+
+def _strip_fenced_code(text: str) -> str:
+    """Drop ``` fenced blocks so code samples don't trip the link scanner."""
+    return re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+
+
+def _strip_urlid(slug: str) -> str:
+    """Drop the trailing `-Ab12Cd34Ef` Outline urlId from a slug."""
+    return re.sub(r"-[A-Za-z0-9]{10,}$", "", slug)
+
+
+def _resolve_via_search(base: str) -> str | None:
+    """Fallback for refs that use the title-slug but omit the urlId (so
+    documents.info can't resolve them). Search by the de-slugified words and
+    accept a hit ONLY when its slug (minus urlId) is an exact match — never a
+    fuzzy/best-effort match, which would risk rewriting a link to the wrong doc.
+    """
+    # Outline ANDs query tokens and folds accents unevenly (a slug's
+    # accent-stripped words won't match the accented title), so a full
+    # de-slugified query under-recalls. The first slug token is the most
+    # distinctive and reliably surfaces the doc; the exact-slug-equality
+    # check below is what guarantees we pick the right one.
+    first_token = base.split("-", 1)[0]
+    r = api_post("documents.search", {"query": first_token, "limit": 25})
+    for hit in r.get("data", []):
+        doc = hit.get("document", {})
+        url = doc.get("url", "")
+        if url and not doc.get("deletedAt") and _strip_urlid(url.rsplit("/", 1)[-1]) == base:
+            return url
+    return None
+
+
+def validate_relative_outline_refs(text: str, report: DocReport) -> None:
+    """Flag (and offer to fix) cross-refs that lack the `/doc/` prefix."""
+    if not API_BASE:
+        return
+    scan = _strip_fenced_code(text)
+    resolved: dict[str, tuple[str, str | None]] = {}  # base -> (verdict, canonical_url)
+    for m in _MD_LINK.finditer(scan):
+        label, target = m.group(1), m.group(2).strip()
+        # Skip absolute paths (/doc/…), anchors, queries, and anything with a scheme.
+        if not target or target[0] in "/#?" or _HAS_SCHEME.match(target):
+            continue
+        base = target.split("#", 1)[0].split("?", 1)[0]
+        frag = target[len(base):]
+        if not base:
+            continue
+        if base not in resolved:
+            r = api_post("documents.info", {"id": base})
+            data = r.get("data")
+            if data and data.get("url") and not data.get("deletedAt"):
+                resolved[base] = ("ok", data["url"])
+            else:
+                # info couldn't resolve it — maybe a title-slug missing its urlId.
+                canonical = _resolve_via_search(base) if _SLUG_SHAPE.match(base) or "-" in base else None
+                resolved[base] = ("ok", canonical) if canonical else ("missing", None)
+        verdict, canonical = resolved[base]
+        if verdict == "ok":
+            new_target = f"{canonical}{frag}"
+            f = Finding(
+                SEV_ERROR, "outline-ref",
+                f"relative cross-ref missing /doc/ prefix: [{label}]({target}) → {new_target}",
+            )
+            f.fixable = True
+            f.fix_from = f"]({target})"
+            f.fix_to = f"]({new_target})"
+            report.findings.append(f)
+        elif _SLUG_SHAPE.match(base) or _UUID_SHAPE.match(base):
+            report.findings.append(Finding(
+                SEV_WARN, "outline-ref",
+                f"relative cross-ref to unresolvable doc (renamed/deleted/typo?): [{label}]({target})",
+            ))
+
+
+# Hosts where the homepage IS the resource (single-purpose subdomain tools or doc indexes).
+# Extend via env var OL_VERIFY_URL_ALLOWLIST=comma,separated,hosts.
+_SHALLOW_URL_ALLOWLIST = {
+    "calculatricercv.inesss.qc.ca",   # CV risk calculator (the homepage IS the tool)
+    "guide-alimentaire.canada.ca",    # Canada food guide
+    "guide.standards.opq.org",        # OPQ standards app guide
+    "recalls-rappels.canada.ca",      # Health Canada recalls
+    "pdf.hres.ca",                    # Health Canada PM PDFs (always deep)
+    "www.legisquebec.gouv.qc.ca",     # canonical regulation host
+    "legisquebec.gouv.qc.ca",
+    "pubmed.ncbi.nlm.nih.gov",        # PMIDs are inherently specific
+}
+
+# Path segments that are almost always category indexes, not specific resources.
+_GENERIC_PATH_SEGMENTS = {
+    "publications", "publications.html", "publications.php",
+    "resources", "guidelines", "documentation", "about", "guides",
+    "guidelines-and-position-statements", "clinical-practice-guidelines",
+    "search", "fr", "en", "index", "index.html", "home",
+}
+
+def _classify_shallow_url(url: str, allowlist: set[str]) -> tuple[str, str]:
+    """Return (severity, reason). severity in {'ok', 'warn', 'error'}."""
+    try:
+        p = urllib.parse.urlparse(url)
+    except Exception:
+        return ("ok", "")
+    host = (p.netloc or "").lower()
+    if host in allowlist:
+        return ("ok", "")
+    path = (p.path or "").strip("/")
+    if not path:
+        return ("error", "bare domain (no path)")
+    # File extensions = specific resource
+    if re.search(r"\.(pdf|docx?|xlsx?|txt|csv|rtf)$", path, re.IGNORECASE):
+        return ("ok", "")
+    # Path contains digits (year, ID, version) = likely specific
+    if re.search(r"\d", path):
+        return ("ok", "")
+    segments = [s.lower() for s in path.split("/") if s]
+    non_generic = [s for s in segments if s not in _GENERIC_PATH_SEGMENTS]
+    if not non_generic:
+        return ("warn", f"category-index path (/{'/'.join(segments)})")
+    return ("ok", "")
+
+
+def validate_shallow_urls(text: str, report: DocReport) -> None:
+    """Flag bare-domain and category-index URLs that aren't authoritative-citable."""
+    raw = re.findall(r"\bhttps?://[^\s()\[\]<>\"']+", text)
+    cleaned = {re.sub(r"[.,;:!?*]+$", "", u) for u in raw}
+    extra = os.environ.get("OL_VERIFY_URL_ALLOWLIST", "")
+    allowlist = _SHALLOW_URL_ALLOWLIST | {h.strip().lower() for h in extra.split(",") if h.strip()}
+    for u in sorted(cleaned):
+        if not u or "localhost" in u or "127.0.0.1" in u:
+            continue
+        sev, reason = _classify_shallow_url(u, allowlist)
+        if sev == "error":
+            report.findings.append(Finding(SEV_ERROR, "shallow-url", f"{reason}: {u}"))
+        elif sev == "warn":
+            report.findings.append(Finding(SEV_WARN, "shallow-url", f"{reason}: {u}"))
+
+
+# ── Deep semantic verification ────────────────────────────────────────────────
+# Uses structured metadata APIs (DOI content negotiation, PubMed CSL) to verify
+# that academic links point to the article described in the markdown label.
+# Also fetches non-academic reference-section links to flag empty/soft-404 pages.
+#
+# Design: zero false positives. Only flag when there's a clear mismatch or
+# the page is genuinely empty. Uncertain → pass silently.
+
+DEEP_CONCURRENCY = int(os.environ.get("OL_VERIFY_DEEP_CONCURRENCY", "3"))
+DEEP_MIN_TEXT_LEN = int(os.environ.get("OL_VERIFY_DEEP_MIN_TEXT", "150"))
+
+
+def _normalize_for_match(s: str) -> str:
+    s = s.lower()
+    for frm, to in [("àâäáã", "a"), ("éèêë", "e"), ("ïîì", "i"), ("ôöòó", "o"), ("ùûü", "u"), ("ç", "c"), ("ñ", "n")]:
+        for ch in frm:
+            s = s.replace(ch, to)
+    s = re.sub(r"[^\w\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+_FILLER = {"et", "al", "als", "the", "a", "an", "of", "in", "for", "and", "or",
+           "from", "with", "on", "to", "by", "des", "du", "de", "la", "le", "les",
+           "un", "une", "sur", "dans", "pour", "par", "au", "aux", "en"}
+
+
+def _extract_label_tokens(label: str) -> list[str]:
+    tokens = _normalize_for_match(label).split()
+    return [t for t in tokens if t not in _FILLER and len(t) > 1]
+
+
+def _fetch_doi_meta(doi: str, timeout: float = 10.0) -> dict | None:
+    url = f"https://doi.org/{doi}"
+    _throttle_host(url)
+    try:
+        req = urllib.request.Request(url, headers={
+            "Accept": "application/vnd.citationstyles.csl+json",
+            "User-Agent": URL_USER_AGENT,
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+
+def _fetch_pubmed_meta(pmid: str, timeout: float = 10.0) -> dict | None:
+    url = f"https://api.ncbi.nlm.nih.gov/lit/ctxp/v1/pubmed/?format=csl&id={pmid}"
+    _throttle_host(url)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": URL_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+
+def _fetch_page_text_deep(url: str, timeout: float = 12.0) -> str | None:
+    _throttle_host(url)
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": URL_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,*/*",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+            ct = r.headers.get("Content-Type", "")
+            charset = "utf-8"
+            if "charset=" in ct:
+                charset = ct.split("charset=")[-1].split(";")[0].strip()
+            try:
+                body = raw.decode(charset, errors="replace")
+            except (LookupError, UnicodeDecodeError):
+                body = raw.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    text = re.sub(r"<script[^>]*>.*?</script>", " ", body, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_doi(url: str) -> str | None:
+    m = re.match(r"https?://(dx\.)?doi\.org/(10\..+)", url)
+    return m.group(2) if m else None
+
+
+def _extract_pmid(url: str) -> str | None:
+    m = re.search(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)", url)
+    if not m:
+        m = re.search(r"ncbi\.nlm\.nih\.gov/pubmed/(\d+)", url)
+    return m.group(1) if m else None
+
+
+def _is_doi_url(url: str) -> bool:
+    return bool(re.match(r"https?://(dx\.)?doi\.org/10\.", url))
+
+def _is_pubmed_url(url: str) -> bool:
+    return "pubmed.ncbi.nlm.nih.gov" in url or "ncbi.nlm.nih.gov/pubmed" in url
+
+def _is_pmc_url(url: str) -> bool:
+    return "ncbi.nlm.nih.gov/pmc/" in url
+
+def _is_academic_url(url: str) -> bool:
+    return _is_doi_url(url) or _is_pubmed_url(url) or _is_pmc_url(url)
+
+
+_DOI_LABEL_RE = re.compile(r"^(doi[:\s]*)?10\.\d{4,}/\S+$", re.IGNORECASE)
+_PMID_LABEL_RE = re.compile(r"^(pubmed\s*[—–-]\s*)?pmid[:\s]*\d+$", re.IGNORECASE)
+_DOI_ORG_LABEL_RE = re.compile(r"^doi\.org/10\.\d{4,}/\S+$", re.IGNORECASE)
+
+def _is_bare_identifier_label(label: str) -> bool:
+    """Labels that are just DOI/PMID identifiers can't meaningfully match article titles."""
+    stripped = label.strip()
+    return bool(_DOI_LABEL_RE.match(stripped) or _PMID_LABEL_RE.match(stripped) or _DOI_ORG_LABEL_RE.match(stripped))
+
+
+_TRAILING_ID_RE = re.compile(r"\s*[—–-]+\s*(PubMed\s*)?PMID[:\s]*\d+\s*$", re.IGNORECASE)
+_TRAILING_DOI_RE = re.compile(r"\s*[—–-]+\s*DOI[:\s]*10\.\S+\s*$", re.IGNORECASE)
+
+def _strip_identifier_suffix(label: str) -> str:
+    """Remove trailing PMID/DOI identifiers from labels before token matching."""
+    label = _TRAILING_ID_RE.sub("", label)
+    label = _TRAILING_DOI_RE.sub("", label)
+    return label.strip()
+
+
+def _match_label_against_meta(label: str, url: str, meta: dict) -> Finding | None:
+    if _is_bare_identifier_label(label):
+        return None
+    cleaned = _strip_identifier_suffix(label)
+    label_tokens = _extract_label_tokens(cleaned)
+    if len(label_tokens) < 2:
+        return None
+    meta_parts = []
+    if meta.get("title"):
+        meta_parts.append(meta["title"])
+    if meta.get("container-title"):
+        meta_parts.append(meta["container-title"])
+    if meta.get("container-title-short"):
+        meta_parts.append(meta["container-title-short"])
+    for a in meta.get("author", []):
+        if a.get("family"):
+            meta_parts.append(a["family"])
+    for date_key in ("issued", "published-print", "published-online", "published"):
+        dp = meta.get(date_key)
+        if dp and dp.get("date-parts"):
+            parts = dp["date-parts"]
+            if parts and parts[0] and parts[0][0]:
+                meta_parts.append(str(parts[0][0]))
+                break
+    meta_text = _normalize_for_match(" ".join(meta_parts))
+    hits = sum(1 for t in label_tokens if t in meta_text)
+    total = len(label_tokens)
+    if hits < total * 0.4:
+        missing = [t for t in label_tokens if t not in meta_text]
+        actual_title = meta.get("title", "?")[:80]
+        actual_authors = ", ".join(a.get("family", "") for a in meta.get("author", [])[:3])
+        return Finding(SEV_ERROR, "deep-mismatch",
+                       f"DOI/PMID mismatch: label \"{label}\" — actual: \"{actual_title}\" "
+                       f"by {actual_authors} ({hits}/{total} tokens, missing: {', '.join(missing[:5])})",
+                       evidence=url)
+    return None
+
+
+def _check_deep_link(label: str, url: str) -> Finding | None:
+    doi = _extract_doi(url)
+    if doi:
+        meta = _fetch_doi_meta(doi)
+        if meta and meta.get("title"):
+            return _match_label_against_meta(label, url, meta)
+        return None
+    pmid = _extract_pmid(url)
+    if pmid:
+        meta = _fetch_pubmed_meta(pmid)
+        if meta and meta.get("title"):
+            return _match_label_against_meta(label, url, meta)
+        if meta is not None and not meta.get("title"):
+            return Finding(SEV_WARN, "deep-empty",
+                           f"PMID {pmid} returned no metadata (invalid PMID?): [{label}]({url})")
+        return None
+    # Non-academic link in refs section: check for empty/soft-404 pages
+    page_text = _fetch_page_text_deep(url)
+    if page_text is not None and len(page_text) < DEEP_MIN_TEXT_LEN:
+        return Finding(SEV_WARN, "deep-empty",
+                       f"page has almost no content ({len(page_text)} chars): [{label}]({url})")
+    return None
+
+
+def validate_deep_links(text: str, report: DocReport) -> None:
+    links = []
+    for m in re.finditer(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", text):
+        label, url = m.group(1).strip(), m.group(2).strip()
+        if label and url:
+            links.append((label, url, m.start()))
+    if not links:
+        return
+    ref_section_start = None
+    for m in re.finditer(r"^##\s*(Références|References|Sources|Bibliographie)", text, re.MULTILINE | re.IGNORECASE):
+        ref_section_start = m.start()
+        break
+    to_check = []
+    for label, url, pos in links:
+        if _is_academic_url(url):
+            to_check.append((label, url))
+        elif ref_section_start is not None and pos >= ref_section_start:
+            to_check.append((label, url))
+    if not to_check:
+        return
+    with ThreadPoolExecutor(max_workers=DEEP_CONCURRENCY) as pool:
+        futures = {pool.submit(_check_deep_link, label, url): (label, url) for label, url in to_check}
+        for fut in as_completed(futures):
+            try:
+                finding = fut.result()
+                if finding:
+                    report.findings.append(finding)
+                else:
+                    report.checks_passed += 1
+            except Exception:
+                pass
+
+
+# ── Corpus-based grounding ─────────────────────────────────────────────────────
+class Corpus:
+    def __init__(self, name: str):
+        self.name = name
+        profile_path = CORPUS_ROOT / name / "profile.json"
+        if not profile_path.exists():
+            die(f"corpus profile not found: {profile_path}")
+        self.profile = json.loads(profile_path.read_text())
+        self.sources: dict[str, str] = {}
+        for src in self.profile.get("sources", []):
+            path = CORPUS_ROOT / name / "sources" / src["file"]
+            if not path.exists():
+                print(YELLOW(f"warn: source missing: {path}"), file=sys.stderr)
+                continue
+            self.sources[src["label"]] = path.read_text()
+        self.rules = self.profile.get("rules", {})
+        self.extractors = {k: re.compile(v) for k, v in self.profile.get("extractors", {}).items()}
+
+    def find_in_sources(self, needle: str) -> list[str]:
+        """Return labels of source files containing the needle (substring match)."""
+        return [lbl for lbl, txt in self.sources.items() if needle in txt]
+
+    def find_regex_in_sources(self, pattern: str) -> list[str]:
+        return [lbl for lbl, txt in self.sources.items() if re.search(pattern, txt)]
+
+
+def validate_corpus(text: str, report: DocReport, corpus: Corpus) -> None:
+    r = corpus.rules
+    ex = corpus.extractors
+
+    # --- Règles (Entente) ---
+    max_regle = r.get("regles_entente_max", 50)
+    seen_regles = set()
+    for m in ex.get("regle_entente", re.compile(r"(?!)")).finditer(text):
+        num = int(m.group(1))
+        if num in seen_regles:
+            continue
+        seen_regles.add(num)
+        if num < 1 or num > max_regle:
+            report.findings.append(Finding(SEV_ERROR, "regle",
+                f"Règle {num} n'existe pas (Entente valide: 1..{max_regle})",
+                evidence=m.group(0)))
+        else:
+            report.checks_passed += 1
+
+    # --- Alphanumeric codes ---
+    wl = set(r.get("alphanumeric_codes_whitelist", []))
+    aliases = r.get("alphanumeric_service_aliases", {})
+    for m in ex.get("alphanumeric_code", re.compile(r"(?!)")).finditer(text):
+        code = m.group(1)
+        full = m.group(0).lower()
+        # Alias lookup ("code 3", "code 4")
+        if full in [a.lower() for a in aliases.keys()]:
+            report.checks_passed += 1
+            continue
+        # Digit-only codes ≠ whitelist → flag
+        if code.isdigit():
+            # 1-2 digit numeric service codes like "code 3" are valid aliases only
+            # Beyond that (14031, 14033) → hallucinated format
+            if len(code) >= 4:
+                report.findings.append(Finding(SEV_ERROR, "code",
+                    f"code numérique à {len(code)} chiffres non conforme format RAMQ (attendu: alphanumérique OP/V/AD... ou 00xxxxxx 8 chiffres)",
+                    evidence=m.group(0)))
+            continue
+        if code not in wl:
+            # Try alias reverse
+            if f"code {code}".lower() in [a.lower() for a in aliases.keys()]:
+                report.checks_passed += 1
+                continue
+            report.findings.append(Finding(SEV_WARN, "code",
+                f"code '{code}' non whitelisté (ajouter au corpus si légitime)",
+                evidence=m.group(0)))
+        else:
+            report.checks_passed += 1
+
+    # --- RAMQ 8-digit codes ---
+    wl_8digit = r.get("ramq_8digit_whitelist", {})
+    seen_codes = set()
+    for m in ex.get("ramq_8digit", re.compile(r"(?!)")).finditer(text):
+        code = m.group(1)
+        if code in seen_codes:
+            continue
+        seen_codes.add(code)
+        if code in wl_8digit:
+            report.checks_passed += 1
+        elif corpus.find_in_sources(code):
+            report.checks_passed += 1
+        else:
+            report.findings.append(Finding(SEV_ERROR, "ramq-code",
+                f"code RAMQ {code} introuvable (ni whitelist ni sources) — potentiel hallucination",
+                evidence=m.group(0)))
+
+    # --- Tarifs ---
+    seen_tariffs = set()
+    for m in ex.get("tariff", re.compile(r"(?!)")).finditer(text):
+        amt = m.group(1)
+        if amt in seen_tariffs:
+            continue
+        seen_tariffs.add(amt)
+        if corpus.find_in_sources(amt):
+            report.checks_passed += 1
+        else:
+            report.findings.append(Finding(SEV_ERROR, "tariff",
+                f"tarif {amt} $ introuvable dans sources — potentiel hallucination",
+                evidence=m.group(0)))
+
+    # --- Infolettres ---
+    wl_info = set(r.get("infolettre_whitelist", []))
+    for m in ex.get("infolettre", re.compile(r"(?!)")).finditer(text):
+        num = m.group(1)
+        if num not in wl_info:
+            report.findings.append(Finding(SEV_WARN, "infolettre",
+                f"Infolettre {num} non whitelistée — vérifier si existe",
+                evidence=m.group(0)))
+        else:
+            report.checks_passed += 1
+
+    # --- Articles reglementaires ---
+    for key, max_key in [
+        ("p10_r32_article", "p10_r32_articles_max"),
+        ("p10_r12_article", "p10_r12_articles_max"),
+        ("m9_r1221_article", "m9_r1221_articles_max"),
+        ("loi_p10_article", "loi_p10_articles_max"),
+    ]:
+        max_n = r.get(max_key, 999)
+        for m in ex.get(key, re.compile(r"(?!)")).finditer(text):
+            art = int(m.group(1))
+            if art < 1 or art > max_n:
+                report.findings.append(Finding(SEV_ERROR, "article",
+                    f"article {art} dépasse plage connue (1..{max_n}) pour {key.replace('_article','').replace('_',' ')}",
+                    evidence=m.group(0)))
+            else:
+                report.checks_passed += 1
+
+
+# ── Main run ───────────────────────────────────────────────────────────────────
+SKIP_URL_CHECK = False
+SKIP_SHALLOW_CHECK = False
+DEEP_CHECK = False
+APPLY_FIX = False
+
+
+def _apply_fixes(text: str, report: DocReport, doc_id_or_path: str, from_file: bool) -> None:
+    """Rewrite fixable findings into the doc, then mark them resolved.
+
+    file mode  → overwrite the local file.
+    remote mode→ push a documents.update with the rewritten text.
+    """
+    fixes = [(f.fix_from, f.fix_to) for f in report.findings if f.fixable]
+    if not fixes:
+        return
+    new_text = text
+    for old, new in fixes:
+        new_text = new_text.replace(old, new)
+    if new_text == text:
+        return
+    if from_file:
+        Path(doc_id_or_path).write_text(new_text)
+    else:
+        upd = api_post("documents.update", {"id": report.doc_id, "text": new_text, "done": True})
+        if not upd.get("data"):
+            report.findings.append(Finding(SEV_ERROR, "fix", f"autofix push failed: {upd.get('error', upd)}"))
+            return
+    for f in report.findings:
+        if f.fixable:
+            f.severity = SEV_INFO
+            f.message = "FIXED → " + f.message
+    report.checks_passed += len(fixes)
+
+
+def run_doc(doc_id_or_path: str, corpus: Corpus | None, from_file: bool) -> DocReport:
+    if from_file:
+        text = Path(doc_id_or_path).read_text()
+        report = DocReport(doc_id="file", title=Path(doc_id_or_path).name, url=str(doc_id_or_path))
+    else:
+        doc = fetch_doc(doc_id_or_path)
+        text = doc.get("text", "") or ""
+        report = DocReport(doc_id=doc["id"], title=doc["title"], url=f"{API_BASE}{doc['url']}")
+        if doc.get("deletedAt"):
+            report.findings.append(Finding(SEV_ERROR, "state", f"doc est trashed (deletedAt={doc['deletedAt']})"))
+
+    if not SKIP_URL_CHECK:
+        validate_urls(text, report)
+    if not SKIP_SHALLOW_CHECK:
+        validate_shallow_urls(text, report)
+    validate_outline_refs(text, report)
+    validate_relative_outline_refs(text, report)
+    validate_empty_links(text, report)
+    if corpus:
+        validate_corpus(text, report, corpus)
+
+    if DEEP_CHECK:
+        validate_deep_links(text, report)
+
+    if APPLY_FIX:
+        _apply_fixes(text, report, doc_id_or_path, from_file)
+
+    return report
+
+
+def print_report(report: DocReport, verbose: bool = True) -> None:
+    errs = [f for f in report.findings if f.severity == SEV_ERROR]
+    warns = [f for f in report.findings if f.severity == SEV_WARN]
+    status = RED("FAIL") if errs else (YELLOW("WARN") if warns else GREEN("OK"))
+    print(f"{status}  {BOLD(report.title)}  {DIM(report.url)}")
+    print(f"       {len(errs)} error, {len(warns)} warn, {report.checks_passed} checks passed")
+    if verbose or errs:
+        for f in report.findings:
+            icon = RED("✗") if f.severity == SEV_ERROR else (YELLOW("⚠") if f.severity == SEV_WARN else DIM("·"))
+            ev = f" — {DIM(f.evidence)}" if f.evidence else ""
+            print(f"       {icon} [{f.category}] {f.message}{ev}")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="ol-verify", description="Outline doc validator")
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("doc", nargs="?", help="doc id, slug, or full URL")
+    g.add_argument("--all-collection", metavar="ID", help="validate every doc in collection")
+    g.add_argument("--file", metavar="PATH", help="validate a local file (skip Outline fetch)")
+    ap.add_argument("--corpus", help="corpus profile name for factual grounding (e.g. opq)")
+    ap.add_argument("--json", action="store_true", help="JSON output")
+    ap.add_argument("--strict", action="store_true", help="exit 1 on any warning")
+    ap.add_argument("-q", "--quiet", action="store_true", help="only show failures")
+    ap.add_argument("--no-url-check", action="store_true", help="skip HTTP liveness checks (still runs Outline cross-refs + corpus)")
+    ap.add_argument("--no-shallow-check", action="store_true", help="skip shallow-URL (bare-domain / category-index) detection")
+    ap.add_argument("--deep", action="store_true", help="semantic verification: fetch academic links (DOI/PMID) and refs, check content matches label, flag empty pages")
+    ap.add_argument("--fix", action="store_true", help="auto-prefix relative Outline cross-refs with /doc/ (rewrites the file, or pushes a doc update)")
+    args = ap.parse_args()
+
+    global SKIP_URL_CHECK, SKIP_SHALLOW_CHECK, DEEP_CHECK, APPLY_FIX
+    SKIP_URL_CHECK = args.no_url_check
+    SKIP_SHALLOW_CHECK = args.no_shallow_check
+    DEEP_CHECK = args.deep
+    APPLY_FIX = args.fix
+
+    load_config()
+    corpus = Corpus(args.corpus) if args.corpus else None
+
+    reports: list[DocReport] = []
+    if args.file:
+        reports.append(run_doc(args.file, corpus, from_file=True))
+        _save_disk_cache()
+    elif args.all_collection:
+        docs = list_collection(args.all_collection)
+        total = len(docs)
+        print(DIM(f"validating {total} docs in collection {args.all_collection}"), file=sys.stderr)
+        if not SKIP_URL_CHECK:
+            print(DIM(f"  url-check: throttled to 1 req/{HOST_MIN_INTERVAL}s per host, cache={URL_CACHE_PATH} (TTL {URL_CACHE_TTL//3600}h)"), file=sys.stderr)
+        for i, d in enumerate(docs, 1):
+            print(DIM(f"  [{i}/{total}] {d.get('title','?')[:80]}"), file=sys.stderr)
+            reports.append(run_doc(d["id"], corpus, from_file=False))
+            if i % 10 == 0:
+                _save_disk_cache()
+        _save_disk_cache()
+    else:
+        reports.append(run_doc(args.doc, corpus, from_file=False))
+        _save_disk_cache()
+
+    if args.json:
+        print(json.dumps([asdict(r) for r in reports], indent=2, ensure_ascii=False))
+    else:
+        for r in reports:
+            has_err = any(f.severity == SEV_ERROR for f in r.findings)
+            has_warn = any(f.severity == SEV_WARN for f in r.findings)
+            if args.quiet and not (has_err or (args.strict and has_warn)):
+                continue
+            print_report(r, verbose=not args.quiet)
+            if len(reports) > 1:
+                print()
+
+    total_err = sum(1 for r in reports for f in r.findings if f.severity == SEV_ERROR)
+    total_warn = sum(1 for r in reports for f in r.findings if f.severity == SEV_WARN)
+    if not args.json:
+        print(DIM(f"── {len(reports)} doc(s), {total_err} errors, {total_warn} warns ──"), file=sys.stderr)
+
+    if total_err > 0:
+        sys.exit(1)
+    if args.strict and total_warn > 0:
+        sys.exit(1)
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

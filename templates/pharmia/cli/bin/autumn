@@ -1,0 +1,1011 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Autumn billing CLI
+# Auth: AUTUMN_SECRET_KEY env var or ~/.config/autumn/config
+# Env vars take precedence over config file
+_pre_key="${AUTUMN_SECRET_KEY:-}"
+_pre_url="${AUTUMN_URL:-}"
+[[ -f "$HOME/.config/autumn/config" ]] && source "$HOME/.config/autumn/config"
+[[ -n "$_pre_key" ]] && AUTUMN_SECRET_KEY="$_pre_key"
+[[ -n "$_pre_url" ]] && AUTUMN_URL="$_pre_url"
+unset _pre_key _pre_url
+
+BASE="${AUTUMN_URL:?Set AUTUMN_URL}"
+# Strip trailing /v1 to normalize — we add it per-request
+BASE="${BASE%/v1}"
+AUTH="Authorization: Bearer ${AUTUMN_SECRET_KEY:?Set AUTUMN_SECRET_KEY}"
+CT="Content-Type: application/json"
+
+# Env banner derivation: sandbox if key contains `_test_` or URL hints at sandbox
+_env_label() {
+  local key="${AUTUMN_SECRET_KEY:-}"
+  if [[ "$key" == *"_test_"* ]] || [[ "$BASE" == *"sandbox"* ]]; then
+    echo "sandbox"
+  else
+    echo "prod"
+  fi
+}
+
+# Banner on every command, suppress with AUTUMN_NO_BANNER=1
+if [[ -z "${AUTUMN_NO_BANNER:-}" ]]; then
+  echo "[autumn: $(_env_label) | $BASE]" >&2
+fi
+
+usage() {
+  local code="${1:-0}"
+  cat <<'EOF'
+Usage: autumn <command> [args]
+
+Customer commands:
+  customers [--limit N] [--offset N] [--since <marker>]
+                                         List customers (--since: 30m|6h|7d|2w, ISO date, or epoch)
+  customer <id>                          Get customer details
+  customer:create <id> [--name N] [--email E]  Create customer
+  customer:delete <id>                   Delete customer
+  customer:reset-free <id>               Reset customer to atlas-free with no history
+  customer:portal <id>                   Get billing portal URL
+  customer:balances <id> <feature> <balance>  Set feature balance
+  find <query> [--json]                  Search customers by email/name/id/stripe_id/fingerprint
+  overview <customer>                    10-line billing picture (accepts email or id)
+  debug <customer> <feature>             Compose feature access diagnostic (accepts email or id)
+
+Product commands:
+  products [--customer <id>]             List products
+  product <id>                           Get product details
+
+Feature commands:
+  features                               List features
+  feature <id>                           Get feature details
+
+Reward / coupon commands:
+  rewards [--json]                       List rewards/coupons (reads Autumn DB over SSH)
+  reward <id>                            Get one reward/coupon (GET /rewards/:id)
+  reward:create --type free-trial --months N [--id ID] [--name NAME]
+                [--percent P] [--promo-code CODE] [--price-id PR ...] [--apply-all] [--rollover]
+                                         Create a reward. free-trial = 100% off for N months.
+                                         Also: --type percentage_discount|fixed_discount --percent P
+  reward:attach <customer> <reward>      Attach a coupon to a customer (accepts email or id)
+  reward:redeem <customer> <code>        Redeem a referral/promo code for a customer
+                                         attach/redeem print the raw Autumn API error VERBATIM on failure
+
+Billing operations:
+  check <customer> <feature>              Check feature access
+  track <customer> <feature> <value>      Track usage
+  attach <customer> <product>             Attach product
+  cancel <customer> <product> [--now]     Cancel subscription
+
+Usage & events:
+  events <customer> <feature> [--limit N] List usage events
+  query <customer> <feature> [--range R]  Usage analytics
+
+Utility:
+  whoami                                  Print env, key prefix, /features health check
+  anon:clean [--dry-run] [--yes]          Delete anonymous customers (metadata.signup_source=anonymous)
+  anon:clean-ghosts --pg-env <env> [--dry-run] [--yes] [--include-orphans]
+                                          Delete ghost customers (Autumn customer whose ba_user.is_anonymous=true).
+                                          --include-orphans also deletes completely-empty customers with no ba_user row.
+  push [--url URL] [--dry-run]            Push config (delegates to pharmia)
+
+Examples:
+  autumn whoami
+  autumn find will@orangepaysagement.com
+  autumn overview abc123
+  autumn debug abc123 atlas_input_tokens
+  autumn customers --since 7d
+  autumn rewards
+  autumn reward 3_months_students
+  autumn reward:create --type free-trial --months 3 --id free_trial_3mo
+  autumn reward:attach will@orangepaysagement.com 3_months_students
+  autumn anon:clean --dry-run
+  autumn anon:clean-ghosts --pg-env canary --dry-run
+EOF
+  exit "$code"
+}
+
+case "${1:-}" in
+  -h|--help|help)
+    usage 0
+    ;;
+esac
+
+[[ $# -lt 1 ]] && usage 1
+
+# api <METHOD> <path> [curl args...]
+# Emits body on stdout. Sets $_HTTP_STATUS global for caller inspection.
+# On 4xx/5xx: prints a one-line diagnostic to stderr and returns non-zero.
+_HTTP_STATUS=""
+api() {
+  local method="$1" path="$2"
+  shift 2
+  local raw status body
+  raw=$(curl -sS -w '\n%{http_code}' -X "$method" "$BASE/v1$path" -H "$AUTH" -H "$CT" "$@") || {
+    echo "curl failed for $method $path" >&2
+    return 1
+  }
+  status="${raw##*$'\n'}"
+  body="${raw%$'\n'*}"
+  _HTTP_STATUS="$status"
+  printf '%s' "$body"
+  if (( status >= 400 )); then
+    local hint=""
+    case "$status" in
+      401) hint=" — check AUTUMN_SECRET_KEY" ;;
+      403) hint=" — forbidden (wrong env or scope?)" ;;
+      404) hint=" — not found" ;;
+      409) hint=" — conflict (already exists?)" ;;
+      422) hint=" — unprocessable (bad payload)" ;;
+      429) hint=" — rate limited" ;;
+      5*)  hint=" — server error" ;;
+    esac
+    local msg
+    msg=$(printf '%s' "$body" | jq -r '.message // .error // .code // empty' 2>/dev/null || true)
+    if [[ -n "$msg" ]]; then
+      echo "HTTP $status$hint: $msg" >&2
+    else
+      echo "HTTP $status$hint" >&2
+    fi
+    return 1
+  fi
+  return 0
+}
+
+api_get()  { api GET  "$1"; }
+api_post() { local body="${2:-\{\}}"; api POST "$1" -d "$body"; }
+api_del()  { api DELETE "$1"; }
+
+# api_verbatim <METHOD> <path> [body]
+# Like api(), but on ANY non-2xx it prints the Autumn API error body VERBATIM
+# (status line + full JSON, pretty-printed if possible) to stderr and returns
+# non-zero — no summarizing, no field-cherry-picking. This is the whole point of
+# the reward:attach / reward:redeem commands: the answer to "why won't this
+# coupon attach" IS the raw Autumn error, so we never swallow or paraphrase it.
+# On success, emits the response body on stdout.
+api_verbatim() {
+  local method="$1" path="$2" body="${3:-}"
+  local raw status resp
+  if [[ -n "$body" ]]; then
+    raw=$(curl -sS -w '\n%{http_code}' -X "$method" "$BASE/v1$path" -H "$AUTH" -H "$CT" -d "$body") || {
+      echo "curl failed for $method $path" >&2
+      return 1
+    }
+  else
+    raw=$(curl -sS -w '\n%{http_code}' -X "$method" "$BASE/v1$path" -H "$AUTH" -H "$CT") || {
+      echo "curl failed for $method $path" >&2
+      return 1
+    }
+  fi
+  status="${raw##*$'\n'}"
+  resp="${raw%$'\n'*}"
+  _HTTP_STATUS="$status"
+  if (( status >= 200 && status < 300 )); then
+    printf '%s' "$resp"
+    return 0
+  fi
+  # Non-2xx: surface the Autumn error body verbatim, unabridged.
+  echo "Autumn API error — HTTP $status (verbatim response body):" >&2
+  if printf '%s' "$resp" | jq -e . >/dev/null 2>&1; then
+    printf '%s' "$resp" | jq '.' >&2
+  else
+    printf '%s\n' "$resp" >&2
+  fi
+  return 1
+}
+
+# since_to_epoch_ms <marker>
+# Accepts a relative duration (e.g. 30m, 6h, 7d, 2w) OR an absolute timestamp
+# (ISO 8601 / any GNU `date -d`-parseable string / epoch seconds / epoch ms).
+# Emits the resulting cutoff as epoch MILLISECONDS on stdout. Exits non-zero on
+# an unparseable marker.
+since_to_epoch_ms() {
+  local m="$1"
+  # Pure-digit input: epoch. >=13 digits => already ms, else seconds.
+  if [[ "$m" =~ ^[0-9]+$ ]]; then
+    if (( ${#m} >= 13 )); then echo "$m"; else echo "$((m * 1000))"; fi
+    return 0
+  fi
+  # Relative duration: <int><unit> where unit is m|h|d|w (minutes/hours/days/weeks).
+  if [[ "$m" =~ ^([0-9]+)([mhdw])$ ]]; then
+    local n="${BASH_REMATCH[1]}" unit="${BASH_REMATCH[2]}" secs
+    case "$unit" in
+      m) secs=$((n * 60)) ;;
+      h) secs=$((n * 3600)) ;;
+      d) secs=$((n * 86400)) ;;
+      w) secs=$((n * 604800)) ;;
+    esac
+    echo "$(( ($(date +%s) - secs) * 1000 ))"
+    return 0
+  fi
+  # Absolute: delegate to GNU date.
+  local epoch
+  if epoch=$(date -d "$m" +%s 2>/dev/null); then
+    echo "$((epoch * 1000))"
+    return 0
+  fi
+  echo "unparseable --since marker: '$m' (use 30m|6h|7d|2w, an ISO date, or epoch)" >&2
+  return 1
+}
+
+print_api_message() {
+  local response="$1"
+  echo "$response" | jq -r '.message // .error // .code // "Unexpected Autumn API response"' 2>/dev/null
+}
+
+# Resolve a customer argument that may be an email OR an id.
+# Emits the resolved customer id on stdout. Exits non-zero if ambiguous / not found.
+resolve_customer() {
+  local q="$1"
+  # Heuristic: treat as email if it contains "@"
+  if [[ "$q" != *"@"* ]]; then
+    echo "$q"
+    return 0
+  fi
+  local matches all q_lc
+  q_lc="${q,,}"
+  all=$(find_customers_json "$q")
+  matches=$(printf '%s' "$all" | jq -c --arg q "$q_lc" '[.[] | select((.email // "" | ascii_downcase) == $q)]')
+  local count
+  count=$(echo "$matches" | jq 'length')
+  if [[ "$count" == "0" ]]; then
+    echo "no customer found for email: $q" >&2
+    return 1
+  fi
+  if [[ "$count" != "1" ]]; then
+    echo "ambiguous: $count customers match email '$q' — pass an id instead" >&2
+    echo "$matches" | jq -r '.[] | "  \(.id)\t\(.email)"' >&2
+    return 1
+  fi
+  echo "$matches" | jq -r '.[0].id'
+}
+
+# Client-side search across up to 500 customers.
+# Emits a JSON array of matching customer objects.
+find_customers_json() {
+  local q="$1"
+  local q_lc="${q,,}"
+  local offset=0 page=100
+  local tmp
+  tmp=$(mktemp)
+  trap 'rm -f "$tmp"' RETURN
+  echo "[]" > "$tmp"
+  # Fetch up to 500 customers, appending each page to $tmp via file-based jq merge
+  while (( offset < 500 )); do
+    local resp
+    resp=$(api_get "/customers?limit=$page&offset=$offset") || return 1
+    local count
+    count=$(echo "$resp" | jq '.list | length')
+    local merged
+    merged=$(echo "$resp" | jq -c --slurpfile a "$tmp" '$a[0] + .list')
+    printf '%s' "$merged" > "$tmp"
+    (( count < page )) && break
+    offset=$((offset + page))
+  done
+  jq -c --arg q "$q_lc" '
+    [ .[] | select(
+        ((.email // "" | ascii_downcase) | contains($q)) or
+        ((.name  // "" | ascii_downcase) | contains($q)) or
+        ((.id    // "" | ascii_downcase) | contains($q)) or
+        ((.stripe_id    // "" | ascii_downcase) | contains($q)) or
+        ((.fingerprint  // "" | ascii_downcase) | contains($q))
+    ) ]
+  ' "$tmp"
+}
+
+case "$1" in
+
+  whoami)
+    env_label=$(_env_label)
+    key="${AUTUMN_SECRET_KEY:-}"
+    prefix="${key:0:8}"
+    echo "env:    $env_label"
+    echo "url:    $BASE"
+    echo "key:    ${prefix}..."
+    if feats=$(api_get "/features" 2>/dev/null); then
+      fcount=$(echo "$feats" | jq '.list | length' 2>/dev/null || echo "?")
+      echo "health: OK ($fcount features)"
+    else
+      echo "health: FAIL (could not reach /features)"
+      exit 1
+    fi
+    ;;
+
+  find)
+    shift
+    [[ $# -lt 1 ]] && { echo "Usage: autumn find <query> [--json]"; exit 1; }
+    q="$1"; shift
+    as_json=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json) as_json=1; shift ;;
+        *) echo "Unknown flag: $1"; exit 1 ;;
+      esac
+    done
+    matches=$(find_customers_json "$q")
+    count=$(echo "$matches" | jq 'length')
+    if (( as_json )); then
+      echo "$matches" | jq '.'
+    else
+      if (( count == 0 )); then
+        echo "no matches" >&2
+        printf "id\temail\tname\tstripe_id\tcreated_at\n"
+        exit 0
+      fi
+      printf "id\temail\tname\tstripe_id\tcreated_at\n"
+      echo "$matches" | jq -r '.[] | [.id, (.email // "-"), (.name // "-"), (.stripe_id // "-"), (.created_at // "-")] | @tsv'
+    fi
+    ;;
+
+  overview)
+    [[ $# -lt 2 ]] && { echo "Usage: autumn overview <customer>"; exit 1; }
+    cid=$(resolve_customer "$2")
+    resp=$(api_get "/customers/$cid")
+    echo "$resp" | jq -r '
+      "Customer: \(.id)  |  \(.email // "-")  |  \(.name // "-")",
+      "Stripe:   \(.stripe_id // "-")",
+      "",
+      "Products:",
+      ( .products // [] | if length == 0 then "  (none)" else
+        ( .[] | "  - \(.id)  status=\(.status // "-")  period_end=\(.current_period_end // .canceled_at // "-")" )
+      end ),
+      "",
+      "Features:",
+      ( .features // {} | to_entries | if length == 0 then "  (none)" else
+        ( .[] | "  - \(.key)  balance=\(.value.balance // "-")  included=\(.value.included_usage // "-")  next_reset=\(.value.next_reset_at // "-")" )
+      end )
+    '
+    ;;
+
+  debug)
+    [[ $# -lt 3 ]] && { echo "Usage: autumn debug <customer> <feature>"; exit 1; }
+    cid=$(resolve_customer "$2")
+    fid="$3"
+    cust=$(api_get "/customers/$cid")
+    check_body=$(api_post "/check" "{\"customer_id\":\"$cid\",\"feature_id\":\"$fid\"}" 2>/dev/null || echo '{}')
+
+    # Compose verdict
+    verdict=$(jq -rn \
+      --argjson cust "$cust" \
+      --argjson check "$check_body" \
+      --arg fid "$fid" '
+        ($cust.products // []) as $products
+        | ($cust.features // {} | .[$fid]) as $feat
+        | if ($products | length) == 0 then "no_product_attached"
+          elif ($feat.unlimited // false) then "unlimited"
+          elif ($check.allowed // false) then "allowed"
+          elif (($feat.balance // 0) <= 0) then
+            (if ($feat.next_reset_at // null) != null then "reset_pending"
+             else "balance_exhausted" end)
+          else "allowed"
+          end
+      ')
+
+    echo "=== Customer ==="
+    echo "$cust" | jq -r '"id: \(.id)\nemail: \(.email // "-")\nname: \(.name // "-")\nstripe_id: \(.stripe_id // "-")"'
+    echo ""
+    echo "=== Products ==="
+    echo "$cust" | jq -r '(.products // []) | if length == 0 then "(none)" else (.[] | "- \(.id)  status=\(.status // "-")  period_end=\(.current_period_end // .canceled_at // "-")") end'
+    echo ""
+    echo "=== Feature: $fid ==="
+    echo "$cust" | jq -r --arg f "$fid" '
+      (.features // {} | .[$f]) as $x
+      | if $x == null then "(not found on customer)"
+        else "balance=\($x.balance // "-")\nincluded_usage=\($x.included_usage // "-")\nnext_reset_at=\($x.next_reset_at // "-")\nunlimited=\($x.unlimited // false)"
+        end
+    '
+    echo ""
+    echo "=== /check response ==="
+    echo "$check_body" | jq '{allowed, balance, required_balance, code, message}' 2>/dev/null || echo "$check_body"
+    echo ""
+    echo "=== Verdict ==="
+    echo "$verdict"
+    ;;
+
+  customers)
+    shift
+    limit=50; offset=0; since=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --limit)  limit="$2";  shift 2 ;;
+        --offset) offset="$2"; shift 2 ;;
+        --since)  since="$2";  shift 2 ;;
+        *) echo "Unknown flag: $1"; exit 1 ;;
+      esac
+    done
+    [[ "$limit" =~ ^[0-9]+$ ]] || { echo "--limit must be a positive integer" >&2; exit 1; }
+    [[ "$offset" =~ ^[0-9]+$ ]] || { echo "--offset must be a non-negative integer" >&2; exit 1; }
+    (( limit > 0 )) || { echo "--limit must be greater than 0" >&2; exit 1; }
+
+    # --since: Autumn's list endpoint has no created-since param, so filter
+    # client-side by created_at (epoch ms). When set, we scan pages until either
+    # --limit matches are collected OR we reach customers older than the cutoff
+    # (the list is created-desc, so once we cross the cutoff we can stop).
+    since_ms=""
+    if [[ -n "$since" ]]; then
+      since_ms=$(since_to_epoch_ms "$since") || exit 1
+      echo "[since: $(date -u -d "@$((since_ms/1000))" '+%Y-%m-%d %H:%M:%SZ') ($since)]" >&2
+    fi
+
+    requested_limit="$limit"
+    api_limit="$limit"
+    (( api_limit < 10 )) && api_limit=10
+    # --since needs full pages to filter; small --limit would starve the scan.
+    [[ -n "$since_ms" ]] && (( api_limit < 50 )) && api_limit=50
+    remaining="$requested_limit"
+
+    while (( remaining > 0 )); do
+      resp=$(api_get "/customers?limit=$api_limit&offset=$offset")
+
+      if ! echo "$resp" | jq -e '.list | type == "array"' >/dev/null 2>&1; then
+        print_api_message "$resp" >&2
+        exit 1
+      fi
+
+      count=$(echo "$resp" | jq '.list | length')
+      (( count == 0 )) && break
+
+      if [[ -n "$since_ms" ]]; then
+        # Keep only rows at/after the cutoff, then take up to `remaining`.
+        page=$(echo "$resp" | jq -c --argjson since "$since_ms" \
+          '[.list[] | select((.created_at // 0) >= $since)]')
+        echo "$page" | jq -r --argjson limit "$remaining" \
+          '.[:$limit][] | "\(.id)\t\(.name // "-")\t\(.email // "-")\t\((.created_at // 0) | (./1000 | strftime("%Y-%m-%dT%H:%M:%SZ")))\t\(.products | length) products"'
+        emitted=$(echo "$page" | jq --argjson limit "$remaining" '.[:$limit] | length')
+        remaining=$((remaining - emitted))
+        # Once any row in the page is older than the cutoff, every later page is
+        # older too (created-desc) — stop scanning.
+        oldest_below=$(echo "$resp" | jq --argjson since "$since_ms" \
+          'any(.list[]; (.created_at // 0) < $since)')
+        (( remaining == 0 )) && break
+        [[ "$oldest_below" == "true" ]] && break
+      else
+        echo "$resp" | jq -r --argjson limit "$remaining" '.list[:$limit][] | "\(.id)\t\(.name // "-")\t\(.email // "-")\t\(.products | length) products"'
+        emitted=$(echo "$resp" | jq --argjson limit "$remaining" '.list[:$limit] | length')
+        remaining=$((remaining - emitted))
+        (( remaining == 0 )) && break
+      fi
+      (( count < api_limit )) && break
+      offset=$((offset + count))
+    done
+    ;;
+
+  customer)
+    [[ $# -lt 2 ]] && { echo "Usage: autumn customer <id>"; exit 1; }
+    api_get "/customers/$2" | jq '.'
+    ;;
+
+  customer:create)
+    [[ $# -lt 2 ]] && { echo "Usage: autumn customer:create <id> [--name N] [--email E]"; exit 1; }
+    id="$2"; shift 2
+    name=""; email=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --name)  name="$2";  shift 2 ;;
+        --email) email="$2"; shift 2 ;;
+        *) echo "Unknown flag: $1"; exit 1 ;;
+      esac
+    done
+    body="{\"id\":\"$id\""
+    [[ -n "$name" ]]  && body+=",\"name\":\"$name\""
+    [[ -n "$email" ]] && body+=",\"email\":\"$email\""
+    body+="}"
+    api_post "/customers" "$body" | jq '.'
+    ;;
+
+  customer:delete)
+    [[ $# -lt 2 ]] && { echo "Usage: autumn customer:delete <id>"; exit 1; }
+    api_del "/customers/$2" | jq '.'
+    ;;
+
+  customer:reset-free)
+    [[ $# -lt 2 ]] && { echo "Usage: autumn customer:reset-free <id>"; exit 1; }
+    id="$2"
+
+    existing=$(api_get "/customers/$id?expand=invoices")
+    email=$(echo "$existing" | jq -r '.email')
+    name=$(echo "$existing" | jq -r '.name // empty')
+    metadata=$(echo "$existing" | jq -c '.metadata // {}')
+
+    create_body=$(jq -cn \
+      --arg id "$id" \
+      --arg email "$email" \
+      --arg name "$name" \
+      --argjson metadata "$metadata" \
+      '{
+        id: $id,
+        email: $email,
+        metadata: $metadata
+      } + (if $name == "" then {} else {name: $name} end)')
+
+    api_del "/customers/$id" > /dev/null
+    api_post "/customers" "$create_body" > /dev/null
+    api_post "/attach" "{\"customer_id\":\"$id\",\"product_id\":\"atlas-free\"}" > /dev/null
+
+    api_get "/customers/$id?expand=invoices" | jq '{
+      id,
+      email,
+      name,
+      products: [.products[]? | {id, status}],
+      invoices: (.invoices | length),
+      trials_used: (.trials_used // [])
+    }'
+    ;;
+
+  customer:portal)
+    [[ $# -lt 2 ]] && { echo "Usage: autumn customer:portal <id>"; exit 1; }
+    api_post "/customers/$2/billing_portal" '{}' | jq -r '.url // .'
+    ;;
+
+  customer:balances)
+    [[ $# -lt 4 ]] && { echo "Usage: autumn customer:balances <id> <feature> <balance>"; exit 1; }
+    api_post "/customers/$2/balances" "{\"feature_id\":\"$3\",\"balance\":$4}" | jq '.'
+    ;;
+
+  products)
+    shift
+    params=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --customer) params="?customer_id=$2"; shift 2 ;;
+        *) echo "Unknown flag: $1"; exit 1 ;;
+      esac
+    done
+    api_get "/products$params" | jq '.'
+    ;;
+
+  product)
+    [[ $# -lt 2 ]] && { echo "Usage: autumn product <id>"; exit 1; }
+    api_get "/products/$2" | jq '.'
+    ;;
+
+  features)
+    api_get "/features" | jq '.list[] | {id, name, type}'
+    ;;
+
+  feature)
+    [[ $# -lt 2 ]] && { echo "Usage: autumn feature <id>"; exit 1; }
+    api_get "/features/$2" | jq '.'
+    ;;
+
+  rewards)
+    # List rewards/coupons. The secret-key API exposes only GET /rewards/:id —
+    # the org-wide list lives behind the dashboard's session auth (internal
+    # /products/rewards), unreachable with an am_sk_ key. So we read the Autumn
+    # Postgres directly over SSH (read-only), mirroring anon:clean-ghosts'
+    # DB-coupling precedent. Host/container overridable in ~/.config/autumn/config
+    # via AUTUMN_PG_SSH / AUTUMN_PG_CONTAINER.
+    shift
+    as_json=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json) as_json=1; shift ;;
+        *) echo "Unknown flag: $1"; exit 1 ;;
+      esac
+    done
+    pg_ssh="${AUTUMN_PG_SSH:-devops}"
+    pg_container="${AUTUMN_PG_CONTAINER:-devops-autumn-oltpgr-postgres-1}"
+    # The Autumn instance is shared sandbox+prod; rows are tagged env=live|sandbox.
+    db_env=$([[ "$(_env_label)" == "prod" ]] && echo "live" || echo "sandbox")
+    command -v ssh >/dev/null 2>&1 || { echo "ssh not found — rewards list needs DB access" >&2; exit 1; }
+    rows=$(ssh "$pg_ssh" "sudo docker exec $pg_container psql -U autumn -d autumn -tAc \$'select coalesce(json_agg(row_to_json(r)), \\'[]\\'::json)::text from rewards r where env = \\'$db_env\\''" 2>/dev/null) || {
+      echo "Failed to read rewards from Autumn DB ($pg_ssh:$pg_container). Set AUTUMN_PG_SSH/AUTUMN_PG_CONTAINER if the host or container differ." >&2
+      exit 1
+    }
+    if ! printf '%s' "$rows" | jq -e . >/dev/null 2>&1; then
+      echo "Unexpected DB output:" >&2; printf '%s\n' "$rows" >&2; exit 1
+    fi
+    if (( as_json )); then
+      printf '%s' "$rows" | jq '.'
+    else
+      printf "id\tname\ttype\tduration\tpromo_codes\tcreated_at\n"
+      printf '%s' "$rows" | jq -r '
+        sort_by(-.created_at)[] |
+        ( .discount_config // .free_product_config // {} ) as $cfg |
+        [ .id,
+          (.name // "-"),
+          (.type // "-"),
+          ( if $cfg.duration_type then
+              "\($cfg.duration_value // "")\($cfg.duration_type | if . == "months" then "mo" elif . == "one_off" then " one-off" else "" end)"
+            else "-" end ),
+          ( [.promo_codes[]?.code] | if length == 0 then "-" else join(",") end ),
+          ((.created_at // 0) | (./1000 | strftime("%Y-%m-%dT%H:%M:%SZ")))
+        ] | @tsv'
+    fi
+    ;;
+
+  reward)
+    [[ $# -lt 2 ]] && { echo "Usage: autumn reward <id>"; exit 1; }
+    resp=$(api_get "/rewards/$2")
+    # GET /rewards/:id returns null + HTTP 200 when the reward doesn't exist.
+    if [[ "$resp" == "null" ]]; then
+      echo "reward not found: $2" >&2
+      exit 1
+    fi
+    echo "$resp" | jq '.'
+    ;;
+
+  reward:create)
+    # Create a reward/coupon. --type free-trial maps to Autumn's
+    # percentage_discount at 100% for N months (the "3 Months Students"
+    # production reward is exactly this shape). Also supports raw discount types.
+    shift
+    rtype=""; months=""; rid=""; name=""; percent=""
+    promo=""; apply_all=0; price_ids=""; rollover=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --type)       rtype="$2";     shift 2 ;;
+        --months)     months="$2";    shift 2 ;;
+        --id)         rid="$2";       shift 2 ;;
+        --name)       name="$2";      shift 2 ;;
+        --percent)    percent="$2";   shift 2 ;;
+        --promo-code) promo="$2";     shift 2 ;;
+        --price-id)   price_ids="${price_ids:+$price_ids,}$2"; shift 2 ;;
+        --apply-all)  apply_all=1;    shift ;;
+        --rollover)   rollover="true"; shift ;;
+        *) echo "Unknown flag: $1"; exit 1 ;;
+      esac
+    done
+    [[ -z "$rtype" ]] && { echo "Usage: autumn reward:create --type free-trial --months N [--id ID] [--name NAME] [--percent P] [--promo-code CODE] [--price-id PR ...] [--apply-all] [--rollover]" >&2; exit 1; }
+
+    case "$rtype" in
+      free-trial|free_trial)
+        [[ -z "$months" ]] && { echo "--months N is required for --type free-trial" >&2; exit 1; }
+        [[ "$months" =~ ^[0-9]+$ ]] || { echo "--months must be a positive integer" >&2; exit 1; }
+        api_type="percentage_discount"; percent="${percent:-100}"
+        duration_type="months"; duration_value="$months"
+        ;;
+      percentage_discount|percent)
+        api_type="percentage_discount"
+        [[ -z "$percent" ]] && { echo "--percent P is required for --type percentage_discount" >&2; exit 1; }
+        if [[ -n "$months" ]]; then duration_type="months"; duration_value="$months"
+        else duration_type="forever"; duration_value=0; fi
+        ;;
+      fixed_discount|fixed)
+        api_type="fixed_discount"
+        [[ -z "$percent" ]] && { echo "--percent (amount off) is required for --type fixed_discount" >&2; exit 1; }
+        if [[ -n "$months" ]]; then duration_type="months"; duration_value="$months"
+        else duration_type="forever"; duration_value=0; fi
+        ;;
+      *) echo "Unsupported --type: $rtype (free-trial|percentage_discount|fixed_discount)" >&2; exit 1 ;;
+    esac
+
+    # Default id/name from a slug if not supplied.
+    if [[ -z "$rid" ]]; then
+      case "$rtype" in
+        free-trial|free_trial) rid="free_trial_${months}mo" ;;
+        *) rid="${api_type}_$(date +%s)" ;;
+      esac
+    fi
+    [[ -z "$name" ]] && name="$rid"
+
+    [[ "$percent" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "--percent must be numeric" >&2; exit 1; }
+
+    # Build promo_codes + discount_config with jq (safe escaping).
+    body=$(jq -cn \
+      --arg id "$rid" --arg name "$name" --arg type "$api_type" \
+      --argjson value "$percent" --arg dtype "$duration_type" --argjson dval "$duration_value" \
+      --arg promo "$promo" --argjson apply_all "$apply_all" \
+      --arg price_ids "$price_ids" --arg rollover "$rollover" '
+      {
+        id: $id, name: $name, type: $type,
+        promo_codes: (if $promo == "" then [] else [{code: $promo}] end),
+        discount_config: ({
+          discount_value: $value,
+          duration_type: $dtype,
+          duration_value: $dval,
+          apply_to_all: ($apply_all == 1)
+        }
+        + (if $price_ids == "" then {} else {price_ids: ($price_ids | split(","))} end)
+        + (if $rollover == "true" then {should_rollover: true} else {} end))
+      }')
+    api_verbatim POST "/rewards" "$body" | jq '.'
+    ;;
+
+  reward:attach)
+    # Attach an existing coupon to a customer. On ANY non-2xx, the raw Autumn
+    # error body is printed verbatim — that body IS the answer to "why won't
+    # this coupon attach" (wrong env, missing Stripe customer, bad price, etc.).
+    [[ $# -lt 3 ]] && { echo "Usage: autumn reward:attach <customer> <reward>" >&2; exit 1; }
+    cid=$(resolve_customer "$2") || exit 1
+    rid="$3"
+    api_verbatim POST "/customers/$cid/coupons/$rid" | jq '.'
+    ;;
+
+  reward:redeem)
+    # Redeem a referral/promo code for a customer (POST /referrals/redeem).
+    # Redemption is keyed by CODE, not reward id — pass the code the customer was
+    # given. On non-2xx the raw Autumn error body is surfaced verbatim.
+    [[ $# -lt 3 ]] && { echo "Usage: autumn reward:redeem <customer> <code>" >&2; exit 1; }
+    cid=$(resolve_customer "$2") || exit 1
+    code="$3"
+    body=$(jq -cn --arg c "$code" --arg cid "$cid" '{code: $c, customer_id: $cid}')
+    api_verbatim POST "/referrals/redeem" "$body" | jq '.'
+    ;;
+
+  check)
+    [[ $# -lt 3 ]] && { echo "Usage: autumn check <customer> <feature>"; exit 1; }
+    api_post "/check" "{\"customer_id\":\"$2\",\"feature_id\":\"$3\"}" | jq '.'
+    ;;
+
+  track)
+    [[ $# -lt 4 ]] && { echo "Usage: autumn track <customer> <feature> <value>"; exit 1; }
+    api_post "/track" "{\"customer_id\":\"$2\",\"feature_id\":\"$3\",\"value\":$4}" | jq '.'
+    ;;
+
+  attach)
+    [[ $# -lt 3 ]] && { echo "Usage: autumn attach <customer> <product>"; exit 1; }
+    api_post "/attach" "{\"customer_id\":\"$2\",\"product_id\":\"$3\"}" | jq '.'
+    ;;
+
+  cancel)
+    [[ $# -lt 3 ]] && { echo "Usage: autumn cancel <customer> <product> [--now]"; exit 1; }
+    cid="$2"; pid="$3"; shift 3
+    imm="false"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --now) imm="true"; shift ;;
+        *) echo "Unknown flag: $1"; exit 1 ;;
+      esac
+    done
+    api_post "/cancel" "{\"customer_id\":\"$cid\",\"product_id\":\"$pid\",\"cancel_immediately\":$imm}" | jq '.'
+    ;;
+
+  events)
+    [[ $# -lt 3 ]] && { echo "Usage: autumn events <customer> <feature> [--limit N]"; exit 1; }
+    cid="$2"; fid="$3"; shift 3
+    limit=20
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --limit) limit="$2"; shift 2 ;;
+        *) echo "Unknown flag: $1"; exit 1 ;;
+      esac
+    done
+    api_post "/events/list" "{\"customer_id\":\"$cid\",\"feature_id\":\"$fid\",\"limit\":$limit}" | jq '.'
+    ;;
+
+  query)
+    [[ $# -lt 3 ]] && { echo "Usage: autumn query <customer> <feature> [--range R]"; exit 1; }
+    cid="$2"; fid="$3"; shift 3
+    range="week"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --range) range="$2"; shift 2 ;;
+        *) echo "Unknown flag: $1"; exit 1 ;;
+      esac
+    done
+    api_post "/query" "{\"customer_id\":\"$cid\",\"feature_id\":\"$fid\",\"range\":\"$range\"}" | jq '.'
+    ;;
+
+  anon:clean)
+    shift
+    dry_run=0; assume_yes=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --dry-run) dry_run=1; shift ;;
+        --yes|-y)  assume_yes=1; shift ;;
+        *) echo "Unknown flag: $1"; exit 1 ;;
+      esac
+    done
+
+    echo "Scanning for anonymous customers..." >&2
+    offset=0
+    tmp=$(mktemp)
+    trap 'rm -f "$tmp"' EXIT
+    echo "[]" > "$tmp"
+    while true; do
+      resp=$(api_get "/customers?limit=50&offset=$offset")
+      merged=$(echo "$resp" | jq -c --slurpfile a "$tmp" '
+        $a[0] + [ .list[] | select(
+            ((.metadata // {}).signup_source == "anonymous")
+            or ((.email // "") | test("anon"; "i"))
+            or (.name == "Anonymous")
+        ) | {id, email, name, signup_source: ((.metadata // {}).signup_source // null)} ]
+      ')
+      printf '%s' "$merged" > "$tmp"
+      count=$(echo "$resp" | jq '.list | length')
+      [[ "$count" -lt 50 ]] && break
+      offset=$((offset + 50))
+    done
+
+    candidates=$(cat "$tmp")
+    total=$(echo "$candidates" | jq 'length')
+    if (( total == 0 )); then
+      echo "No anonymous customers found." >&2
+      exit 0
+    fi
+
+    echo "Found $total anonymous customer(s):" >&2
+    echo "$candidates" | jq -r '.[] | "  \(.id)\t\(.email // "-")\t\(.signup_source // "-")"'
+
+    if (( dry_run )); then
+      echo "--dry-run set, no customers deleted." >&2
+      exit 0
+    fi
+
+    if (( ! assume_yes )); then
+      if [[ -t 0 ]]; then
+        read -rp "Delete all $total customers? [y/N] " reply
+        [[ "$reply" =~ ^[Yy]$ ]] || { echo "Aborted." >&2; exit 1; }
+      else
+        echo "Refusing to delete without --yes in non-interactive mode." >&2
+        exit 1
+      fi
+    fi
+
+    deleted=0
+    while IFS= read -r id; do
+      [[ -z "$id" ]] && continue
+      if api_del "/customers/$id" > /dev/null 2>&1; then
+        echo "  Deleted: $id"
+        deleted=$((deleted + 1))
+      else
+        echo "  Failed:  $id" >&2
+      fi
+    done < <(echo "$candidates" | jq -r '.[].id')
+    echo "Done. Deleted $deleted/$total anonymous customers." >&2
+    ;;
+
+  anon:clean-ghosts)
+    # Delete "ghost" Autumn customers: customers that were auto-provisioned
+    # for anonymous Pharmia users. These have no products and no metadata, so
+    # anon:clean cannot see them — we cross-reference the Pharmia ba_user table
+    # (is_anonymous = true) via the `pg` CLI to identify them authoritatively.
+    shift
+    dry_run=0; assume_yes=0; pg_env=""; include_orphans=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --dry-run) dry_run=1; shift ;;
+        --yes|-y)  assume_yes=1; shift ;;
+        --pg-env)  pg_env="${2:-}"; shift 2 ;;
+        --include-orphans) include_orphans=1; shift ;;
+        *) echo "Unknown flag: $1"; exit 1 ;;
+      esac
+    done
+    [[ -z "$pg_env" ]] && {
+      echo "Usage: autumn anon:clean-ghosts --pg-env <dev|qa|canary> [--dry-run] [--yes] [--include-orphans]" >&2
+      exit 1
+    }
+
+    # Env-match guard: canary is prod (live key); dev/qa use the sandbox key.
+    # Refuse to run if the configured key targets a different Autumn env than
+    # the Pharmia DB being read — prevents deleting prod customers off a dev list.
+    env_label=$(_env_label)
+    case "$pg_env" in
+      canary) want="prod" ;;
+      dev|qa) want="sandbox" ;;
+      *) echo "Unknown --pg-env: $pg_env (expected dev|qa|canary)" >&2; exit 1 ;;
+    esac
+    if [[ "$env_label" != "$want" ]]; then
+      echo "Env mismatch: --pg-env $pg_env expects Autumn '$want' but AUTUMN_SECRET_KEY is '$env_label'." >&2
+      echo "Set AUTUMN_SECRET_KEY to the matching key before running." >&2
+      exit 1
+    fi
+    command -v pg >/dev/null 2>&1 || { echo "pg CLI not found in PATH" >&2; exit 1; }
+
+    echo "Fetching anonymous user IDs from '$pg_env' ba_user..." >&2
+    # psql plain output: strip leading pad, drop the `id` header / separator /
+    # `(N rows)` footer by keeping only id-shaped tokens (>=16 url-safe chars).
+    anon_ids=$(pg "$pg_env" app "SELECT id FROM ba_user WHERE is_anonymous = true" 2>/dev/null \
+      | sed -n '/^ [A-Za-z0-9]/p' | tr -d ' ' \
+      | grep -E '^[A-Za-z0-9_-]{16,}$' | sort -u || true)
+    anon_count=$(printf '%s\n' "$anon_ids" | grep -c . || true)
+    if (( anon_count == 0 )); then
+      echo "No anonymous users found in '$pg_env'." >&2
+      exit 0
+    fi
+    echo "  $anon_count anonymous users in DB." >&2
+
+    echo "Scanning Autumn customers ($env_label)..." >&2
+    offset=0; live_ids=""
+    while true; do
+      resp=$(api_get "/customers?limit=50&offset=$offset") || exit 1
+      live_ids+=$(echo "$resp" | jq -r '.list[].id')$'\n'
+      count=$(echo "$resp" | jq '.list | length')
+      [[ "$count" -lt 50 ]] && break
+      offset=$((offset + 50))
+    done
+
+    live_sorted=$(printf '%s' "$live_ids" | sed '/^$/d' | sort -u)
+
+    # anon-matched ghosts: Autumn customer whose id is an anonymous ba_user.
+    anon_ghosts=$(comm -12 <(printf '%s\n' "$live_sorted") <(printf '%s\n' "$anon_ids") || true)
+    anon_ghost_count=$(printf '%s\n' "$anon_ghosts" | grep -c . || true)
+
+    # orphan ghosts (--include-orphans): Autumn customers with NO ba_user row at
+    # all — the anonymous user was already purged by the 30-day cleanup, leaving
+    # the Autumn record behind. B2B tenant customers also lack a ba_user row, so
+    # orphans are gated below on being COMPLETELY empty before deletion.
+    orphan_ghosts=""
+    if (( include_orphans )); then
+      echo "Fetching all user IDs from '$pg_env' ba_user (orphan detection)..." >&2
+      all_ids=$(pg "$pg_env" app "SELECT id FROM ba_user" 2>/dev/null \
+        | sed -n '/^ [A-Za-z0-9]/p' | tr -d ' ' \
+        | grep -E '^[A-Za-z0-9_-]{6,}$' | sort -u || true)
+      orphan_ghosts=$(comm -23 <(printf '%s\n' "$live_sorted") <(printf '%s\n' "$all_ids") || true)
+    fi
+
+    if [[ -z "$anon_ghosts" && -z "$orphan_ghosts" ]]; then
+      echo "No ghost customers found." >&2
+      exit 0
+    fi
+
+    safe=""; skipped=0
+    # anon-matched: drop any with a product attached — a product means a
+    # real/converted customer, never an anonymous ghost.
+    while IFS= read -r id; do
+      [[ -z "$id" ]] && continue
+      prods=$(api_get "/customers/$id" 2>/dev/null | jq -r '[.products[]?.id] | join(",")' || true)
+      if [[ -n "$prods" ]]; then
+        echo "  SKIP (has product: $prods): $id" >&2
+        skipped=$((skipped + 1))
+      else
+        safe+="$id"$'\n'
+      fi
+    done <<< "$anon_ghosts"
+    # orphans: delete ONLY a customer that is completely empty (no name, email,
+    # product, stripe_id, invoice, or metadata). This excludes B2B tenant
+    # customers and named/stale records, which also have no ba_user row.
+    while IFS= read -r id; do
+      [[ -z "$id" ]] && continue
+      empty=$(api_get "/customers/$id" 2>/dev/null | jq -r '
+        if ((.name // "") == "" and (.email // "") == ""
+            and ((.products // []) | length) == 0
+            and (.stripe_id // null) == null
+            and ((.invoices // []) | length) == 0
+            and ((.metadata // {}) | length) == 0)
+        then "yes" else "no" end' 2>/dev/null || echo "no")
+      if [[ "$empty" == "yes" ]]; then
+        safe+="$id"$'\n'
+      else
+        echo "  SKIP (orphan not empty — real customer): $id" >&2
+        skipped=$((skipped + 1))
+      fi
+    done <<< "$orphan_ghosts"
+    safe=$(printf '%s' "$safe" | sed '/^$/d' | sort -u)
+    safe_count=$(printf '%s\n' "$safe" | grep -c . || true)
+
+    echo "anon-matched ghosts: $anon_ghost_count; orphans scanned: $(printf '%s\n' "$orphan_ghosts" | grep -c . || true)" >&2
+    echo "$safe_count safe to delete, $skipped skipped:" >&2
+    echo "$safe" | sed 's/^/  /'
+    if (( safe_count == 0 )); then
+      echo "Nothing to delete." >&2
+      exit 0
+    fi
+
+    if (( dry_run )); then
+      echo "--dry-run set, no customers deleted." >&2
+      exit 0
+    fi
+    if (( ! assume_yes )); then
+      if [[ -t 0 ]]; then
+        read -rp "Delete $safe_count ghost customers from Autumn '$env_label'? [y/N] " reply
+        [[ "$reply" =~ ^[Yy]$ ]] || { echo "Aborted." >&2; exit 1; }
+      else
+        echo "Refusing to delete without --yes in non-interactive mode." >&2
+        exit 1
+      fi
+    fi
+
+    deleted=0
+    while IFS= read -r id; do
+      [[ -z "$id" ]] && continue
+      if api_del "/customers/$id" > /dev/null 2>&1; then
+        echo "  Deleted: $id"
+        deleted=$((deleted + 1))
+      else
+        echo "  Failed:  $id" >&2
+      fi
+    done <<< "$safe"
+    echo "Done. Deleted $deleted/$safe_count ghost customers." >&2
+    ;;
+
+  push)
+    shift
+    cd ~/Documents/PharmaMate
+    exec npm run autumn:push -- "$@"
+    ;;
+
+  *)
+    echo "Unknown command: $1"
+    usage
+    ;;
+esac

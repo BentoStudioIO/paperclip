@@ -1,0 +1,650 @@
+#!/usr/bin/env python3
+"""opq-verify — validate Quebec pharmacy billing docs + classify OPQ pharmacists.
+
+Usage:
+  opq-verify <doc-id | slug | url>       # validate one Outline doc
+  opq-verify --all                       # validate all 11 OPQ docs under Quebec Documents
+  opq-verify --file <local.md>           # validate a local markdown file
+  opq-verify --json                      # machine-readable output
+  opq-verify --strict                    # exit 1 on warnings too (default: only errors)
+
+  opq-verify classify <name-or-license>  # classify a pharmacist against the OPQ index
+  opq-verify --classify <name-or-license>
+      --human                            # also print a one-line summary to stdout
+      --refresh                          # force-refetch the OPQ index (ignore cache TTL)
+
+Doc checks performed:
+  TARIFF        — every "XX,XX $" amount must match Infolettre 336-22 or Entente
+  REGLE         — every "Règle NN" must be in Entente (1-42)
+  ARTICLE       — P-10 r. 3.2 art. 1-22, M-9 r. 12.2.1 art. 1-8
+  RAMQ_CODE     — 8-digit codes must exist in sources; alphanumeric must be whitelisted
+  INFOLETTRE    — Infolettre NNN-NN must be in known list
+  URL           — links return HTTP 200 (GET, follow redirects, 15s timeout)
+
+Classification (SINGLE home for OPQ pharmacist triage — skills/rules POINT here):
+  Resolves a person against the OPQ pharmacist index and returns
+  {class, licenseNumber, city, matchConfidence}.
+    class           = student   (isStudent OR studentLicenseNumber present)
+                    | licensed  (licenseNumber present)
+                    | unknown   (no match)
+    matchConfidence = exact | strong | weak (name) ; exact (license lookup)
+  JSON to stdout by default; --human adds a one-line summary.
+
+Source corpus:  ~/.config/opq-verify/sources/
+OPQ index cache: ~/.cache/opq-index/pharmacists_index.json (TTL 7 days)
+Config:          ~/.config/outline-cli/config.json (api_token, base_url)
+"""
+from __future__ import annotations
+import argparse, json, os, re, subprocess, sys, time, unicodedata
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+
+SRC_DIR = Path.home() / '.config' / 'opq-verify' / 'sources'
+CONF_PATH = Path.home() / '.config' / 'outline-cli' / 'config.json'
+
+# OPQ pharmacist index — large (~1.9MB, ~11k rows); cache with a TTL and refetch when stale.
+OPQ_INDEX_URL = 'https://www.opq.org/wp-content/uploads/pharmacist-search/pharmacists_index.json'
+OPQ_CACHE_DIR = Path.home() / '.cache' / 'opq-index'
+OPQ_CACHE_FILE = OPQ_CACHE_DIR / 'pharmacists_index.json'
+OPQ_CACHE_TTL = 7 * 24 * 3600  # 7 days
+
+# Whitelists built from sources (lazy)
+_CACHE: Dict[str, object] = {}
+
+# Alphanumeric RAMQ service codes attested in Entente AQPP-MSSS 2022-2025 + Infolettres
+ALPHA_CODES_WHITELIST = {
+    '3',   # OP (Opinion pharmaceutique, Règle 10)
+    '4',   # COU (initiation contraception urgence, Règle 31)
+    'OP', 'V', 'RA', 'AD', 'DC', 'Z', 'W', 'W1', 'W2', 'IU',
+    'FE', 'VA', 'EN', 'SP', 'CP', 'HW', 'NA',
+    '8K', '8L', 'MK',  # naloxone program codes (Infolettre 267-24)
+    'K', 'L', 'M',     # ITSS program codes (K=atteint, L=partenaire, M=TAP contact)
+    'AI9', 'DE20', 'RE112', 'RE113', 'VA138',  # pharmacist ITSS/vaccination codes (Manuel RAMQ)
+    'DIN',
+}
+
+# Known Infolettres RAMQ (pharmacists) — extend as new ones are published
+INFOLETTRES_WHITELIST = {
+    '261-20', '267-24', '334-23', '336-22', '018-23', '047-23',
+}
+
+# Règlements referenced with article numbers
+REGLEMENT_ARTICLES = {
+    'P-10 r. 3.2': None,
+    'M-9 r. 12.2.1': None,
+    'P-10 r. 12': None,
+}
+
+
+def load_corpus() -> Dict[str, str]:
+    if 'corpus' in _CACHE:
+        return _CACHE['corpus']  # type: ignore
+    corpus = {}
+    if not SRC_DIR.exists():
+        sys.exit(f'Source corpus not found at {SRC_DIR}. Populate it before running.')
+    for p in SRC_DIR.glob('*.md'):
+        corpus[p.stem] = p.read_text()
+    _CACHE['corpus'] = corpus
+    return corpus
+
+
+def build_whitelists() -> Dict[str, Set]:
+    if 'wl' in _CACHE:
+        return _CACHE['wl']  # type: ignore
+    corpus = load_corpus()
+    wl: Dict[str, Set] = {}
+
+    # Tariffs from Infolettre + Entente
+    tariffs: Set[str] = set()
+    for key in ('_src-infolettre-336-22', '_src-entente-2022-2025'):
+        if key in corpus:
+            tariffs |= set(re.findall(r'\b(\d{1,3},\d{2})\b', corpus[key]))
+    wl['tariffs'] = tariffs
+
+    # Règles from Entente (accept 1-42)
+    if '_src-entente-2022-2025' in corpus:
+        regles = set(map(int, re.findall(r'(?:RÈGLE|Règle)\s+(\d+)', corpus['_src-entente-2022-2025'])))
+        wl['regles'] = regles
+    else:
+        wl['regles'] = set()
+
+    # Articles from verbatim règlements
+    def extract_arts(text: str) -> Set[int]:
+        return set(map(int, re.findall(r'\[(\d+)\.\]\(https?://[^)]*#se:\d+', text)))
+
+    wl['p10_r32_articles'] = extract_arts(corpus.get('_p10-r32-verbatim', ''))
+    wl['m9_r1221_articles'] = extract_arts(corpus.get('_m9-r1221-verbatim', ''))
+    wl['p10_r12_articles'] = extract_arts(corpus.get('_p10-r12-verbatim', ''))
+
+    # 8-digit RAMQ codes from all sources (keep 009*, 991* prefixes as valid families)
+    all_codes: Set[str] = set()
+    for t in corpus.values():
+        all_codes |= set(re.findall(r'\b(\d{8})\b', t))
+    wl['ramq_codes_8digit'] = {c for c in all_codes if c.startswith(('009', '991'))}
+
+    _CACHE['wl'] = wl
+    return wl
+
+
+def fetch_doc_from_outline(doc_id: str) -> Tuple[str, str]:
+    """Return (title, markdown_body) via `ol` CLI. doc_id may be UUID, slug, or URL."""
+    try:
+        out = subprocess.run(['ol', 'doc', 'get', doc_id], capture_output=True, text=True, timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        sys.exit(f'Failed to fetch via ol: {e}')
+    if out.returncode != 0:
+        sys.exit(f'ol doc get failed: {out.stderr}')
+    # ol output format: "# Title\nID: ...\nURL: ...\nUpdated: ...\nCollection: ...\n\n<body>"
+    lines = out.stdout.split('\n')
+    title = lines[0].lstrip('# ').strip() if lines else doc_id
+    body_start = 0
+    for i, l in enumerate(lines):
+        if l.startswith('Collection:'):
+            body_start = i + 1
+            break
+    body = '\n'.join(lines[body_start:]).strip()
+    return title, body
+
+
+BILLING_CONTEXT_RE = re.compile(
+    r'\b(?:tarif|facturation|facturable|payable|rémunération|honoraire|code\s+(?:de\s+)?service|'
+    r'LAM|RGAM|règle|infolettre|Annexe\s+III|entente|AQPP)\b',
+    re.IGNORECASE,
+)
+
+# Patterns that indicate a $ amount is a drug price, not a RAMQ tariff
+DRUG_PRICE_RE = re.compile(
+    r'\b(?:prix|coût|co[ûu]t\w*|\$/(?:cp|co|mL|mois|comprimé|jour|dose|lavement|supp)|/cp|/mois|/jour|'
+    r'pharmacare|formulary)\b',
+    re.IGNORECASE,
+)
+
+
+def looks_like_drug_price(body: str, span: Tuple[int, int], window: int = 60) -> bool:
+    start = max(0, span[0] - window)
+    end = min(len(body), span[1] + window)
+    return bool(DRUG_PRICE_RE.search(body[start:end]))
+
+
+def has_billing_context(body: str, span: Tuple[int, int], window: int = 120) -> bool:
+    start = max(0, span[0] - window)
+    end = min(len(body), span[1] + window)
+    return bool(BILLING_CONTEXT_RE.search(body[start:end]))
+
+
+def check_tariffs(body: str, wl: Dict[str, Set]) -> List[Dict]:
+    findings = []
+    seen: Set[str] = set()
+    # Build float lookup for multiple detection
+    tariff_floats = {float(t.replace(',', '.')) for t in wl['tariffs']}
+    for m in re.finditer(r'\b(\d{1,3},\d{2})\s*\$', body):
+        val = m.group(1)
+        if val in seen: continue
+        seen.add(val)
+        if val in wl['tariffs']:
+            continue
+        # Require billing context — avoids clinical doc price noise
+        if not has_billing_context(body, m.span()):
+            continue
+        # Exclude drug prices (clinical tables with RAMQ coverage annotations)
+        if looks_like_drug_price(body, m.span()):
+            continue
+        # Check if val is an integer multiple (2..10) of any known tariff (derivative calculation)
+        try:
+            vf = float(val.replace(',', '.'))
+            is_multiple = any(abs(vf - tf * n) < 0.01 for tf in tariff_floats for n in range(2, 11))
+        except ValueError:
+            is_multiple = False
+        if is_multiple:
+            findings.append({
+                'type': 'TARIFF',
+                'severity': 'warning',
+                'claim': f'{val} $',
+                'message': f'Tariff {val} $ not directly in sources, but matches a multiple of a known tariff (likely derivative example).',
+            })
+        else:
+            findings.append({
+                'type': 'TARIFF',
+                'severity': 'error',
+                'claim': f'{val} $',
+                'message': f'Tariff {val} $ not in Infolettre 336-22 or Entente. Possibly hallucinated or outdated.',
+            })
+    return findings
+
+
+def check_regles(body: str, wl: Dict[str, Set]) -> List[Dict]:
+    findings = []
+    seen: Set[int] = set()
+    # "Règle N" without Entente/billing context is usually a figure/table label in clinical docs
+    for m in re.finditer(r'Règles?\s+(\d+)(?:\s*[-–]\s*(\d+))?', body):
+        if not has_billing_context(body, m.span()):
+            continue
+        nums = [int(m.group(1))]
+        if m.group(2):
+            try:
+                for n in range(int(m.group(1)), int(m.group(2)) + 1):
+                    nums.append(n)
+            except ValueError:
+                pass
+        for n in nums:
+            if n in seen: continue
+            seen.add(n)
+            if n not in wl['regles']:
+                findings.append({
+                    'type': 'REGLE',
+                    'severity': 'error',
+                    'claim': f'Règle {n}',
+                    'message': f'Règle {n} not in Entente AQPP-MSSS (attested: 1-{max(wl["regles"]) if wl["regles"] else "?"}).',
+                })
+    return findings
+
+
+def check_articles(body: str, wl: Dict[str, Set]) -> List[Dict]:
+    findings = []
+    # P-10 r. 3.2 art. X
+    for m in re.finditer(r'P[-‑]10\s*r\.?\s*3\.2\s*(?:\w+\.?\s*)?art\.?\s+(\d+)', body):
+        art = int(m.group(1))
+        if art not in wl['p10_r32_articles']:
+            findings.append({
+                'type': 'ARTICLE',
+                'severity': 'error',
+                'claim': f'P-10 r. 3.2 art. {art}',
+                'message': f'Art. {art} not in P-10 r. 3.2 (attested: 1-{max(wl["p10_r32_articles"])}).',
+            })
+    # M-9 r. 12.2.1 art. X
+    for m in re.finditer(r'M[-‑]9\s*r\.?\s*12\.2\.1\s*(?:\w+\.?\s*)?art\.?\s+(\d+)', body):
+        art = int(m.group(1))
+        if art not in wl['m9_r1221_articles']:
+            findings.append({
+                'type': 'ARTICLE',
+                'severity': 'error',
+                'claim': f'M-9 r. 12.2.1 art. {art}',
+                'message': f'Art. {art} not in M-9 r. 12.2.1 (attested: 1-{max(wl["m9_r1221_articles"])}).',
+            })
+    return findings
+
+
+def check_ramq_codes(body: str, wl: Dict[str, Set]) -> List[Dict]:
+    findings = []
+    # 8-digit codes — only flag if billing context AND looks like RAMQ (009/991 prefix families)
+    seen8: Set[str] = set()
+    for m in re.finditer(r'\b(\d{8})\b', body):
+        c = m.group(1)
+        if c in seen8: continue
+        seen8.add(c)
+        if c in wl['ramq_codes_8digit']:
+            continue
+        # Only flag if it matches RAMQ prefix pattern AND has billing context
+        if not c.startswith(('009', '991')):
+            continue
+        if not has_billing_context(body, m.span()):
+            continue
+        findings.append({
+            'type': 'RAMQ_CODE',
+            'severity': 'error',
+            'claim': f'code {c}',
+            'message': f'8-digit RAMQ-pattern code {c} not found in source corpus. Verify against Infolettre 336-22 / AQPP Tableau synthèse.',
+        })
+
+    # Suspicious 5-digit "codes" that look like RAMQ (hallucination pattern: 14031, 14033)
+    for m in re.finditer(r'\bcode[s]?\s+["\'`]?(\d{5})\b', body, re.IGNORECASE):
+        c = m.group(1)
+        findings.append({
+            'type': 'RAMQ_CODE',
+            'severity': 'error',
+            'claim': f'code {c} (5-digit)',
+            'message': f'5-digit "{c}" presented as code — RAMQ codes are alphanumeric (OP/V/...) or 8-digit (009xxxxx). Likely hallucinated.',
+        })
+
+    # Alphanumeric codes
+    seen_alpha: Set[str] = set()
+    for m in re.finditer(r'\bcode[s]?\s+(?:de\s+)?(?:service\s+)?["\'`]?([A-Z]{1,3}[0-9]?)\b', body):
+        c = m.group(1)
+        if c in seen_alpha: continue
+        seen_alpha.add(c)
+        if c not in ALPHA_CODES_WHITELIST:
+            findings.append({
+                'type': 'RAMQ_CODE',
+                'severity': 'warning',
+                'claim': f'code {c}',
+                'message': f'Alphanumeric code "{c}" not in whitelist. Verify against Infolettre or Manuel.',
+            })
+    return findings
+
+
+def check_infolettres(body: str) -> List[Dict]:
+    findings = []
+    seen: Set[str] = set()
+    for m in re.finditer(r'Infolettre\s+(?:RAMQ\s+)?(\d{3}-\d{2})', body):
+        n = m.group(1)
+        if n in seen: continue
+        seen.add(n)
+        if n not in INFOLETTRES_WHITELIST:
+            findings.append({
+                'type': 'INFOLETTRE',
+                'severity': 'warning',
+                'claim': f'Infolettre {n}',
+                'message': f'Infolettre {n} not in known list ({sorted(INFOLETTRES_WHITELIST)}). May be new — verify.',
+            })
+    return findings
+
+
+# Domains known to block bot User-Agents or be very slow — skip reachability check
+# Trust that URLs on these domains are valid (manual verification recommended).
+URL_ALLOWLIST_DOMAINS = {
+    'www.canada.ca',    # Akamai bot protection
+    'canada.ca',
+    'www.inesss.qc.ca', # occasional slow response
+    'web.archive.org',  # slow, rate-limited
+}
+
+
+def check_urls(body: str) -> List[Dict]:
+    findings = []
+    urls = set(re.findall(r'https?://[^\s\)\]>"\']+', body))
+    for url in sorted(urls):
+        # Skip known bot-protected / slow government domains
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or ''
+        if host in URL_ALLOWLIST_DOMAINS:
+            continue
+        try:
+            req = Request(url, headers={'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) opq-verify/1.0'}, method='GET')
+            with urlopen(req, timeout=30) as resp:
+                if resp.status >= 400:
+                    findings.append({
+                        'type': 'URL',
+                        'severity': 'error',
+                        'claim': url,
+                        'message': f'HTTP {resp.status}',
+                    })
+        except HTTPError as e:
+            if e.code in (404, 410):
+                findings.append({'type': 'URL', 'severity': 'error', 'claim': url, 'message': f'HTTP {e.code}'})
+            elif e.code in (403, 401):
+                findings.append({'type': 'URL', 'severity': 'warning', 'claim': url, 'message': f'HTTP {e.code} (may be bot-protected)'})
+        except URLError as e:
+            findings.append({'type': 'URL', 'severity': 'warning', 'claim': url, 'message': f'URL unreachable: {e.reason}'})
+        except Exception as e:
+            findings.append({'type': 'URL', 'severity': 'warning', 'claim': url, 'message': f'URL check failed: {e}'})
+    return findings
+
+
+def verify_doc(identifier: str, body: str | None = None, title: str | None = None, skip_urls: bool = False) -> Dict:
+    wl = build_whitelists()
+    if body is None:
+        title, body = fetch_doc_from_outline(identifier)
+    findings = []
+    findings.extend(check_tariffs(body, wl))
+    findings.extend(check_regles(body, wl))
+    findings.extend(check_articles(body, wl))
+    findings.extend(check_ramq_codes(body, wl))
+    findings.extend(check_infolettres(body))
+    if not skip_urls:
+        findings.extend(check_urls(body))
+    return {'doc': identifier, 'title': title or '', 'findings': findings}
+
+
+def format_report(result: Dict) -> str:
+    lines = [f'\n══ {result["title"]} ({result["doc"]})']
+    errs = [f for f in result['findings'] if f['severity'] == 'error']
+    warns = [f for f in result['findings'] if f['severity'] == 'warning']
+    if not result['findings']:
+        lines.append('  ✓ OK — no findings')
+        return '\n'.join(lines)
+    for f in errs:
+        lines.append(f'  ✗ [{f["type"]}] {f["claim"]} — {f["message"]}')
+    for f in warns:
+        lines.append(f'  ⚠ [{f["type"]}] {f["claim"]} — {f["message"]}')
+    lines.append(f'  Summary: {len(errs)} error(s), {len(warns)} warning(s)')
+    return '\n'.join(lines)
+
+
+# The 11 OPQ docs in Quebec Documents collection (post-2026-04-22 rename)
+OPQ_DOCS = [
+    ('7e6116df-4ad9-415b-a41e-99ba80f028fc', 'Opinion pharmaceutique (Règle 10)'),
+    ('8297d54e-e0b7-4a01-886a-a992f32a9d34', 'Amorcer une thérapie (Règles 30-31)'),
+    ('fd4413a6-0b8f-4027-8ca1-74a7022ec078', 'Modifier (ajuster/cesser) (Règles 34, 38)'),
+    ('5fce44c2-1d7d-4f26-bb87-8c66a4f20741', 'Prolonger une ordonnance (Règle 35)'),
+    ('d36fbe67-0628-4b0b-86c4-1d1af4ca476f', 'Substituer un médicament (Règle 37)'),
+    ('4b113db2-96e2-4120-873a-e93dc9f9e52a', 'Administrer un médicament (Règles 36, 42)'),
+    ('14c05db5-20a8-48ba-b8d8-6767cfff834d', 'Demande de consultation (Règle 41)'),
+    ('1b63c507-2273-4cf3-bed6-eab45e379358', 'Prise en charge (Règles 32, 33, 34, 39, 40)'),
+    ('2e858ea6-e9fc-44c1-ac43-ddcdb147030c', 'Prescrire tests (P-10 r. 3.2 Section VII)'),
+    ('e0ff8859-2bc2-46bf-bfcd-e49cce0e7173', 'Enseignement naloxone (code EN)'),
+    ('cb39c733-0f77-47e6-a924-8e5a70472a9f', 'OPQ — Entente AQPP-MSSS (parent)'),
+]
+
+
+# ── OPQ pharmacist classification ─────────────────────────────────────────────
+
+def _norm(s: str) -> str:
+    """Accent- and case-insensitive normalization for name matching."""
+    if not s:
+        return ''
+    nfkd = unicodedata.normalize('NFKD', s)
+    stripped = ''.join(c for c in nfkd if not unicodedata.combining(c))
+    return re.sub(r'\s+', ' ', stripped).strip().lower()
+
+
+def load_opq_index(refresh: bool = False) -> List[Dict]:
+    """Return the OPQ pharmacist index, refetching when cache is missing/stale."""
+    if 'opq_index' in _CACHE and not refresh:
+        return _CACHE['opq_index']  # type: ignore
+    fresh = (
+        not refresh
+        and OPQ_CACHE_FILE.exists()
+        and (time.time() - OPQ_CACHE_FILE.stat().st_mtime) < OPQ_CACHE_TTL
+    )
+    if fresh:
+        try:
+            data = json.loads(OPQ_CACHE_FILE.read_text())
+            _CACHE['opq_index'] = data
+            return data
+        except (json.JSONDecodeError, OSError):
+            pass  # corrupt cache → refetch
+    # Fetch and cache
+    try:
+        req = Request(OPQ_INDEX_URL, headers={'User-Agent': 'opq-verify/1.0'}, method='GET')
+        with urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+        data = json.loads(raw)
+    except (HTTPError, URLError, json.JSONDecodeError, OSError) as e:
+        # Network failed — fall back to a stale cache if we have one
+        if OPQ_CACHE_FILE.exists():
+            try:
+                data = json.loads(OPQ_CACHE_FILE.read_text())
+                print(f'[opq-verify] warning: fetch failed ({e}); using stale cache', file=sys.stderr)
+                _CACHE['opq_index'] = data
+                return data
+            except (json.JSONDecodeError, OSError):
+                pass
+        sys.exit(f'Failed to fetch OPQ index and no usable cache: {e}')
+    OPQ_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    OPQ_CACHE_FILE.write_bytes(raw)
+    _CACHE['opq_index'] = data
+    return data
+
+
+def _classify_entry(entry: Dict) -> str:
+    if entry.get('isStudent') or entry.get('studentLicenseNumber'):
+        return 'student'
+    if entry.get('licenseNumber'):
+        return 'licensed'
+    return 'unknown'
+
+
+def classify_person(query: str, refresh: bool = False) -> Dict:
+    """Resolve `query` (name or license number) against the OPQ index.
+
+    Returns {class, licenseNumber, city, matchConfidence, matchedName, note}.
+    """
+    index = load_opq_index(refresh=refresh)
+    q = query.strip()
+
+    # License-number lookup: digits-only query matches license or student license exactly.
+    if re.fullmatch(r'\d{3,6}', q):
+        for e in index:
+            if q in (e.get('licenseNumber'), e.get('studentLicenseNumber')):
+                return {
+                    'query': query, 'class': _classify_entry(e),
+                    'licenseNumber': e.get('licenseNumber') or e.get('studentLicenseNumber'),
+                    'city': e.get('city'), 'matchConfidence': 'exact',
+                    'matchedName': e.get('fullName'), 'note': None,
+                }
+
+    # Name lookup — accent/case-insensitive.
+    qn = _norm(q)
+    if not qn:
+        return {'query': query, 'class': 'unknown', 'licenseNumber': None,
+                'city': None, 'matchConfidence': None, 'matchedName': None,
+                'note': 'empty query'}
+    qtokens = set(qn.split())
+
+    exact, substr, token = [], [], []
+    for e in index:
+        name_n = _norm(e.get('fullName', ''))
+        if not name_n:
+            continue
+        if name_n == qn:
+            exact.append(e)
+        elif qn in name_n:
+            substr.append(e)
+        elif qtokens and qtokens <= set(name_n.split()):
+            token.append(e)  # all query tokens present (handles word order / extra middle names)
+
+    if exact:
+        bucket, conf = exact, 'exact'
+    elif substr:
+        bucket, conf = substr, 'strong'
+    elif token:
+        bucket, conf = token, 'strong'
+    else:
+        return {'query': query, 'class': 'unknown', 'licenseNumber': None,
+                'city': None, 'matchConfidence': None, 'matchedName': None,
+                'note': 'no match in OPQ index'}
+
+    note = None
+    if len(bucket) > 1:
+        # Multiple candidates → return best (prefer licensed over student), flag ambiguity.
+        bucket = sorted(bucket, key=lambda e: (e.get('isStudent') is True, _norm(e.get('fullName', ''))))
+        conf = 'weak'
+        others = ', '.join(
+            f"{e.get('fullName')} ({e.get('licenseNumber') or e.get('studentLicenseNumber')})"
+            for e in bucket[1:6]
+        )
+        note = f'{len(bucket)} matches; returning best. Others: {others}'
+    best = bucket[0]
+    return {
+        'query': query, 'class': _classify_entry(best),
+        'licenseNumber': best.get('licenseNumber') or best.get('studentLicenseNumber'),
+        'city': best.get('city'), 'matchConfidence': conf,
+        'matchedName': best.get('fullName'), 'note': note,
+    }
+
+
+def classify_human_line(r: Dict) -> str:
+    if r['class'] == 'unknown':
+        return f'✗ {r["query"]} → unknown ({r.get("note") or "no match"})'
+    parts = [f'✓ {r["query"]} → {r["class"]}']
+    if r.get('matchedName') and _norm(r['matchedName']) != _norm(r['query']):
+        parts.append(f'[{r["matchedName"]}]')
+    if r.get('licenseNumber'):
+        parts.append(f'lic {r["licenseNumber"]}')
+    if r.get('city'):
+        parts.append(r['city'])
+    parts.append(f'({r["matchConfidence"]})')
+    line = ' '.join(parts)
+    if r.get('note'):
+        line += f' — {r["note"]}'
+    return line
+
+
+def run_classify(query: str, as_json: bool, human: bool, refresh: bool) -> int:
+    r = classify_person(query, refresh=refresh)
+    if as_json or not human:
+        print(json.dumps(r, ensure_ascii=False))
+    if human:
+        print(classify_human_line(r))
+    else:
+        # Default: JSON on stdout, summary on stderr (so piped callers stay clean).
+        print(classify_human_line(r), file=sys.stderr)
+    return 0 if r['class'] != 'unknown' else 1
+
+
+def main() -> int:
+    # `classify` subcommand (positional) — keep it out of the mutually-exclusive doc group.
+    argv = sys.argv[1:]
+    if argv and argv[0] == 'classify':
+        sub = argparse.ArgumentParser(prog='opq-verify classify',
+                                      description='Classify an OPQ pharmacist (single home for triage).')
+        sub.add_argument('query', help='Pharmacist name or license number')
+        sub.add_argument('--json', action='store_true', help='JSON only on stdout (default already JSON)')
+        sub.add_argument('--human', action='store_true', help='Print a one-line human summary to stdout')
+        sub.add_argument('--refresh', action='store_true', help='Force-refetch the OPQ index')
+        a = sub.parse_args(argv[1:])
+        return run_classify(a.query, a.json, a.human, a.refresh)
+
+    ap = argparse.ArgumentParser(description='Validate Quebec pharmacy billing docs against ground-truth sources.')
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument('doc', nargs='?', help='Document ID, slug, or URL (Outline)')
+    g.add_argument('--all', action='store_true', help='Validate all 11 OPQ docs')
+    g.add_argument('--file', help='Validate a local markdown file')
+    g.add_argument('--collection', help='Validate every doc in an Outline collection (by ID)')
+    g.add_argument('--classify', metavar='NAME-OR-LICENSE',
+                   help='Classify an OPQ pharmacist (equivalent to: classify <query>)')
+    ap.add_argument('--json', action='store_true', help='Machine-readable JSON output')
+    ap.add_argument('--strict', action='store_true', help='Exit 1 on warnings too')
+    ap.add_argument('--skip-urls', action='store_true', help='Skip URL reachability checks (faster)')
+    ap.add_argument('--human', action='store_true', help='[classify] print a one-line summary to stdout')
+    ap.add_argument('--refresh', action='store_true', help='[classify] force-refetch the OPQ index')
+    args = ap.parse_args()
+
+    if args.classify:
+        return run_classify(args.classify, args.json, args.human, args.refresh)
+
+    results = []
+    if args.all:
+        for doc_id, title in OPQ_DOCS:
+            print(f'Checking: {title}...', file=sys.stderr, flush=True)
+            results.append(verify_doc(doc_id, skip_urls=args.skip_urls))
+    elif args.collection:
+        out = subprocess.run(['ol', 'doc', 'list', '--collection', args.collection, '--ids-only'],
+                             capture_output=True, text=True, timeout=60)
+        if out.returncode != 0:
+            sys.exit(f'ol doc list failed: {out.stderr}')
+        doc_ids = [l.strip() for l in out.stdout.splitlines() if l.strip()]
+        print(f'Found {len(doc_ids)} docs in collection {args.collection}', file=sys.stderr)
+        for i, doc_id in enumerate(doc_ids, 1):
+            print(f'[{i}/{len(doc_ids)}] {doc_id}', file=sys.stderr, flush=True)
+            try:
+                results.append(verify_doc(doc_id, skip_urls=args.skip_urls))
+            except SystemExit as e:
+                print(f'  SKIP ({e})', file=sys.stderr)
+    elif args.file:
+        body = Path(args.file).read_text()
+        results.append(verify_doc(args.file, body=body, title=Path(args.file).name, skip_urls=args.skip_urls))
+    else:
+        results.append(verify_doc(args.doc, skip_urls=args.skip_urls))
+
+    if args.json:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+    else:
+        for r in results:
+            print(format_report(r))
+        # Aggregate summary
+        total_err = sum(len([f for f in r['findings'] if f['severity'] == 'error']) for r in results)
+        total_warn = sum(len([f for f in r['findings'] if f['severity'] == 'warning']) for r in results)
+        print(f'\n══ TOTAL: {len(results)} doc(s), {total_err} error(s), {total_warn} warning(s)')
+
+    has_err = any(any(f['severity'] == 'error' for f in r['findings']) for r in results)
+    has_warn = any(any(f['severity'] == 'warning' for f in r['findings']) for r in results)
+    if has_err or (args.strict and has_warn):
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

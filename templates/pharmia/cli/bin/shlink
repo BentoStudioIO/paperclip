@@ -1,0 +1,353 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONF="${HOME}/.config/shlink/config"
+[[ -f "$CONF" ]] && source "$CONF"
+
+BASE="${SHLINK_URL:?Set SHLINK_URL in $CONF or env}"
+KEY="${SHLINK_API_KEY:?Set SHLINK_API_KEY in $CONF or env}"
+API="${BASE}/rest/v3"
+
+usage() {
+  cat <<'EOF'
+Usage: shlink <command> [args]
+
+Global flags:
+  --json                          Emit raw API response (skip jq projection).
+                                  Supported on: ls, get, visits, tags, health.
+
+Short URLs:
+  ls [--search TERM] [--tag TAG] [--limit N] [--order FIELD] [--all] [--json]
+  create <longUrl> [--slug SLUG] [--title TITLE] [--tag TAG]...
+  get <shortCode> [--json]
+  edit <shortCode> [--url URL] [--title TITLE] [--tag TAG]...
+  rm <shortCode>
+
+Visits:
+  visits [--json]                       Global visit summary
+  visits <shortCode> [--json]           Visits for a short URL
+  visits --tag <tag> [--json]           Visits by tag
+  visits --domain <domain> [--json]     Visits by domain
+
+Tags:
+  tags [--json]                   List tags
+  tags stats [--json]             Tags with visit/URL counts
+  tags rename <old> <new>         Rename a tag
+  tags rm <tag1> [tag2...]        Delete tags
+
+QR Codes:
+  qr <shortCode> [--size N] [--margin N] [--save FILE]
+                                  Generated locally via qrencode (Shlink >= 4.5
+                                  removed the /qr-code endpoint). Requires the
+                                  qrencode binary on PATH.
+
+Domains:
+  domains                         List domains
+
+Other:
+  health [--json]                 Health check
+EOF
+  exit 1
+}
+
+# URL-encode a single value via jq (handles UTF-8, spaces, reserved chars).
+urlenc() {
+  jq -rn --arg v "$1" '$v|@uri'
+}
+
+api() {
+  local method="$1" path="$2"; shift 2
+  curl -sf -X "$method" -H "X-Api-Key: $KEY" -H "Accept: application/json" "$@" "${API}${path}"
+}
+
+api_json() {
+  local method="$1" path="$2" body="$3"; shift 3
+  curl -sf -X "$method" -H "X-Api-Key: $KEY" -H "Accept: application/json" \
+    -H "Content-Type: application/json" -d "$body" "$@" "${API}${path}"
+}
+
+# Extract --json from an argv list and set JSON_OUT=1 if present.
+# Usage: readarray -t ARGS < <(extract_json_flag "$@")
+JSON_OUT=0
+strip_json_flag() {
+  STRIPPED=()
+  JSON_OUT=0
+  for a in "$@"; do
+    if [[ "$a" == "--json" ]]; then
+      JSON_OUT=1
+    else
+      STRIPPED+=("$a")
+    fi
+  done
+}
+
+# Emit either raw JSON or a projected jq view, based on JSON_OUT.
+# Args: <jq filter for projected view>
+emit() {
+  local filter="$1"
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    jq '.'
+  else
+    jq "$filter"
+  fi
+}
+
+[[ $# -lt 1 ]] && usage
+
+case "$1" in
+
+  ## ── Short URLs ──────────────────────────────────────────────
+
+  ls)
+    shift
+    strip_json_flag "$@"
+    set -- "${STRIPPED[@]+"${STRIPPED[@]}"}"
+    PARAMS=()
+    LIMIT=20
+    ALL=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --search) PARAMS+=("searchTerm=$(urlenc "$2")"); shift 2 ;;
+        --tag)    PARAMS+=("tags%5B%5D=$(urlenc "$2")"); shift 2 ;;
+        --limit)  LIMIT="$2"; shift 2 ;;
+        --order)  PARAMS+=("orderBy=$(urlenc "$2")"); shift 2 ;;
+        --page)   PARAMS+=("page=$(urlenc "$2")"); shift 2 ;;
+        --all)    ALL=1; shift ;;
+        *) shift ;;
+      esac
+    done
+
+    build_qs() {
+      local page="$1" items="$2"
+      local qs="itemsPerPage=${items}&page=${page}"
+      for p in "${PARAMS[@]+"${PARAMS[@]}"}"; do qs+="&${p}"; done
+      printf '%s' "$qs"
+    }
+
+    if [[ "$ALL" -eq 1 ]]; then
+      # Paginate until pagesCount reached; aggregate data; emit combined result.
+      PAGE=1
+      ITEMS=50
+      AGG='[]'
+      META='null'
+      while :; do
+        RESP=$(api GET "/short-urls?$(build_qs "$PAGE" "$ITEMS")")
+        AGG=$(jq -n --argjson a "$AGG" --argjson b "$(echo "$RESP" | jq '.shortUrls.data')" '$a + $b')
+        META=$(echo "$RESP" | jq '.shortUrls.pagination')
+        TOTAL_PAGES=$(echo "$META" | jq '.pagesCount // 1')
+        if [[ "$PAGE" -ge "$TOTAL_PAGES" ]]; then break; fi
+        PAGE=$((PAGE + 1))
+      done
+      if [[ "$JSON_OUT" -eq 1 ]]; then
+        jq -n --argjson data "$AGG" --argjson pagination "$META" \
+          '{shortUrls: {data: $data, pagination: $pagination}}'
+      else
+        echo "$AGG" | jq '.[] | {shortCode, shortUrl, longUrl, title, tags, visits: .visitsSummary.total, created: .dateCreated}'
+      fi
+    else
+      RESP=$(api GET "/short-urls?$(build_qs 1 "$LIMIT")")
+      TOTAL_ITEMS=$(echo "$RESP" | jq '.shortUrls.pagination.totalItems // 0')
+      RETURNED=$(echo "$RESP" | jq '.shortUrls.data | length')
+      if [[ "$JSON_OUT" -eq 1 ]]; then
+        echo "$RESP" | jq '.'
+      else
+        echo "$RESP" | jq '.shortUrls.data[] | {shortCode, shortUrl, longUrl, title, tags, visits: .visitsSummary.total, created: .dateCreated}'
+      fi
+      if [[ "$TOTAL_ITEMS" -gt "$RETURNED" ]]; then
+        echo "(showing ${RETURNED} of ${TOTAL_ITEMS} results — use --all for full list)" >&2
+      fi
+    fi
+    ;;
+
+  create)
+    shift
+    [[ $# -lt 1 ]] && echo "Usage: shlink create <longUrl> [--slug SLUG] [--title TITLE] [--tag TAG]..." >&2 && exit 1
+    LONG_URL="$1"; shift
+    SLUG=""; TITLE=""; TAGS=()
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --slug)  SLUG="$2"; shift 2 ;;
+        --title) TITLE="$2"; shift 2 ;;
+        --tag)   TAGS+=("$2"); shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    BODY=$(jq -n \
+      --arg url "$LONG_URL" \
+      --arg slug "$SLUG" \
+      --arg title "$TITLE" \
+      --argjson tags "$(printf '%s\n' "${TAGS[@]+"${TAGS[@]}"}" | jq -R . | jq -s .)" \
+      '{longUrl: $url, findIfExists: true}
+       + (if $slug != "" then {customSlug: $slug} else {} end)
+       + (if $title != "" then {title: $title} else {} end)
+       + (if ($tags | length) > 0 then {tags: $tags} else {} end)')
+    api_json POST "/short-urls" "$BODY" | jq '{shortCode, shortUrl, longUrl, title, tags}'
+    ;;
+
+  get)
+    shift
+    strip_json_flag "$@"
+    set -- "${STRIPPED[@]+"${STRIPPED[@]}"}"
+    [[ $# -lt 1 ]] && echo "Usage: shlink get <shortCode> [--json]" >&2 && exit 1
+    api GET "/short-urls/$(urlenc "$1")" | emit '{shortCode, shortUrl, longUrl, title, tags, visits: .visitsSummary, meta, dateCreated}'
+    ;;
+
+  edit)
+    shift
+    [[ $# -lt 1 ]] && echo "Usage: shlink edit <shortCode> [--url URL] [--title TITLE] [--tag TAG]..." >&2 && exit 1
+    CODE="$1"; shift
+    URL=""; TITLE=""; TAGS=(); HAS_TAGS=false
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --url)   URL="$2"; shift 2 ;;
+        --title) TITLE="$2"; shift 2 ;;
+        --tag)   TAGS+=("$2"); HAS_TAGS=true; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    BODY=$(jq -n \
+      --arg url "$URL" \
+      --arg title "$TITLE" \
+      --argjson hasTags "$HAS_TAGS" \
+      --argjson tags "$(printf '%s\n' "${TAGS[@]+"${TAGS[@]}"}" | jq -R . | jq -s .)" \
+      '(if $url != "" then {longUrl: $url} else {} end)
+       + (if $title != "" then {title: $title} else {} end)
+       + (if $hasTags then {tags: $tags} else {} end)')
+    api_json PATCH "/short-urls/$(urlenc "$CODE")" "$BODY" | jq '{shortCode, shortUrl, longUrl, title, tags}'
+    ;;
+
+  rm)
+    [[ $# -lt 2 ]] && echo "Usage: shlink rm <shortCode>" >&2 && exit 1
+    api DELETE "/short-urls/$(urlenc "$2")" && echo "Deleted $2"
+    ;;
+
+  ## ── Visits ──────────────────────────────────────────────────
+
+  visits)
+    shift
+    strip_json_flag "$@"
+    set -- "${STRIPPED[@]+"${STRIPPED[@]}"}"
+    if [[ $# -eq 0 ]]; then
+      api GET "/visits" | emit '.visits'
+    else
+      case "$1" in
+        --tag)
+          [[ $# -lt 2 ]] && echo "Usage: shlink visits --tag <tag>" >&2 && exit 1
+          api GET "/tags/$(urlenc "$2")/visits?excludeBots=true&itemsPerPage=20" \
+            | emit '.visits.data[] | {date, referer, userAgent, city: .visitLocation.cityName, country: .visitLocation.countryName, bot: .potentialBot}'
+          ;;
+        --domain)
+          [[ $# -lt 2 ]] && echo "Usage: shlink visits --domain <domain>" >&2 && exit 1
+          api GET "/domains/$(urlenc "$2")/visits?excludeBots=true&itemsPerPage=20" \
+            | emit '.visits.data[] | {date, referer, userAgent, city: .visitLocation.cityName, country: .visitLocation.countryName}'
+          ;;
+        *)
+          api GET "/short-urls/$(urlenc "$1")/visits?excludeBots=true&itemsPerPage=20" \
+            | emit '.visits.data[] | {date, referer, userAgent, city: .visitLocation.cityName, country: .visitLocation.countryName, bot: .potentialBot}'
+          ;;
+      esac
+    fi
+    ;;
+
+  ## ── Tags ────────────────────────────────────────────────────
+
+  tags)
+    shift
+    strip_json_flag "$@"
+    set -- "${STRIPPED[@]+"${STRIPPED[@]}"}"
+    if [[ $# -eq 0 ]]; then
+      api GET "/tags" | emit '.tags.data[]'
+    else
+      case "$1" in
+        stats)
+          api GET "/tags/stats?orderBy=tag-ASC" \
+            | emit '.tags.data[] | {tag, shortUrls: .shortUrlsCount, visits: .visitsSummary.total, nonBots: .visitsSummary.nonBots}'
+          ;;
+        rename)
+          [[ $# -lt 3 ]] && echo "Usage: shlink tags rename <old> <new>" >&2 && exit 1
+          BODY=$(jq -n --arg old "$2" --arg new "$3" '{oldName: $old, newName: $new}')
+          api_json PUT "/tags" "$BODY" && echo "Renamed '$2' -> '$3'"
+          ;;
+        rm)
+          shift
+          [[ $# -lt 1 ]] && echo "Usage: shlink tags rm <tag1> [tag2...]" >&2 && exit 1
+          QS=""
+          for t in "$@"; do QS+="tags%5B%5D=$(urlenc "$t")&"; done
+          api DELETE "/tags?${QS}" && echo "Deleted tags: $*"
+          ;;
+        *) echo "Unknown tags subcommand: $1" >&2; exit 1 ;;
+      esac
+    fi
+    ;;
+
+  ## ── QR Codes (local via qrencode; Shlink removed the endpoint in 4.5) ──
+
+  qr)
+    shift
+    [[ $# -lt 1 ]] && echo "Usage: shlink qr <shortCode> [--size N] [--margin N] [--save FILE]" >&2 && exit 1
+    CODE="$1"; shift
+    SIZE=8; MARGIN=2; SAVE=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --size)   SIZE="$2"; shift 2 ;;
+        --margin) MARGIN="$2"; shift 2 ;;
+        --save)   SAVE="$2"; shift 2 ;;
+        --format) shift 2 ;;  # accepted for backwards compat; qrencode infers from extension
+        *) shift ;;
+      esac
+    done
+
+    if ! command -v qrencode >/dev/null 2>&1; then
+      cat <<'EOF' >&2
+error: `qrencode` is required but not installed.
+
+Shlink >= 4.5 removed the /{shortCode}/qr-code endpoint, so this CLI now
+generates QR codes locally via qrencode. Install it:
+
+  Ubuntu/Debian:  sudo apt install qrencode
+  macOS:          brew install qrencode
+  Fedora:         sudo dnf install qrencode
+EOF
+      exit 1
+    fi
+
+    # Resolve the short URL from the Shlink API so we encode the canonical URL
+    # (respects custom domains / default domain routing).
+    SHORT_URL=$(api GET "/short-urls/$(urlenc "$CODE")" | jq -r '.shortUrl')
+    if [[ -z "$SHORT_URL" || "$SHORT_URL" == "null" ]]; then
+      echo "error: could not resolve shortUrl for code '$CODE'" >&2
+      exit 1
+    fi
+
+    if [[ -n "$SAVE" ]]; then
+      qrencode -s "$SIZE" -m "$MARGIN" -o "$SAVE" "$SHORT_URL"
+      echo "Saved to $SAVE"
+    else
+      # ANSI render to terminal for quick preview.
+      qrencode -s "$SIZE" -m "$MARGIN" -t ANSIUTF8 "$SHORT_URL"
+      echo "$SHORT_URL"
+    fi
+    ;;
+
+  ## ── Domains ─────────────────────────────────────────────────
+
+  domains)
+    api GET "/domains" | jq '.domains.data[] | {domain, isDefault, redirects}'
+    ;;
+
+  ## ── Health ──────────────────────────────────────────────────
+
+  health)
+    shift
+    strip_json_flag "$@"
+    if [[ "$JSON_OUT" -eq 1 ]]; then
+      curl -sf "${API}/health" | jq '.'
+    else
+      curl -sf "${API}/health" | jq '{status, version}'
+    fi
+    ;;
+
+  --help|-h|help) usage ;;
+
+  *) usage ;;
+esac

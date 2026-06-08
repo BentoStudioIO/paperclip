@@ -1,0 +1,624 @@
+#!/usr/bin/env bash
+# pyro — query Pyroscope profiles via Grafana datasource proxy
+# Wraps profilecli with env-aware Grafana auth + human-readable top output.
+#
+# Usage:
+#   pyro <env> top [--last DURATION] [--type PROFILE_TYPE]
+#   pyro <env> query [profilecli flags...]
+#   pyro <env> series [profilecli query series flags...]
+#   pyro <env> diff --from RANGE --to RANGE
+#   pyro <env> status
+#
+# Environments: dev, qa, canary, local
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: pyro <env> <command> [args]
+
+Environments: dev, qa, canary, local
+
+Commands:
+  top [--last DURATION | --from RANGE --to RANGE] [--type TYPE] [--nodes N] [--query LABEL_SELECTOR] [--raw]
+      Top functions by self time (human-readable table).
+      Default: last 15m, wall profile, 30 nodes, all services.
+      --from/--to give a precise window (e.g. ISO timestamps or 'now-2h');
+      both must be set together. They override --last when supplied.
+      --raw outputs the unprocessed profilecli format.
+      Example: pyro canary top --last 30m
+               pyro canary top --from 2026-05-06T14:09:00Z --to 2026-05-06T14:20:00Z
+               pyro local top --query '{service_name="pharmia-api"}' --nodes 20
+               pyro canary top --type inuse --query '{service_name="my-go-svc"}'
+
+  query [profilecli flags...]
+      Pass-through to `profilecli query profile`. Env auth is injected.
+      Example: pyro canary query --from="now-1h" --query='{service_name="pharmia-api"}'
+
+  series [profilecli flags...]
+      Pass-through to `profilecli query series`. Env auth is injected.
+      Example: pyro dev series --query='{}'
+
+  diff --from RANGE --to RANGE [--type TYPE] [--nodes N] [--query LABEL_SELECTOR]
+      Compare two time ranges. Emits a single delta table (Before% | After% | Δ)
+      sorted by Δ desc. Rows with |Δ| > 2% are prefixed with '*'.
+      RANGE format: "now-2h,now-1h" (start,end)
+      Example: pyro canary diff --from "now-2h,now-1h" --to "now-1h,now"
+               pyro canary diff --from "now-2h,now-1h" --to "now-1h,now" --query '{service_name="api"}'
+
+  hot [--last DURATION] [--top N]
+      "Why is anything hot right now" — discovers services via series,
+      pulls a CPU profile for each, prints a ranked table of top functions.
+      Default: last 5m, top 3 functions per service.
+      Example: pyro canary hot
+               pyro canary hot --last 15m --top 5
+
+  status [--query LABEL_SELECTOR]
+      Check if Pyroscope is reachable and has recent data.
+      Example: pyro local status
+               pyro canary status --query '{service_name="api"}'
+
+Profile types (--type):
+  wall        wall:wall:nanoseconds:wall:nanoseconds (default)
+  cpu         wall:cpu:nanoseconds:wall:nanoseconds
+  inuse       memory:inuse_space:bytes:inuse_space:bytes
+  alloc       memory:alloc_space:bytes:space:bytes
+  heap-alloc  memory:alloc_objects:count:space:bytes
+  goroutines  goroutine:goroutine:count:count:count
+  mutex       mutex:contentions:count:mutex_duration:nanoseconds
+  block       block:contentions:count:delay:nanoseconds
+EOF
+  exit 1
+}
+
+[[ $# -lt 2 ]] && usage
+
+ENV="${1^^}"
+CMD="$2"
+shift 2
+
+# Resolve env
+case "$ENV" in
+  DEV)    URL="${GRAFANA_URL_DEV:?Set GRAFANA_URL_DEV}"; TOKEN="${GRAFANA_TOKEN_DEV:?Set GRAFANA_TOKEN_DEV}" ;;
+  QA)     URL="${GRAFANA_URL_QA:?Set GRAFANA_URL_QA}"; TOKEN="${GRAFANA_TOKEN_QA:?Set GRAFANA_TOKEN_QA}" ;;
+  CANARY) URL="${GRAFANA_URL_CANARY:?Set GRAFANA_URL_CANARY}"; TOKEN="${GRAFANA_TOKEN_CANARY:?Set GRAFANA_TOKEN_CANARY}" ;;
+  LOCAL)  URL="http://localhost:4040"; TOKEN="" ;;
+  *)      echo "Unknown env: $ENV (use dev, qa, canary, local)" >&2; exit 1 ;;
+esac
+
+# Build auth args
+AUTH_ARGS=()
+if [[ "$ENV" == "LOCAL" ]]; then
+  AUTH_ARGS=(--url="$URL")
+else
+  AUTH_ARGS=(--url="$URL/api/datasources/proxy/uid/pyroscope" --token="$TOKEN")
+fi
+
+# Canonical --type list. Keep in sync with resolve_type + validate_type.
+KNOWN_TYPES=(wall cpu inuse alloc goroutines mutex block heap-alloc heap)
+
+# Profile type resolver
+resolve_type() {
+  local t="${1:-wall}"
+  case "$t" in
+    wall)       echo "wall:wall:nanoseconds:wall:nanoseconds" ;;
+    cpu)        echo "wall:cpu:nanoseconds:wall:nanoseconds" ;;
+    alloc)      echo "memory:alloc_space:bytes:space:bytes" ;;
+    inuse|heap) echo "memory:inuse_space:bytes:inuse_space:bytes" ;;
+    heap-alloc) echo "memory:alloc_objects:count:space:bytes" ;;
+    goroutines) echo "goroutine:goroutine:count:count:count" ;;
+    mutex)      echo "mutex:contentions:count:mutex_duration:nanoseconds" ;;
+    block)      echo "block:contentions:count:delay:nanoseconds" ;;
+    *)          echo "$t" ;; # allow pre-canonicalized "group:name:..." string
+  esac
+}
+
+# Validate a --type against KNOWN_TYPES. Accepts canonical pre-resolved strings
+# (those contain colons) so power users passing raw pyroscope types still work.
+# On mismatch prints a suggestion+list to stderr and exits 1.
+validate_type() {
+  local t="$1"
+  # Pass-through: already a fully-qualified profile type.
+  [[ "$t" == *:*:*:*:* ]] && return 0
+  local k
+  for k in "${KNOWN_TYPES[@]}"; do
+    [[ "$t" == "$k" ]] && return 0
+  done
+  # Closest-match suggestion: prefer prefix match, else longest common prefix.
+  local best="" best_score=0 score k_lc t_lc i max
+  t_lc="${t,,}"
+  for k in "${KNOWN_TYPES[@]}"; do
+    k_lc="${k,,}"
+    score=0
+    max=${#t_lc}; (( ${#k_lc} < max )) && max=${#k_lc}
+    for (( i=0; i<max; i++ )); do
+      [[ "${t_lc:$i:1}" == "${k_lc:$i:1}" ]] || break
+      score=$((score+1))
+    done
+    # Bonus if t is a prefix of k or vice versa (e.g. goroutine → goroutines)
+    [[ "$k_lc" == "$t_lc"* || "$t_lc" == "$k_lc"* ]] && score=$((score+5))
+    if (( score > best_score )); then
+      best_score=$score
+      best="$k"
+    fi
+  done
+  if [[ -n "$best" && $best_score -ge 3 ]]; then
+    echo "pyro: unknown --type '$t'. Did you mean '$best'? Available: ${KNOWN_TYPES[*]}" >&2
+  else
+    echo "pyro: unknown --type '$t'. Available: ${KNOWN_TYPES[*]}" >&2
+  fi
+  exit 1
+}
+
+# Unit resolver for display
+resolve_unit() {
+  local t="${1:-wall}"
+  case "$t" in
+    wall|cpu) echo "time" ;;
+    alloc|inuse|heap) echo "bytes" ;;
+    *) echo "time" ;;
+  esac
+}
+
+# ── pprof-to-top parser ──────────────────────────────────────────────
+# Parses profilecli's console (pprof text) output into a go-tool-pprof-style
+# top table: flat, flat%, cum, cum%, function name.
+parse_pprof_top() {
+  local unit="${1:-time}" nodes="${2:-30}" label="${3:-}"
+  python3 -c '
+import sys, re
+from collections import defaultdict
+
+unit = sys.argv[1]
+max_nodes = int(sys.argv[2])
+label = sys.argv[3] if len(sys.argv) > 3 else ""
+
+content = sys.stdin.read()
+if not content.strip():
+    print("  (no profile data)")
+    sys.exit(0)
+
+# Parse locations: id → (function_name, source_info)
+# Format: "  ID: 0x0 M=1 SOURCE:FUNC:LINE SOURCE:LINE:0 s=0(FUNC_NAME)"
+# The reliable part is `s=0(FUNC_NAME)` at the end and the source path.
+# Scope to the Locations section to avoid matching sample lines.
+loc_section_match = re.search(r"^Locations\n(.*?)(?:^Mappings|\Z)", content, re.MULTILINE | re.DOTALL)
+loc_text = loc_section_match.group(1) if loc_section_match else ""
+
+locations = {}
+unresolved_ids = set()
+# Also handle bare "s=0" without parens (e.g. "other :0:0 s=0")
+for m in re.finditer(
+    r"^\s+(\d+):\s+\S+\s+\S+\s+(.*?)\s+s=\d+(?:\(([^)]*)\))?",
+    loc_text, re.MULTILINE,
+):
+    loc_id = int(m.group(1))
+    source_raw = m.group(2).strip()
+    if m.group(3):
+        func_name = m.group(3)
+    else:
+        # Parser did not resolve a function name — label with distinct loc id
+        # so the caller can see N distinct unresolved locations, not one "other".
+        func_name = f"<unresolved loc_id={loc_id}>"
+        unresolved_ids.add(loc_id)
+    # The middle section has two copies of the source: the verbose one
+    # (path:func:line) and the compact one (path:line:0). Use the compact
+    # form — it always appears as the last space-separated token before s=.
+    # Format: "VERBOSE_SOURCE COMPACT_SOURCE s=0(NAME)"
+    # Compact: "/app/.../file.js:LINE:0" or "node:module:LINE:0" or ":name:0:0"
+    parts = source_raw.split()
+    source_info = ""
+    if len(parts) >= 2:
+        compact = parts[-1]  # e.g. "/app/.../file.js:356:0" or "node:internal/timers:528:0"
+        # Strip trailing ":0"
+        if compact.endswith(":0"):
+            compact = compact[:-2]
+        # Generic path shortening: strip common container/build prefixes,
+        # keep only the meaningful relative portion.
+        if re.search(r"\.\w+:\d+$", compact):
+            # Has a file extension + line number — shorten the path
+            short = compact
+            # Strip container/build root prefixes (/app/, /src/, /build/, /opt/...)
+            short = re.sub(r"^/(?:app|src|build|opt|home/\w+)/", "", short)
+            # Collapse deep dependency paths (node_modules, vendor, site-packages, etc.)
+            short = re.sub(r".*/(?:node_modules|vendor|site-packages|pkg/mod)/", "", short)
+            # Collapse monorepo paths — keep from the last packages/libs/apps/internal dir
+            short = re.sub(r".*/(packages|libs|apps|internal|cmd|pkg)/", r"\1/", short)
+            source_info = short
+        elif compact.startswith("node:") or compact.startswith("runtime.") or compact.startswith("net/"):
+            # Runtime/stdlib paths (Node.js, Go, etc.) — keep as-is
+            source_info = compact
+        # else: bare names like ":Garbage Collection" → leave empty
+    locations[loc_id] = (func_name, source_info)
+
+if not locations:
+    print("  (no profile data — could not parse locations)")
+    sys.exit(0)
+
+# Parse samples
+flat_val = defaultdict(int)   # self time (leaf)
+cum_val = defaultdict(int)    # cumulative time (anywhere in stack)
+
+for m in re.finditer(r"^\s+(\d+):\s+([\d\s]+)$", content, re.MULTILINE):
+    value = int(m.group(1))
+    stack = [int(x) for x in m.group(2).split()]
+    if not stack:
+        continue
+    # First id in the list is the leaf (self)
+    leaf = stack[0]
+    key = locations.get(leaf, (f"unknown({leaf})", "?"))
+    flat_val[key] += value
+    seen = set()
+    for loc_id in stack:
+        k = locations.get(loc_id, (f"unknown({loc_id})", "?"))
+        if k not in seen:
+            cum_val[k] += value
+            seen.add(k)
+
+total = sum(flat_val.values())
+if total == 0:
+    print("  (no samples collected)")
+    sys.exit(0)
+
+def fmt_val(v):
+    """Format value with appropriate unit."""
+    if unit == "bytes":
+        if v >= 1e9:
+            return f"{v/1e9:.1f}GB"
+        if v >= 1e6:
+            return f"{v/1e6:.1f}MB"
+        if v >= 1e3:
+            return f"{v/1e3:.1f}KB"
+        return f"{v:.0f}B"
+    else:
+        ns = v
+        if ns >= 60e9:
+            return f"{ns/60e9:.1f}min"
+        if ns >= 1e9:
+            return f"{ns/1e9:.2f}s"
+        if ns >= 1e6:
+            return f"{ns/1e6:.1f}ms"
+        if ns >= 1e3:
+            return f"{ns/1e3:.1f}us"
+        return f"{ns:.0f}ns"
+
+if label:
+    print(f"\n{label}")
+
+print(f"  Total sampled: {fmt_val(total)}")
+print()
+hdr_self = "Self"
+hdr_selfp = "Self%"
+hdr_cum = "Cum"
+hdr_cump = "Cum%"
+sep = "-" * 10
+sep2 = chr(9472) * 6
+sep3 = chr(9472) * 40
+print(f"  {hdr_self:>10s} {hdr_selfp:>6s}  {hdr_cum:>10s} {hdr_cump:>6s}  Function")
+print(f"  {sep} {sep2}  {sep} {sep2}  {sep3}")
+
+sorted_funcs = sorted(flat_val.items(), key=lambda x: -x[1])[:max_nodes]
+
+for (func_name, source), val in sorted_funcs:
+    flat_pct = val / total * 100
+    cum = cum_val.get((func_name, source), 0)
+    cum_pct = cum / total * 100
+    # Display: use func name, append source if it adds context
+    display = func_name
+    if source and source != "?":
+        display = f"{func_name}  ({source})"
+    print(f"  {fmt_val(val):>10s} {flat_pct:5.1f}%  {fmt_val(cum):>10s} {cum_pct:5.1f}%  {display}")
+
+# Footer: surface parser loss vs real hot functions.
+unresolved_samples = sum(
+    v for (fn, _src), v in flat_val.items() if fn.startswith("<unresolved loc_id=")
+)
+if unresolved_samples:
+    distinct_unresolved = len(unresolved_ids)
+    pct = unresolved_samples / total * 100
+    print()
+    print(f"  unresolved: {fmt_val(unresolved_samples)} samples ({pct:.1f}%) — {distinct_unresolved} distinct locations")
+' "$unit" "$nodes" "$label"
+}
+
+case "$CMD" in
+  top)
+    LAST="15m"
+    TYPE="wall"
+    NODES=30
+    QUERY='{}'
+    RAW=false
+    FROM=""
+    TO=""
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --last)    LAST="$2"; shift 2 ;;
+        --last=*)  LAST="${1#*=}"; shift ;;
+        --from)    FROM="$2"; shift 2 ;;
+        --from=*)  FROM="${1#*=}"; shift ;;
+        --to)      TO="$2"; shift 2 ;;
+        --to=*)    TO="${1#*=}"; shift ;;
+        --type)    TYPE="$2"; shift 2 ;;
+        --type=*)  TYPE="${1#*=}"; shift ;;
+        --nodes)   NODES="$2"; shift 2 ;;
+        --nodes=*) NODES="${1#*=}"; shift ;;
+        --query)   QUERY="$2"; shift 2 ;;
+        --query=*) QUERY="${1#*=}"; shift ;;
+        --raw)     RAW=true; shift ;;
+        *)         echo "pyro: unknown flag for 'top': $1" >&2; exit 1 ;;
+      esac
+    done
+
+    # --from/--to override --last when supplied. Either both or neither.
+    if [[ -n "$FROM" || -n "$TO" ]]; then
+      if [[ -z "$FROM" || -z "$TO" ]]; then
+        echo "pyro top: --from and --to must be used together" >&2
+        exit 1
+      fi
+      RANGE_FROM="$FROM"
+      RANGE_TO="$TO"
+      LABEL_RANGE="$FROM → $TO"
+    else
+      RANGE_FROM="now-${LAST}"
+      RANGE_TO="now"
+      LABEL_RANGE="last $LAST"
+    fi
+
+    validate_type "$TYPE"
+    PROFILE_TYPE=$(resolve_type "$TYPE")
+
+    if [[ "$RAW" == "true" ]]; then
+      profilecli query profile "${AUTH_ARGS[@]}" \
+        --from="$RANGE_FROM" --to="$RANGE_TO" \
+        --profile-type="$PROFILE_TYPE" \
+        --query="$QUERY" \
+        --max-nodes="$NODES" \
+        2>/dev/null
+    else
+      UNIT=$(resolve_unit "$TYPE")
+      profilecli query profile "${AUTH_ARGS[@]}" \
+        --from="$RANGE_FROM" --to="$RANGE_TO" \
+        --profile-type="$PROFILE_TYPE" \
+        --query="$QUERY" \
+        --max-nodes="$NODES" \
+        2>/dev/null \
+      | parse_pprof_top "$UNIT" "$NODES" "[$ENV] $TYPE profile — $LABEL_RANGE ($QUERY)"
+    fi
+    ;;
+
+  query)
+    profilecli query profile "${AUTH_ARGS[@]}" "$@"
+    ;;
+
+  series)
+    profilecli query series "${AUTH_ARGS[@]}" "$@"
+    ;;
+
+  diff)
+    FROM_RANGE=""
+    TO_RANGE=""
+    TYPE="wall"
+    NODES=20
+    QUERY='{}'
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --from)    FROM_RANGE="$2"; shift 2 ;;
+        --from=*)  FROM_RANGE="${1#*=}"; shift ;;
+        --to)      TO_RANGE="$2"; shift 2 ;;
+        --to=*)    TO_RANGE="${1#*=}"; shift ;;
+        --type)    TYPE="$2"; shift 2 ;;
+        --type=*)  TYPE="${1#*=}"; shift ;;
+        --nodes)   NODES="$2"; shift 2 ;;
+        --nodes=*) NODES="${1#*=}"; shift ;;
+        --query)   QUERY="$2"; shift 2 ;;
+        --query=*) QUERY="${1#*=}"; shift ;;
+        *)         echo "pyro: unknown flag for 'diff': $1" >&2; exit 1 ;;
+      esac
+    done
+
+    [[ -z "$FROM_RANGE" || -z "$TO_RANGE" ]] && { echo "Usage: pyro $ENV diff --from START,END --to START,END" >&2; exit 1; }
+
+    validate_type "$TYPE"
+    PROFILE_TYPE=$(resolve_type "$TYPE")
+    UNIT=$(resolve_unit "$TYPE")
+    FROM_START="${FROM_RANGE%%,*}"
+    FROM_END="${FROM_RANGE##*,}"
+    TO_START="${TO_RANGE%%,*}"
+    TO_END="${TO_RANGE##*,}"
+
+    BEFORE_RAW=$(profilecli query profile "${AUTH_ARGS[@]}" \
+      --from="$FROM_START" --to="$FROM_END" \
+      --profile-type="$PROFILE_TYPE" \
+      --query="$QUERY" \
+      --max-nodes="$NODES" \
+      2>/dev/null || true)
+
+    AFTER_RAW=$(profilecli query profile "${AUTH_ARGS[@]}" \
+      --from="$TO_START" --to="$TO_END" \
+      --profile-type="$PROFILE_TYPE" \
+      --query="$QUERY" \
+      --max-nodes="$NODES" \
+      2>/dev/null || true)
+
+    echo ""
+    echo "[$ENV] $TYPE profile diff"
+    echo "  BEFORE: $FROM_START → $FROM_END"
+    echo "  AFTER:  $TO_START → $TO_END"
+    echo "  Query:  $QUERY"
+    echo ""
+
+    python3 - "$UNIT" "$NODES" <<'PYEOF' <(printf '%s' "$BEFORE_RAW") <(printf '%s' "$AFTER_RAW")
+import sys, re
+from collections import defaultdict
+
+unit = sys.argv[1]
+max_nodes = int(sys.argv[2])
+
+def parse(path):
+    with open(path) as f:
+        content = f.read()
+    loc_section = re.search(r"^Locations\n(.*?)(?:^Mappings|\Z)", content, re.MULTILINE | re.DOTALL)
+    loc_text = loc_section.group(1) if loc_section else ""
+    locations = {}
+    for m in re.finditer(
+        r"^\s+(\d+):\s+\S+\s+\S+\s+(.*?)\s+s=\d+(?:\(([^)]*)\))?",
+        loc_text, re.MULTILINE,
+    ):
+        loc_id = int(m.group(1))
+        func_name = m.group(3) if m.group(3) else f"<unresolved loc_id={loc_id}>"
+        locations[loc_id] = func_name
+    flat = defaultdict(int)
+    for m in re.finditer(r"^\s+(\d+):\s+([\d\s]+)$", content, re.MULTILINE):
+        value = int(m.group(1))
+        stack = [int(x) for x in m.group(2).split()]
+        if not stack:
+            continue
+        leaf = stack[0]
+        flat[locations.get(leaf, f"unknown({leaf})")] += value
+    return flat
+
+before = parse(sys.argv[3])
+after = parse(sys.argv[4])
+btot = sum(before.values()) or 1
+atot = sum(after.values()) or 1
+
+def fmt_pct(p):
+    return f"{p:5.1f}%"
+
+funcs = set(before) | set(after)
+rows = []
+for fn in funcs:
+    bp = before.get(fn, 0) / btot * 100
+    ap = after.get(fn, 0) / atot * 100
+    delta = ap - bp
+    rows.append((bp, ap, delta, fn))
+
+rows.sort(key=lambda r: -r[2])
+rows = rows[:max_nodes]
+
+print(f"  {'Before%':>8s} {'After%':>8s} {'Δ':>8s}  Function")
+print(f"  {'-'*8} {'-'*8} {'-'*8}  {'-'*40}")
+for bp, ap, delta, fn in rows:
+    mark = "*" if abs(delta) > 2 else " "
+    print(f"  {fmt_pct(bp)} {fmt_pct(ap)} {delta:+7.1f}% {mark} {fn}")
+print()
+print("  * = |Δ| > 2%")
+PYEOF
+    ;;
+
+  hot)
+    LAST="5m"
+    TOP=3
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --last)   LAST="$2"; shift 2 ;;
+        --last=*) LAST="${1#*=}"; shift ;;
+        --top)    TOP="$2"; shift 2 ;;
+        --top=*)  TOP="${1#*=}"; shift ;;
+        *)        echo "pyro: unknown flag for 'hot': $1" >&2; exit 1 ;;
+      esac
+    done
+
+    # Discover services from series in the last 5m window (dedup service_name).
+    SERIES_RAW=$(profilecli query series "${AUTH_ARGS[@]}" \
+      --from="now-5m" --to="now" \
+      --query='{}' \
+      2>/dev/null || true)
+
+    # series output is NDJSON — each line has "service_name":"..."
+    SERVICES=$(printf '%s\n' "$SERIES_RAW" \
+      | grep -oE '"service_name":"[^"]+"' \
+      | sort -u \
+      | sed -E 's/"service_name":"([^"]+)"/\1/')
+
+    if [[ -z "$SERVICES" ]]; then
+      echo "pyro: no services found in last 5m for $ENV" >&2
+      exit 1
+    fi
+
+    CPU_TYPE=$(resolve_type "cpu")
+    printf '\n[%s] hot — top %s CPU funcs per service, last %s\n\n' "$ENV" "$TOP" "$LAST"
+    printf '  %-40s %8s  %s\n' "SERVICE" "%_TOTAL" "TOP_FUNC"
+    printf '  %-40s %8s  %s\n' "----------------------------------------" "--------" "----------------------------------------"
+
+    while IFS= read -r svc; do
+      [[ -z "$svc" ]] && continue
+      RAW=$(profilecli query profile "${AUTH_ARGS[@]}" \
+        --from="now-${LAST}" --to="now" \
+        --profile-type="$CPU_TYPE" \
+        --query="{service_name=\"$svc\"}" \
+        --max-nodes=30 \
+        2>/dev/null || true)
+
+      if [[ -z "$RAW" ]]; then
+        printf '  %-40s %8s  %s\n' "$svc" "-" "(no cpu profile)"
+        continue
+      fi
+
+      # Extract top N functions as (pct, name) pairs.
+      printf '%s' "$RAW" | python3 -c '
+import sys, re
+from collections import defaultdict
+content = sys.stdin.read()
+top_n = int(sys.argv[1])
+svc = sys.argv[2]
+loc_section = re.search(r"^Locations\n(.*?)(?:^Mappings|\Z)", content, re.MULTILINE | re.DOTALL)
+loc_text = loc_section.group(1) if loc_section else ""
+locs = {}
+for m in re.finditer(r"^\s+(\d+):\s+\S+\s+\S+\s+(.*?)\s+s=\d+(?:\(([^)]*)\))?", loc_text, re.MULTILINE):
+    lid = int(m.group(1))
+    locs[lid] = m.group(3) if m.group(3) else f"<unresolved loc_id={lid}>"
+flat = defaultdict(int)
+for m in re.finditer(r"^\s+(\d+):\s+([\d\s]+)$", content, re.MULTILINE):
+    value = int(m.group(1))
+    stack = [int(x) for x in m.group(2).split()]
+    if stack:
+        flat[locs.get(stack[0], f"unknown({stack[0]})")] += value
+total = sum(flat.values())
+if total == 0:
+    dash = "-"
+    print(f"  {svc:<40} {dash:>8}  (no samples)")
+    sys.exit(0)
+ranked = sorted(flat.items(), key=lambda x: -x[1])[:top_n]
+for i, (fn, v) in enumerate(ranked):
+    pct = v / total * 100
+    label = svc if i == 0 else ""
+    fn_short = fn if len(fn) <= 60 else fn[:57] + "..."
+    print(f"  {label:<40} {pct:7.1f}%  {fn_short}")
+' "$TOP" "$svc"
+    done <<< "$SERVICES"
+    echo ""
+    ;;
+
+  status)
+    QUERY='{}'
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --query)   QUERY="$2"; shift 2 ;;
+        --query=*) QUERY="${1#*=}"; shift ;;
+        *)         echo "pyro: unknown flag for 'status': $1" >&2; exit 1 ;;
+      esac
+    done
+
+    echo "Checking Pyroscope at: $URL"
+    if [[ "$ENV" == "LOCAL" ]]; then
+      profilecli ready --url="$URL" 2>&1 && echo "  Status: OK" || echo "  Status: UNREACHABLE"
+    else
+      profilecli ready --url="$URL/api/datasources/proxy/uid/pyroscope" --token="$TOKEN" 2>&1 && echo "  Status: OK" || echo "  Status: UNREACHABLE"
+    fi
+    echo ""
+    echo "Checking for recent data..."
+    profilecli query series "${AUTH_ARGS[@]}" \
+      --from="now-5m" --to="now" \
+      --query="$QUERY" \
+      2>/dev/null | grep -c "service_name" | xargs -I{} echo "  Profile series found: {}"
+    ;;
+
+  *)
+    echo "Unknown command: $CMD" >&2
+    usage
+    ;;
+esac

@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# loki — Unified Loki query CLI for all Pharmia environments
+# Usage: loki <env> <command> [options]
+#
+# Environments: local, dev, qa, canary
+#
+# Commands:
+#   search <text>       Find log lines containing <text> (all services)
+#   errors              All error-level logs
+#   warnings            All warn-level logs
+#   count <text>        Count matching lines
+#   '<logql>'           Raw LogQL query
+#   query               Alias — strips prefix, passes through
+#   --labels            List all label names
+#   --values <label>    List values for a label
+#
+# Options:
+#   --service <name>    Filter by service_name (default: all for search, pharmia-api for errors/warnings)
+#   --since <dur>       Time range (default: 1h). Examples: 30m, 6h, 7d
+#   --limit <n>         Max results (default: 30)
+#   --oldest            Show oldest first (find first occurrence)
+#   -o <format>         Output format: jsonl (default), raw, default
+#
+# Examples:
+#   loki canary search "external_id" --since 24h
+#   loki canary search "Thread ID is required" --oldest --limit 1 --since 7d
+#   loki canary errors --since 30m
+#   loki canary count "timeout" --since 6h
+#   loki dev '{service_name="pharmia-api"} |= "error"' --since 2h
+#   loki canary --labels
+#   loki canary --values service_name
+
+set -euo pipefail
+
+# Ensure sibling CLIs (logcli) resolve even when ~/.local/bin isn't on PATH
+# (e.g. non-interactive shells). Self-locate and prepend our own dir.
+PATH="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd):$PATH"
+export PATH
+
+# --- Environment resolution ---
+_env="${1:-}"
+case "$_env" in
+  -h|--help|help)
+    cat <<'HELP'
+Usage: loki <env> <command> [options]
+
+Environments: local, dev, qa, canary
+
+Commands:
+  search <text>       Find log lines containing <text> (all services)
+  errors              All error-level logs
+  warnings            All warn-level logs
+  count <text>        Count matching lines
+  '<logql>'           Raw LogQL query
+  --labels            List all label names
+  --values <label>    List values for a label
+
+Options:
+  --service <name>    Service filter (default: all for search, pharmia-api for errors/warnings)
+  --since <dur>       Time range (default: 1h). Examples: 30m, 6h, 7d
+  --limit <n>         Max results (default: 30)
+  --oldest            Show oldest first (find first occurrence)
+
+Examples:
+  loki canary search "external_id" --since 24h
+  loki canary search "Thread ID" --oldest --limit 1 --since 7d
+  loki canary errors --since 30m
+  loki canary count "timeout" --since 6h
+  loki dev '{service_name="pharmia-api"} |= "error"'
+HELP
+    exit 0
+    ;;
+  local|dev|qa|canary) shift;;
+  *)
+    cat >&2 <<'USAGE'
+Usage: loki <env> <command> [options]
+
+Environments: local, dev, qa, canary
+
+Commands:
+  search <text>       Find log lines containing <text> (all services)
+  errors              All error-level logs
+  warnings            All warn-level logs
+  count <text>        Count matching lines
+  '<logql>'           Raw LogQL query
+  --labels            List all label names
+  --values <label>    List values for a label
+
+Options:
+  --service <name>    Service filter (default: all for search, pharmia-api for errors/warnings)
+  --since <dur>       Time range (default: 1h). Examples: 30m, 6h, 7d
+  --limit <n>         Max results (default: 30)
+  --oldest            Show oldest first (find first occurrence)
+
+Examples:
+  loki canary search "external_id" --since 24h
+  loki canary search "Thread ID" --oldest --limit 1 --since 7d
+  loki canary errors --since 30m
+  loki canary count "timeout" --since 6h
+  loki dev '{service_name="pharmia-api"} |= "error"'
+USAGE
+    exit 1;;
+esac
+
+case "$_env" in
+  local)
+    LOKI_ADDR="http://localhost:3100"
+    _auth_args=()
+    ;;
+  dev)
+    LOKI_ADDR="https://grafana.dev.pharmia.ca/api/datasources/proxy/uid/loki"
+    _auth_args=(--bearer-token "${LOKI_DEV_TOKEN:?set LOKI_DEV_TOKEN in env (~/.zshenv)}")
+    ;;
+  qa)
+    LOKI_ADDR="https://grafana.qa.pharmia.ca/api/datasources/proxy/uid/loki"
+    _auth_args=(--bearer-token "${LOKI_QA_TOKEN:?set LOKI_QA_TOKEN in env (~/.zshenv)}")
+    ;;
+  canary)
+    LOKI_ADDR="https://grafana.canary.pharmia.ca/api/datasources/proxy/uid/loki"
+    _auth_args=(--bearer-token "${LOKI_CANARY_TOKEN:?set LOKI_CANARY_TOKEN in env (~/.zshenv)}")
+    ;;
+esac
+
+# --- Subcommand dispatch ---
+_cmd="${1:-}"
+_svc=""
+_since="1h"
+_limit="30"
+_oldest=false
+_show_query=false
+_extra=()
+
+_parse_opts() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --service)     shift; _svc="$1"; shift;;
+      --since)       shift; _since="$1"; shift;;
+      --limit)       shift; _limit="$1"; shift;;
+      --oldest)      _oldest=true; shift;;
+      --show-query)  _show_query=true; shift;;
+      *)             _extra+=("$1"); shift;;
+    esac
+  done
+}
+
+_normalize_service_name() {
+  case "$1" in
+    api|pharmia-api) printf '%s\n' "pharmia-api" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+case "$_cmd" in
+  -h|--help|help)
+    "$0" --help
+    exit 0
+    ;;
+  --labels)
+    logcli labels --addr="$LOKI_ADDR" "${_auth_args[@]}" --quiet 2>/dev/null
+    exit 0
+    ;;
+  --values)
+    shift
+    logcli labels --addr="$LOKI_ADDR" "${_auth_args[@]}" --quiet "${1:?label name required}" 2>/dev/null
+    exit 0
+    ;;
+  "")
+    # Re-show usage
+    "$0" --help 2>&1; exit 1
+    ;;
+  search)
+    shift
+    _text="${1:?search text required}"; shift
+    _parse_opts "$@"
+    if [ -n "$_svc" ]; then
+      _svc="$(_normalize_service_name "$_svc")"
+      _query="{service_name=\"${_svc}\"} |= \`${_text}\`"
+    else
+      _query="{service_name=~\".+\"} |= \`${_text}\`"
+    fi
+    set -- "$_query" --since "$_since" --limit "$_limit" "${_extra[@]}"
+    ;;
+  tail)
+    shift
+    _text="${1:?tail text required}"; shift
+    _parse_opts "$@"
+    if [ -n "$_svc" ]; then
+      _svc="$(_normalize_service_name "$_svc")"
+      _query="{service_name=\"${_svc}\"} |= \`${_text}\`"
+    else
+      _query="{service_name=~\".+\"} |= \`${_text}\`"
+    fi
+    if $_show_query; then
+      printf 'LogQL: %s\n' "$_query" >&2
+    fi
+    exec logcli query --tail --addr="$LOKI_ADDR" "${_auth_args[@]}" --quiet --limit "$_limit" "$_query"
+    ;;
+  count)
+    shift
+    _text="${1:?search text required}"; shift
+    _parse_opts "$@"
+    if [ -n "$_svc" ]; then
+      _svc="$(_normalize_service_name "$_svc")"
+      _query="sum(count_over_time({service_name=\"${_svc}\"} |= \`${_text}\` [${_since}]))"
+    else
+      _query="sum(count_over_time({service_name=~\".+\"} |= \`${_text}\` [${_since}]))"
+    fi
+    if $_show_query; then
+      printf 'LogQL: %s\n' "$_query" >&2
+    fi
+    output=$(logcli instant-query --addr="$LOKI_ADDR" "${_auth_args[@]}" --quiet "$_query" "${_extra[@]}")
+    if [ -z "$output" ] || [ "$output" = "[]" ]; then
+      echo "0"
+    else
+      echo "$output" | jq -r '[.[].value[1] | tonumber] | add // 0'
+    fi
+    exit 0
+    ;;
+  errors|warnings)
+    _level="error"; [ "$_cmd" = "warnings" ] && _level="warn"
+    shift
+    _parse_opts "$@"
+    _svc="$(_normalize_service_name "${_svc:-pharmia-api}")"
+    _query="{service_name=\"${_svc}\"} |~ \"\\\"level\\\":\\\"${_level}\\\"\""
+    # Default --show-query ON for errors/warnings for cheap visibility
+    _show_query=true
+    set -- "$_query" --since "$_since" --limit "$_limit" "${_extra[@]}"
+    ;;
+  query)
+    shift
+    # Pass-through: parse our custom flags, rest goes to logcli
+    _raw_args=("$@")
+    _logql=""
+    _new_args=()
+    for arg in "${_raw_args[@]}"; do
+      case "$arg" in
+        --oldest) _oldest=true;;
+        *) _new_args+=("$arg");;
+      esac
+    done
+    set -- "${_new_args[@]}"
+    ;;
+  *)
+    # Raw LogQL or logcli flags — parse out our custom flags
+    _raw_args=("$@")
+    _new_args=()
+    for arg in "${_raw_args[@]}"; do
+      case "$arg" in
+        --oldest) _oldest=true;;
+        *) _new_args+=("$arg");;
+      esac
+    done
+    set -- "${_new_args[@]}"
+    ;;
+esac
+
+# --- Direction ---
+_dir_args=()
+if $_oldest; then
+  _dir_args=(--forward)
+fi
+
+# --- Output format ---
+has_output=false
+for arg in "$@"; do
+  case "$arg" in -o|--output|-o=*|--output=*) has_output=true; break;; esac
+done
+
+_output_args=()
+if ! $has_output; then
+  _output_args=(-o jsonl)
+fi
+
+# --- Echo LogQL if requested ---
+if $_show_query; then
+  # First positional is the LogQL query for search/errors/warnings/raw; may be empty for other dispatches.
+  printf 'LogQL: %s\n' "${1:-}" >&2
+fi
+
+# --- Execute ---
+# Let stderr from logcli pass through so real errors (bad --since, auth fail, bad LogQL) are visible.
+# Capture stdout + exit status; only suppress empty-results as "No results found."
+set +e
+output=$(logcli query --addr="$LOKI_ADDR" "${_auth_args[@]}" --quiet "${_dir_args[@]}" "${_output_args[@]}" "$@")
+rc=$?
+set -e
+
+if [ $rc -ne 0 ]; then
+  exit $rc
+fi
+
+if [ -z "$output" ]; then
+  echo "No results found." >&2
+  exit 0
+fi
+
+echo "$output"

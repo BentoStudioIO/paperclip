@@ -1,0 +1,1505 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_NAME="${0##*/}"
+
+TARGET_ENV="qa"
+SSH_HOST=""
+DOKPLOY_INSTANCE=""
+DOKPLOY_PROJECT_NAME="Pharmia"
+DOKPLOY_COMPOSE_NAME=""
+ZONE="pharmia.ca"
+ENV_SUFFIX=""
+WEB_SERVICE="web"
+WEB_PORT="5173"
+CERTIFICATE_TYPE="letsencrypt"
+DOMAIN_TYPE="compose"
+HTTPS_TIMEOUT_SECONDS=600
+DEPLOY_TIMEOUT_SECONDS=1800
+DB_READY_TIMEOUT_SECONDS=300
+POLL_INTERVAL_SECONDS=5
+
+CURRENT_PHASE="bootstrap"
+LAST_CMD=""
+DEBUG=false
+DRY_RUN=false
+CONFIRM_PROD=false
+CHECK_LIVE=false
+
+COMMAND=""
+SLUG=""
+COMPANY_NAME=""
+OWNER_EMAIL=""
+OWNER_FIRST_NAME=""
+OWNER_LAST_NAME=""
+OWNER_PHONE=""
+NORMALIZED_OWNER_PHONE=""
+TEMPLATE_TENANT=""
+
+LIGHT=""
+DARK=""
+DEFAULT_NOTE_FORMAT=""
+REGISTRATION_ENABLED=""
+ECHO_ENABLED=""
+COPILOT_ENABLED=""
+CONSULTATION_ENABLED=""
+PATIENT_CONSULTATION_CREATION_ENABLED=""
+
+COMPOSE_ID=""
+APP_NAME=""
+SERVER_IP=""
+DB_CONTAINER=""
+FQDN=""
+
+DNS_STATUS=""
+DOMAIN_STATUS=""
+DEPLOY_STATUS=""
+TENANT_STATUS=""
+USER_STATUS=""
+MEMBERSHIP_STATUS=""
+SESSION_STATUS=""
+SESSION_COUNT_BEFORE="0"
+SESSION_COUNT_AFTER="0"
+
+AUDIT_LOG_DIR="${HOME}/.local/state/pharmia-tenant"
+AUDIT_LOG_FILE="${AUDIT_LOG_DIR}/audit.jsonl"
+AUDIT_ARMED=false
+AUDIT_WRITTEN=false
+
+log() {
+  printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >&2
+}
+
+debug() {
+  if [[ "$DEBUG" == true ]]; then
+    log "DEBUG: $*"
+  fi
+}
+
+phase() {
+  CURRENT_PHASE="$1"
+  log "== $CURRENT_PHASE =="
+}
+
+die() {
+  log "ERROR: $*"
+  exit 1
+}
+
+prod_banner() {
+  if [[ "$TARGET_ENV" == "prod" ]]; then
+    cat >&2 <<'EOF'
+============================================
+ PHARMIA-TENANT — ENV=PROD — be careful
+============================================
+EOF
+  fi
+}
+
+audit_log_write() {
+  local exit_code="$1"
+  if [[ "$AUDIT_ARMED" != true || "$AUDIT_WRITTEN" == true ]]; then
+    return 0
+  fi
+  AUDIT_WRITTEN=true
+
+  mkdir -p "$AUDIT_LOG_DIR" 2>/dev/null || return 0
+
+  local ts operator entry flags_str
+  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  operator="${USER:-unknown}@$(hostname 2>/dev/null || echo unknown)"
+  flags_str=""
+  if [[ "$DRY_RUN" == true ]]; then
+    flags_str+="--dry-run "
+  fi
+  if [[ "$CONFIRM_PROD" == true ]]; then
+    flags_str+="--confirm-prod "
+  fi
+  if [[ "$CHECK_LIVE" == true ]]; then
+    flags_str+="--check-live "
+  fi
+  if [[ "$DEBUG" == true ]]; then
+    flags_str+="--debug "
+  fi
+  flags_str="${flags_str% }"
+
+  entry="$(jq -nc \
+    --arg ts "$ts" \
+    --arg operator "$operator" \
+    --arg env "$TARGET_ENV" \
+    --arg action "$COMMAND" \
+    --arg slug "$SLUG" \
+    --arg flags "$flags_str" \
+    --argjson confirmed "$([[ "$CONFIRM_PROD" == true ]] && echo true || echo false)" \
+    --argjson exit_code "$exit_code" \
+    '{ts:$ts, operator:$operator, env:$env, action:$action, slug:$slug, flags:$flags, confirmed:$confirmed, exit_code:$exit_code}')"
+  printf '%s\n' "$entry" >>"$AUDIT_LOG_FILE" 2>/dev/null || true
+}
+
+on_exit() {
+  local exit_code=$?
+  audit_log_write "$exit_code"
+}
+
+on_error() {
+  local exit_code=$?
+  log "FAILED phase=$CURRENT_PHASE exit=$exit_code"
+  if [[ -n "$LAST_CMD" ]]; then
+    log "last command: $LAST_CMD"
+  fi
+  audit_log_write "$exit_code"
+  AUDIT_WRITTEN=true
+  exit "$exit_code"
+}
+
+trap on_error ERR
+trap on_exit EXIT
+
+usage() {
+  cat <<'EOF'
+Usage:
+  pharmia-tenant <command> [flags]
+
+Commands:
+  create     Provision a new tenant (DNS + Dokploy domain + DB tenant/user/membership)
+  status     Inspect provisioning state across DNS, Dokploy, and DB for a slug
+  list       List all tenants in the target environment's DB
+  destroy    NOT YET IMPLEMENTED — too risky, needs its own design pass
+  help       Show this help
+
+Common flags (all commands):
+  --env qa|prod              Target environment (default: qa)
+  --dry-run                  Print plan, no mutations
+  --debug                    Verbose tracing
+  --confirm-prod             REQUIRED for mutating prod commands (create, destroy)
+                             unless --dry-run is set
+  --check-live               Force online preflight even on --dry-run
+
+create flags:
+  --slug <slug>              Required. Matches ^[a-z0-9]+(-[a-z0-9]+)*$
+  --company-name "<name>"    Required
+  --owner-email <email>      Required
+  --owner-first-name <first> Required
+  --owner-last-name <last>   Required
+  --owner-phone <phone>      Optional, E.164 or NANP-normalizable
+  --template-tenant <slug>   Required. Existing tenant whose feature flags seed the new one
+  --registration-enabled | --no-registration-enabled
+  --echo-enabled | --no-echo-enabled
+  --copilot-enabled | --no-copilot-enabled
+  --consultation-enabled | --no-consultation-enabled
+  --patient-consultation-creation-enabled | --no-patient-consultation-creation-enabled
+  --light <hex>              Override tenant light theme
+  --dark <hex>               Override tenant dark theme
+  --default-note-format <f>  Override tenant default note format
+
+status flags:
+  --slug <slug>              Required. Slug to inspect
+
+Exit codes for status:
+  0 — fully provisioned (all systems OK)
+  1 — partial (some systems present, others missing)
+  2 — fully missing (nothing provisioned)
+
+Safety:
+  - prod writes require --confirm-prod. Without it, create/destroy abort BEFORE any SSH.
+  - Every mutating invocation (create, destroy) appends a JSON line to:
+      ~/.local/state/pharmia-tenant/audit.jsonl
+    capturing operator, env, flags, and exit code — success or failure.
+  - --dry-run runs offline preflight only (slug regex, email format). Use --check-live
+    to force the online preflight (Dokploy compose resolve, DB readiness probe).
+  - --env prod emits a loud banner on every command so you always know which env
+    you're operating on.
+
+Examples:
+  pharmia-tenant list --env qa
+  pharmia-tenant status fphx-3039 --env qa
+  pharmia-tenant create --env qa --slug fphx-3039 \
+    --company-name "Pharmaprix #3039" \
+    --owner-email owner@example.com \
+    --owner-first-name Owner --owner-last-name Example \
+    --template-tenant fphx-029 --dry-run
+  pharmia-tenant create --env prod --slug pjc-999 \
+    --company-name "Example" --owner-email a@b.com \
+    --owner-first-name A --owner-last-name B \
+    --template-tenant pjc-254 --confirm-prod
+EOF
+}
+
+set_last_cmd() {
+  printf -v LAST_CMD '%q ' "$@"
+  LAST_CMD="${LAST_CMD% }"
+}
+
+run_read() {
+  set_last_cmd "$@"
+  debug "run(read): $LAST_CMD"
+  "$@"
+}
+
+run_write() {
+  set_last_cmd "$@"
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY-RUN write: $LAST_CMD"
+    return 0
+  fi
+  debug "run(write): $LAST_CMD"
+  "$@"
+}
+
+build_remote_shell() {
+  local remote=""
+  printf -v remote '%q ' "$@"
+  printf '%s' "${remote% }"
+}
+
+ssh_read() {
+  local remote
+  remote="$(build_remote_shell "$@")"
+  run_read ssh "$SSH_HOST" "$remote"
+}
+
+ssh_write() {
+  local remote
+  remote="$(build_remote_shell "$@")"
+  run_write ssh "$SSH_HOST" "$remote"
+}
+
+resolve_env_config() {
+  case "$TARGET_ENV" in
+    qa)
+      SSH_HOST="qa"
+      DOKPLOY_INSTANCE="bento"
+      DOKPLOY_COMPOSE_NAME="qa"
+      ENV_SUFFIX="qa.pharmia.ca"
+      ;;
+    prod)
+      SSH_HOST="prod"
+      DOKPLOY_INSTANCE="prod"
+      DOKPLOY_COMPOSE_NAME="canary"
+      ENV_SUFFIX="pharmia.ca"
+      ;;
+    *)
+      die "Unsupported --env: $TARGET_ENV (use qa or prod)"
+      ;;
+  esac
+}
+
+resolve_ssh_host_ip() {
+  ssh -G "$SSH_HOST" 2>/dev/null | awk '$1=="hostname"{print $2; exit}'
+}
+
+qa_psql_script() {
+  local mode="$1"
+  local script="$2"
+  shift 2
+
+  local -a remote_cmd=(
+    sudo
+    docker
+    exec
+    -i
+    "$DB_CONTAINER"
+    psql
+    -U
+    postgres
+    -d
+    postgres
+    -v
+    ON_ERROR_STOP=1
+  )
+  remote_cmd+=("$@")
+
+  local remote
+  remote="$(build_remote_shell "${remote_cmd[@]}")"
+  set_last_cmd ssh "$SSH_HOST" "$remote"
+
+  if [[ "$mode" == "write" && "$DRY_RUN" == true ]]; then
+    log "DRY-RUN write: $LAST_CMD"
+    return 0
+  fi
+
+  debug "run($mode): $LAST_CMD"
+  printf '%s\n' "$script" | ssh "$SSH_HOST" "$remote"
+}
+
+sql_json_one() {
+  local script="$1"
+  shift
+  local result
+  result="$(qa_psql_script read "$script" -X -A -t "$@")"
+  if [[ -z "$result" ]]; then
+    printf 'null\n'
+  else
+    printf '%s\n' "$result"
+  fi
+}
+
+sql_scalar() {
+  local script="$1"
+  shift
+  local result
+  result="$(qa_psql_script read "$script" -X -A -t "$@")"
+  printf '%s' "$result"
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
+resolve_override() {
+  local current="$1"
+  local fallback="$2"
+  if [[ -n "$current" ]]; then
+    printf '%s' "$current"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
+normalize_phone() {
+  local raw="$1"
+  local digits=""
+
+  [[ -n "$raw" ]] || die "--owner-phone cannot be empty"
+  if [[ "$raw" == +* ]]; then
+    [[ "$raw" =~ ^\+[0-9[:space:]().-]+$ ]] || die "--owner-phone must be digits, spaces, (), ., or - after +"
+    digits="$(tr -cd '0-9' <<<"$raw")"
+    if (( ${#digits} < 10 || ${#digits} > 15 )); then
+      die "--owner-phone with + must contain 10 to 15 digits"
+    fi
+    printf '+%s' "$digits"
+    return
+  fi
+
+  [[ "$raw" =~ ^[0-9[:space:]().-]+$ ]] || die "--owner-phone must be a North America number"
+  digits="$(tr -cd '0-9' <<<"$raw")"
+  case "${#digits}" in
+    10)
+      printf '+1%s' "$digits"
+      ;;
+    11)
+      [[ "${digits:0:1}" == "1" ]] || die "--owner-phone with 11 digits must start with 1"
+      printf '+%s' "$digits"
+      ;;
+    *)
+      die "--owner-phone must be 10 digits, 11 digits starting with 1, or an explicit + number with 10 to 15 digits"
+      ;;
+  esac
+}
+
+tenant_matches() {
+  local current_json="$1"
+  local desired_json="$2"
+  jq -e --argjson desired "$desired_json" '
+    . != null and
+    .companyName == $desired.companyName and
+    .light == $desired.light and
+    .dark == $desired.dark and
+    .defaultNoteFormat == $desired.defaultNoteFormat and
+    .registrationEnabled == $desired.registrationEnabled and
+    .echoEnabled == $desired.echoEnabled and
+    .copilotEnabled == $desired.copilotEnabled and
+    .consultationEnabled == $desired.consultationEnabled and
+    .patientConsultationCreationEnabled == $desired.patientConsultationCreationEnabled
+  ' <<<"$current_json" >/dev/null
+}
+
+user_matches() {
+  local current_json="$1"
+  local desired_json="$2"
+  jq -e --argjson desired "$desired_json" '
+    . != null and
+    .email == $desired.email and
+    ($desired.phone_number == null or .phone_number == $desired.phone_number) and
+    (.email_verified == true or .email_verified == false or .email_verified == null)
+  ' <<<"$current_json" >/dev/null
+}
+
+membership_matches() {
+  local current_json="$1"
+  jq -e --arg slug "$SLUG" '
+    . != null and
+    .tenant == $slug and
+    .status == "enrolled" and
+    .role == "tenantadministrator" and
+    .expires_at == null
+  ' <<<"$current_json" >/dev/null
+}
+
+resolve_compose() {
+  local project_payload
+  # NOTE: `compose one` regressed in @dokploy/cli (HTTP 400), so we derive
+  # everything (composeId + appName + serverIp) from `project all --json` in
+  # a single call. The project payload already contains the nested compose
+  # entries with appName and the optional server.ipAddress.
+  project_payload="$(run_read dokploy "$DOKPLOY_INSTANCE" project all --json | jq -cer \
+    --arg project "$DOKPLOY_PROJECT_NAME" \
+    --arg compose "$DOKPLOY_COMPOSE_NAME" '
+      .[]
+      | select(.name == $project)
+      | .environments[]?
+      | .compose[]?
+      | select(.name == $compose)
+      | {composeId, appName, serverIp: (.server.ipAddress // "")}
+    ')"
+  COMPOSE_ID="$(jq -r '.composeId' <<<"$project_payload")"
+  APP_NAME="$(jq -r '.appName' <<<"$project_payload")"
+  SERVER_IP="$(jq -r '.serverIp' <<<"$project_payload")"
+  if [[ -z "$SERVER_IP" || "$SERVER_IP" == "null" ]]; then
+    SERVER_IP="$(resolve_ssh_host_ip)"
+  fi
+  DB_CONTAINER="${APP_NAME}-db-1"
+
+  debug "compose_id=$COMPOSE_ID app_name=$APP_NAME server_ip=$SERVER_IP db_container=$DB_CONTAINER"
+}
+
+get_dns_records_json() {
+  run_read cfdns ls "$ZONE" --name "$FQDN" --json
+}
+
+get_domain_entries_json() {
+  run_read dokploy "$DOKPLOY_INSTANCE" domain by-compose-id --composeId "$COMPOSE_ID" --json | jq -c --arg host "$FQDN" '
+    [
+      .[]
+      | select(.host == $host)
+      | {
+          domainId,
+          host,
+          https,
+          port,
+          path,
+          serviceName,
+          domainType,
+          certificateType,
+          internalPath,
+          stripPath
+        }
+    ]
+  '
+}
+
+domain_entries_match() {
+  local domain_json="$1"
+  jq -e '
+    length == 1 and
+    .[0].https == true and
+    (.[] | .port == 5173) and
+    (.[] | .path == "/") and
+    (.[] | .serviceName == "web") and
+    (.[] | .domainType == "compose") and
+    (.[] | .certificateType == "letsencrypt") and
+    (.[] | .internalPath == "/") and
+    (.[] | .stripPath == false)
+  ' <<<"$domain_json" >/dev/null
+}
+
+latest_deployment_id() {
+  run_read dokploy "$DOKPLOY_INSTANCE" deployment all-by-compose --composeId "$COMPOSE_ID" --json | jq -r '
+    sort_by(.createdAt) | last | .deploymentId // empty
+  '
+}
+
+latest_deployment_json() {
+  run_read dokploy "$DOKPLOY_INSTANCE" deployment all-by-compose --composeId "$COMPOSE_ID" --json | jq -cer '
+    sort_by(.createdAt) | last | {deploymentId, status, createdAt, logPath}
+  '
+}
+
+wait_for_deployment() {
+  local previous_deployment_id="$1"
+  local deadline=$((SECONDS + DEPLOY_TIMEOUT_SECONDS))
+  local latest_json latest_id latest_status latest_log_path
+
+  phase "wait_dokploy_deploy"
+  while (( SECONDS < deadline )); do
+    latest_json="$(latest_deployment_json)"
+    latest_id="$(jq -r '.deploymentId // empty' <<<"$latest_json")"
+    latest_status="$(jq -r '.status // empty' <<<"$latest_json")"
+    latest_log_path="$(jq -r '.logPath // empty' <<<"$latest_json")"
+
+    if [[ -n "$latest_id" && "$latest_id" != "$previous_deployment_id" ]]; then
+      debug "deployment_id=$latest_id status=$latest_status log_path=$latest_log_path"
+      case "$latest_status" in
+        done)
+          log "Dokploy deployment finished: $latest_id"
+          return 0
+          ;;
+        error)
+          die "Dokploy deployment failed: $latest_id logPath=$latest_log_path"
+          ;;
+      esac
+    fi
+
+    sleep "$POLL_INTERVAL_SECONDS"
+  done
+
+  die "Timed out waiting for Dokploy deployment on compose $COMPOSE_ID"
+}
+
+wait_for_https() {
+  local deadline=$((SECONDS + HTTPS_TIMEOUT_SECONDS))
+  local http_code=""
+
+  phase "wait_https"
+  while (( SECONDS < deadline )); do
+    if http_code="$(ssh_read curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$FQDN" 2>/dev/null)"; then
+      debug "https_code=$http_code fqdn=$FQDN"
+      if [[ "$http_code" == 2* || "$http_code" == 3* ]]; then
+        log "HTTPS ready: https://$FQDN ($http_code)"
+        return 0
+      fi
+    fi
+    sleep "$POLL_INTERVAL_SECONDS"
+  done
+
+  die "Timed out waiting for HTTPS on https://$FQDN"
+}
+
+wait_for_db_ready() {
+  local deadline=$((SECONDS + DB_READY_TIMEOUT_SECONDS))
+
+  phase "wait_db"
+  while (( SECONDS < deadline )); do
+    if ssh_read sudo docker exec -i "$DB_CONTAINER" psql -U postgres -d postgres -X -A -t -c 'select 1' >/dev/null 2>&1; then
+      log "DB ready: $DB_CONTAINER"
+      return 0
+    fi
+    sleep "$POLL_INTERVAL_SECONDS"
+  done
+
+  die "Timed out waiting for DB readiness in $DB_CONTAINER"
+}
+
+ensure_dns() {
+  local dns_records_json exact_a_count exact_a_id exact_a_ip exact_a_proxied
+  dns_records_json="$(get_dns_records_json)"
+
+  if jq -e --arg fqdn "$FQDN" '.[] | select(.name == $fqdn and .type != "A")' <<<"$dns_records_json" >/dev/null; then
+    die "Non-A DNS record already exists for $FQDN. Clean it up before rerunning."
+  fi
+
+  exact_a_count="$(jq -r --arg fqdn "$FQDN" '[.[] | select(.name == $fqdn and .type == "A")] | length' <<<"$dns_records_json")"
+
+  case "$exact_a_count" in
+    0)
+      DNS_STATUS="created"
+      run_write cfdns add "$ZONE" A "$FQDN" "$SERVER_IP" >/dev/null
+      ;;
+    1)
+      exact_a_id="$(jq -r --arg fqdn "$FQDN" '[.[] | select(.name == $fqdn and .type == "A")] | .[0].id // empty' <<<"$dns_records_json")"
+      exact_a_ip="$(jq -r --arg fqdn "$FQDN" '[.[] | select(.name == $fqdn and .type == "A")] | .[0].content // empty' <<<"$dns_records_json")"
+      exact_a_proxied="$(jq -r --arg fqdn "$FQDN" '[.[] | select(.name == $fqdn and .type == "A")] | .[0].proxied // false' <<<"$dns_records_json")"
+      if [[ "$exact_a_proxied" != "false" ]]; then
+        die "A record for $FQDN is proxied in Cloudflare. Fix it manually before rerunning."
+      fi
+      if [[ "$exact_a_ip" == "$SERVER_IP" ]]; then
+        DNS_STATUS="ok"
+      else
+        DNS_STATUS="updated"
+        run_write cfdns set "$ZONE" "$exact_a_id" "$SERVER_IP" >/dev/null
+      fi
+      ;;
+    *)
+      die "Multiple A records already exist for $FQDN. Clean them up manually before rerunning."
+      ;;
+  esac
+}
+
+ensure_domain() {
+  local domains_json domain_count domain_id
+  domains_json="$(get_domain_entries_json)"
+
+  if domain_entries_match "$domains_json"; then
+    DOMAIN_STATUS="ok"
+    return 0
+  fi
+
+  domain_count="$(jq -r 'length' <<<"$domains_json")"
+
+  case "$domain_count" in
+    0)
+      DOMAIN_STATUS="created"
+      run_write dokploy "$DOKPLOY_INSTANCE" domain create \
+        --host "$FQDN" \
+        --https \
+        --certificateType "$CERTIFICATE_TYPE" \
+        --composeId "$COMPOSE_ID" \
+        --serviceName "$WEB_SERVICE" \
+        --port "$WEB_PORT" \
+        --domainType "$DOMAIN_TYPE" \
+        --path "/" \
+        --internalPath "/" >/dev/null
+      ;;
+    1)
+      DOMAIN_STATUS="updated"
+      domain_id="$(jq -r '.[0].domainId' <<<"$domains_json")"
+      run_write dokploy "$DOKPLOY_INSTANCE" domain update \
+        --domainId "$domain_id" \
+        --host "$FQDN" \
+        --https \
+        --certificateType "$CERTIFICATE_TYPE" \
+        --serviceName "$WEB_SERVICE" \
+        --port "$WEB_PORT" \
+        --domainType "$DOMAIN_TYPE" \
+        --path "/" \
+        --internalPath "/" >/dev/null
+      ;;
+    *)
+      die "Multiple Dokploy domain entries already exist for $FQDN on compose $COMPOSE_ID. Clean them up manually before rerunning."
+      ;;
+  esac
+}
+
+trigger_redeploy_if_needed() {
+  local previous_deployment_id output
+
+  if [[ "$DOMAIN_STATUS" == "ok" ]]; then
+    DEPLOY_STATUS="skipped"
+    return 0
+  fi
+
+  previous_deployment_id="$(latest_deployment_id)"
+
+  phase "dokploy_redeploy"
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY-RUN write: dokploy $DOKPLOY_INSTANCE compose redeploy --composeId $COMPOSE_ID"
+    DEPLOY_STATUS="planned"
+    return 0
+  fi
+
+  set_last_cmd dokploy "$DOKPLOY_INSTANCE" compose redeploy --composeId "$COMPOSE_ID"
+  debug "run(write): $LAST_CMD"
+  if output="$(dokploy "$DOKPLOY_INSTANCE" compose redeploy --composeId "$COMPOSE_ID" 2>&1)"; then
+    debug "compose redeploy accepted"
+  elif grep -qE 'No procedure found on path|unknown command' <<<"$output"; then
+    log "compose redeploy unavailable, falling back to compose deploy"
+    set_last_cmd dokploy "$DOKPLOY_INSTANCE" compose deploy --composeId "$COMPOSE_ID"
+    debug "run(write): $LAST_CMD"
+    dokploy "$DOKPLOY_INSTANCE" compose deploy --composeId "$COMPOSE_ID" >/dev/null
+  else
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+
+  DEPLOY_STATUS="triggered"
+  wait_for_deployment "$previous_deployment_id"
+}
+
+print_plan() {
+  cat <<EOF
+plan.url=https://$FQDN
+plan.compose_id=$COMPOSE_ID
+plan.app_name=$APP_NAME
+plan.server_ip=$SERVER_IP
+plan.dns=$DNS_STATUS
+plan.domain=$DOMAIN_STATUS
+plan.redeploy=$DEPLOY_STATUS
+plan.tenant=$TENANT_STATUS
+plan.owner_user=$USER_STATUS
+plan.owner_phone=$NORMALIZED_OWNER_PHONE
+plan.membership=$MEMBERSHIP_STATUS
+plan.sessions_before=$SESSION_COUNT_BEFORE
+plan.flags.registrationEnabled=${DESIRED_REGISTRATION_ENABLED:-}
+plan.flags.echoEnabled=${DESIRED_ECHO_ENABLED:-}
+plan.flags.copilotEnabled=${DESIRED_COPILOT_ENABLED:-}
+plan.flags.consultationEnabled=${DESIRED_CONSULTATION_ENABLED:-}
+plan.flags.patientConsultationCreationEnabled=${DESIRED_PATIENT_CONSULTATION_CREATION_ENABLED:-}
+EOF
+}
+
+# ------------ preflight ------------
+
+preflight_offline() {
+  phase "preflight_offline"
+  for bin in jq ssh; do
+    require_command "$bin"
+  done
+
+  if [[ "$COMMAND" == "create" ]]; then
+    [[ -n "$SLUG" ]] || die "--slug is required"
+    [[ -n "$COMPANY_NAME" ]] || die "--company-name is required"
+    [[ -n "$OWNER_EMAIL" ]] || die "--owner-email is required"
+    [[ -n "$OWNER_FIRST_NAME" ]] || die "--owner-first-name is required"
+    [[ -n "$OWNER_LAST_NAME" ]] || die "--owner-last-name is required"
+    [[ -n "$TEMPLATE_TENANT" ]] || die "--template-tenant is required"
+    [[ "$SLUG" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || die "--slug must match ^[a-z0-9]+(-[a-z0-9]+)*$"
+    [[ "$TEMPLATE_TENANT" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || die "--template-tenant must match ^[a-z0-9]+(-[a-z0-9]+)*$"
+    [[ "$OWNER_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || die "--owner-email must look like an email address"
+    require_command cfdns
+    require_command dokploy
+    require_command curl
+  elif [[ "$COMMAND" == "status" ]]; then
+    [[ -n "$SLUG" ]] || die "--slug is required"
+    [[ "$SLUG" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || die "--slug must match ^[a-z0-9]+(-[a-z0-9]+)*$"
+    require_command cfdns
+    require_command dokploy
+  fi
+
+  FQDN="${SLUG}.${ENV_SUFFIX}"
+  if [[ -n "$OWNER_PHONE" ]]; then
+    NORMALIZED_OWNER_PHONE="$(normalize_phone "$OWNER_PHONE")"
+  fi
+}
+
+preflight_online() {
+  phase "preflight_online"
+  debug "env=$TARGET_ENV ssh_host=$SSH_HOST dokploy_instance=$DOKPLOY_INSTANCE compose_name=$DOKPLOY_COMPOSE_NAME fqdn=$FQDN"
+  run_read ssh "$SSH_HOST" true >/dev/null
+  resolve_compose
+  wait_for_db_ready
+}
+
+# ------------ list ------------
+
+cmd_list() {
+  preflight_offline
+  preflight_online
+
+  local sql
+  read -r -d '' sql <<'SQL' || true
+SELECT
+  t.name AS slug,
+  COALESCE(to_char(t."createdAt", 'YYYY-MM-DD HH24:MI'), '-') AS created_at,
+  COALESCE(t.active::text, '-') AS active,
+  COALESCE((
+    SELECT u.email
+    FROM ba_user_tenant_membership m
+    JOIN ba_user u ON u.id = m.user_id
+    WHERE m.tenant = t.name
+      AND m.role = 'tenantadministrator'
+      AND m.status = 'enrolled'
+    ORDER BY m."createdAt" ASC
+    LIMIT 1
+  ), '-') AS owner_email
+FROM tenant t
+WHERE COALESCE(t.system, '') <> 'system' OR t.system IS NULL
+ORDER BY t."createdAt" ASC NULLS LAST, t.name ASC;
+SQL
+
+  local rows
+  rows="$(qa_psql_script read "$sql" -X -A -F $'\t' -t)"
+  printf 'slug\tcreated_at\tactive\towner_email\n'
+  if [[ -n "$rows" ]]; then
+    printf '%s\n' "$rows"
+  fi
+}
+
+# ------------ status ------------
+
+# Returns: prints "ok" or "missing" lines, sets STATE_* vars, sets STATUS_EXIT
+cmd_status() {
+  preflight_offline
+  preflight_online
+
+  local dns_json a_count a_ip a_proxied
+  dns_json="$(get_dns_records_json)"
+  a_count="$(jq -r --arg fqdn "$FQDN" '[.[] | select(.name == $fqdn and .type == "A")] | length' <<<"$dns_json")"
+  a_ip="$(jq -r --arg fqdn "$FQDN" '[.[] | select(.name == $fqdn and .type == "A")] | .[0].content // "-"' <<<"$dns_json")"
+  a_proxied="$(jq -r --arg fqdn "$FQDN" '[.[] | select(.name == $fqdn and .type == "A")] | .[0].proxied // false' <<<"$dns_json")"
+
+  local dns_mark="MISSING" dns_detail="no A record"
+  if [[ "$a_count" -ge 1 ]]; then
+    dns_mark="OK"
+    dns_detail="ip=$a_ip proxied=$a_proxied"
+    if [[ "$a_count" -gt 1 ]]; then
+      dns_mark="PARTIAL"
+      dns_detail="multiple A records ($a_count)"
+    fi
+  fi
+
+  local domains_json domain_count domain_service="-" domain_mark="MISSING" domain_detail="no domain entry"
+  domains_json="$(get_domain_entries_json)"
+  domain_count="$(jq -r 'length' <<<"$domains_json")"
+  if [[ "$domain_count" -ge 1 ]]; then
+    domain_service="$(jq -r '.[0].serviceName // "-"' <<<"$domains_json")"
+    domain_mark="OK"
+    domain_detail="service=$domain_service https=$(jq -r '.[0].https' <<<"$domains_json")"
+    if [[ "$domain_count" -gt 1 ]]; then
+      domain_mark="PARTIAL"
+      domain_detail="multiple domain entries ($domain_count)"
+    fi
+  fi
+
+  local tenant_sql tenant_json tenant_mark="MISSING" tenant_detail="no tenant row"
+  read -r -d '' tenant_sql <<'SQL' || true
+SELECT to_jsonb(t)
+FROM (
+  SELECT name, "companyName", active, "createdAt"
+  FROM tenant
+  WHERE name = :'slug'
+) t;
+SQL
+  tenant_json="$(sql_json_one "$tenant_sql" -v slug="$SLUG")"
+  if [[ "$tenant_json" != "null" ]]; then
+    tenant_mark="OK"
+    tenant_detail="active=$(jq -r '.active' <<<"$tenant_json") company=\"$(jq -r '.companyName' <<<"$tenant_json")\""
+  fi
+
+  local user_sql user_json user_mark="MISSING" user_detail="no owner user (no membership points here)" owner_id="-"
+  local membership_sql membership_json membership_mark="MISSING" membership_detail="no membership row"
+
+  read -r -d '' membership_sql <<'SQL' || true
+SELECT to_jsonb(t)
+FROM (
+  SELECT
+    m.user_id,
+    m.tenant,
+    m.status,
+    m.role,
+    m.expires_at,
+    u.email AS owner_email
+  FROM ba_user_tenant_membership m
+  JOIN ba_user u ON u.id = m.user_id
+  WHERE m.tenant = :'slug'
+    AND m.role = 'tenantadministrator'
+  ORDER BY m."createdAt" ASC
+  LIMIT 1
+) t;
+SQL
+  membership_json="$(sql_json_one "$membership_sql" -v slug="$SLUG")"
+  if [[ "$membership_json" != "null" ]]; then
+    local mem_status mem_role owner_email_found
+    mem_status="$(jq -r '.status' <<<"$membership_json")"
+    mem_role="$(jq -r '.role' <<<"$membership_json")"
+    owner_id="$(jq -r '.user_id' <<<"$membership_json")"
+    owner_email_found="$(jq -r '.owner_email' <<<"$membership_json")"
+    membership_mark="OK"
+    membership_detail="status=$mem_status role=$mem_role"
+
+    read -r -d '' user_sql <<'SQL' || true
+SELECT to_jsonb(t)
+FROM (
+  SELECT id, email, email_verified, tenant, role
+  FROM ba_user
+  WHERE id = :'owner_id'
+) t;
+SQL
+    user_json="$(sql_json_one "$user_sql" -v owner_id="$owner_id")"
+    if [[ "$user_json" != "null" ]]; then
+      user_mark="OK"
+      user_detail="email=$owner_email_found id=$owner_id verified=$(jq -r '.email_verified' <<<"$user_json")"
+    else
+      user_detail="membership points to orphan user_id=$owner_id"
+    fi
+  fi
+
+  printf '\n'
+  printf 'pharmia-tenant status  slug=%s  env=%s  fqdn=%s\n' "$SLUG" "$TARGET_ENV" "$FQDN"
+  printf '  DNS (Cloudflare)     %-8s  %s\n' "[$dns_mark]" "$dns_detail"
+  printf '  Dokploy domain       %-8s  %s\n' "[$domain_mark]" "$domain_detail"
+  printf '  DB tenant row        %-8s  %s\n' "[$tenant_mark]" "$tenant_detail"
+  printf '  DB owner user        %-8s  %s\n' "[$user_mark]" "$user_detail"
+  printf '  DB owner membership  %-8s  %s\n' "[$membership_mark]" "$membership_detail"
+  printf '\n'
+
+  local ok_count=0 miss_count=0
+  for mark in "$dns_mark" "$domain_mark" "$tenant_mark" "$user_mark" "$membership_mark"; do
+    case "$mark" in
+      OK) ok_count=$((ok_count+1)) ;;
+      MISSING) miss_count=$((miss_count+1)) ;;
+      PARTIAL) ;;  # counted as neither full ok nor full miss
+    esac
+  done
+
+  if (( ok_count == 5 )); then
+    printf 'verdict: fully provisioned\n'
+    return 0
+  elif (( miss_count == 5 )); then
+    printf 'verdict: fully missing\n'
+    return 2
+  else
+    printf 'verdict: partial (ok=%d missing=%d)\n' "$ok_count" "$miss_count"
+    return 1
+  fi
+}
+
+# ------------ create ------------
+
+cmd_create() {
+  # Arm audit log up front so failed prod-gate attempts are recorded too.
+  AUDIT_ARMED=true
+
+  preflight_offline
+
+  if [[ "$TARGET_ENV" == "prod" && "$DRY_RUN" != true && "$CONFIRM_PROD" != true ]]; then
+    die "prod create requires --confirm-prod (see CLAUDE.md: always use --confirm-prod for prod writes)"
+  fi
+
+  if [[ "$DRY_RUN" == true && "$CHECK_LIVE" != true ]]; then
+    log "dry-run: skipping online preflight (use --check-live to force)"
+    # Minimal placeholders so print_plan doesn't explode
+    COMPOSE_ID="(dry-run)"
+    APP_NAME="(dry-run)"
+    SERVER_IP="(dry-run)"
+    DNS_STATUS="(dry-run)"
+    DOMAIN_STATUS="(dry-run)"
+    DEPLOY_STATUS="(dry-run)"
+    TENANT_STATUS="(dry-run)"
+    USER_STATUS="(dry-run)"
+    MEMBERSHIP_STATUS="(dry-run)"
+    DESIRED_REGISTRATION_ENABLED="${REGISTRATION_ENABLED:-template}"
+    DESIRED_ECHO_ENABLED="${ECHO_ENABLED:-template}"
+    DESIRED_COPILOT_ENABLED="${COPILOT_ENABLED:-template}"
+    DESIRED_CONSULTATION_ENABLED="${CONSULTATION_ENABLED:-template}"
+    DESIRED_PATIENT_CONSULTATION_CREATION_ENABLED="${PATIENT_CONSULTATION_CREATION_ENABLED:-template}"
+    print_plan
+    return 0
+  fi
+
+  preflight_online
+
+  OWNER_NAME="${OWNER_FIRST_NAME} ${OWNER_LAST_NAME}"
+
+  local template_tenant_sql
+  read -r -d '' template_tenant_sql <<'SQL' || true
+SELECT to_jsonb(t)
+FROM (
+  SELECT
+    name,
+    "companyName",
+    light,
+    dark,
+    "defaultNoteFormat",
+    "registrationEnabled",
+    "echoEnabled",
+    "copilotEnabled",
+    "consultationEnabled",
+    "patientConsultationCreationEnabled"
+  FROM tenant
+  WHERE name = :'template_tenant'
+) t;
+SQL
+
+  TEMPLATE_JSON="$(sql_json_one "$template_tenant_sql" -v template_tenant="$TEMPLATE_TENANT")"
+  [[ "$TEMPLATE_JSON" != "null" ]] || die "Template tenant not found in ${TARGET_ENV} DB: $TEMPLATE_TENANT"
+
+  DESIRED_LIGHT="$(resolve_override "$LIGHT" "$(jq -r '.light' <<<"$TEMPLATE_JSON")")"
+  DESIRED_DARK="$(resolve_override "$DARK" "$(jq -r '.dark' <<<"$TEMPLATE_JSON")")"
+  DESIRED_DEFAULT_NOTE_FORMAT="$(resolve_override "$DEFAULT_NOTE_FORMAT" "$(jq -r '.defaultNoteFormat' <<<"$TEMPLATE_JSON")")"
+  DESIRED_REGISTRATION_ENABLED="$(resolve_override "$REGISTRATION_ENABLED" "$(jq -r '.registrationEnabled' <<<"$TEMPLATE_JSON")")"
+  DESIRED_ECHO_ENABLED="$(resolve_override "$ECHO_ENABLED" "$(jq -r '.echoEnabled' <<<"$TEMPLATE_JSON")")"
+  DESIRED_COPILOT_ENABLED="$(resolve_override "$COPILOT_ENABLED" "$(jq -r '.copilotEnabled' <<<"$TEMPLATE_JSON")")"
+  DESIRED_CONSULTATION_ENABLED="$(resolve_override "$CONSULTATION_ENABLED" "$(jq -r '.consultationEnabled' <<<"$TEMPLATE_JSON")")"
+  DESIRED_PATIENT_CONSULTATION_CREATION_ENABLED="$(resolve_override "$PATIENT_CONSULTATION_CREATION_ENABLED" "$(jq -r '.patientConsultationCreationEnabled' <<<"$TEMPLATE_JSON")")"
+
+  DESIRED_TENANT_JSON="$(jq -nc \
+    --arg companyName "$COMPANY_NAME" \
+    --arg light "$DESIRED_LIGHT" \
+    --arg dark "$DESIRED_DARK" \
+    --arg defaultNoteFormat "$DESIRED_DEFAULT_NOTE_FORMAT" \
+    --argjson registrationEnabled "$DESIRED_REGISTRATION_ENABLED" \
+    --argjson echoEnabled "$DESIRED_ECHO_ENABLED" \
+    --argjson copilotEnabled "$DESIRED_COPILOT_ENABLED" \
+    --argjson consultationEnabled "$DESIRED_CONSULTATION_ENABLED" \
+    --argjson patientConsultationCreationEnabled "$DESIRED_PATIENT_CONSULTATION_CREATION_ENABLED" \
+    '{
+      companyName: $companyName,
+      light: $light,
+      dark: $dark,
+      defaultNoteFormat: $defaultNoteFormat,
+      registrationEnabled: $registrationEnabled,
+      echoEnabled: $echoEnabled,
+      copilotEnabled: $copilotEnabled,
+      consultationEnabled: $consultationEnabled,
+      patientConsultationCreationEnabled: $patientConsultationCreationEnabled
+    }')"
+
+  DESIRED_USER_JSON="$(jq -nc \
+    --arg email "$OWNER_EMAIL" \
+    --arg tenant "$SLUG" \
+    --arg role "tenantadministrator" \
+    --arg given_name "$OWNER_FIRST_NAME" \
+    --arg family_name "$OWNER_LAST_NAME" \
+    --arg name "$OWNER_NAME" \
+    --arg phone_number "$NORMALIZED_OWNER_PHONE" \
+    '{
+      email: $email,
+      tenant: $tenant,
+      role: $role,
+      given_name: $given_name,
+      family_name: $family_name,
+      name: $name,
+      email_verified: true,
+      phone_number: ($phone_number | if length == 0 then null else . end)
+    }')"
+
+  local existing_tenant_sql existing_user_sql existing_membership_sql session_count_sql
+
+  read -r -d '' existing_tenant_sql <<'SQL' || true
+SELECT to_jsonb(t)
+FROM (
+  SELECT
+    name,
+    "companyName",
+    light,
+    dark,
+    "defaultNoteFormat",
+    "registrationEnabled",
+    "echoEnabled",
+    "copilotEnabled",
+    "consultationEnabled",
+    "patientConsultationCreationEnabled"
+  FROM tenant
+  WHERE name = :'slug'
+) t;
+SQL
+
+  read -r -d '' existing_user_sql <<'SQL' || true
+SELECT to_jsonb(t)
+FROM (
+  SELECT
+    id,
+    email,
+    tenant,
+    role,
+    given_name,
+    family_name,
+    name,
+    email_verified,
+    phone_number
+  FROM ba_user
+  WHERE email = :'owner_email'
+) t;
+SQL
+
+  read -r -d '' existing_membership_sql <<'SQL' || true
+SELECT to_jsonb(t)
+FROM (
+  SELECT
+    m.user_id,
+    m.tenant,
+    m.status,
+    m.role,
+    m.expires_at
+  FROM ba_user_tenant_membership m
+  JOIN ba_user u ON u.id = m.user_id
+  WHERE u.email = :'owner_email'
+    AND m.tenant = :'slug'
+) t;
+SQL
+
+  read -r -d '' session_count_sql <<'SQL' || true
+SELECT count(*)
+FROM ba_session s
+JOIN ba_user u ON u.id = s.user_id
+WHERE u.email = :'owner_email';
+SQL
+
+  EXISTING_TENANT_JSON="$(sql_json_one "$existing_tenant_sql" -v slug="$SLUG")"
+  EXISTING_USER_JSON="$(sql_json_one "$existing_user_sql" -v owner_email="$OWNER_EMAIL")"
+  EXISTING_MEMBERSHIP_JSON="$(sql_json_one "$existing_membership_sql" -v owner_email="$OWNER_EMAIL" -v slug="$SLUG")"
+  SESSION_COUNT_BEFORE="$(sql_scalar "$session_count_sql" -v owner_email="$OWNER_EMAIL")"
+  SESSION_COUNT_BEFORE="${SESSION_COUNT_BEFORE:-0}"
+  EXISTING_USER_PHONE=""
+  if [[ "$EXISTING_USER_JSON" != "null" ]]; then
+    EXISTING_USER_PHONE="$(jq -r '.phone_number // ""' <<<"$EXISTING_USER_JSON")"
+  fi
+
+  if [[ "$EXISTING_TENANT_JSON" == "null" ]]; then
+    TENANT_STATUS="created"
+  elif tenant_matches "$EXISTING_TENANT_JSON" "$DESIRED_TENANT_JSON"; then
+    TENANT_STATUS="ok"
+  else
+    TENANT_STATUS="updated"
+  fi
+
+  if [[ "$EXISTING_USER_JSON" == "null" ]]; then
+    USER_STATUS="created"
+  elif [[ -n "$NORMALIZED_OWNER_PHONE" && -n "$EXISTING_USER_PHONE" && "$EXISTING_USER_PHONE" != "$NORMALIZED_OWNER_PHONE" ]]; then
+    die "Existing user $OWNER_EMAIL already has phone_number=$EXISTING_USER_PHONE; refusing to overwrite with $NORMALIZED_OWNER_PHONE"
+  elif [[ -n "$NORMALIZED_OWNER_PHONE" && -z "$EXISTING_USER_PHONE" ]]; then
+    USER_STATUS="updated"
+  else
+    USER_STATUS="existing"
+  fi
+
+  if [[ "$EXISTING_MEMBERSHIP_JSON" == "null" ]]; then
+    MEMBERSHIP_STATUS="created"
+  elif membership_matches "$EXISTING_MEMBERSHIP_JSON"; then
+    MEMBERSHIP_STATUS="ok"
+  else
+    MEMBERSHIP_STATUS="updated"
+  fi
+
+  if [[ "$SESSION_COUNT_BEFORE" == "0" ]]; then
+    SESSION_STATUS="ok"
+  else
+    SESSION_STATUS="untouched"
+  fi
+
+  ensure_dns
+  ensure_domain
+  if [[ "$DOMAIN_STATUS" == "ok" ]]; then
+    DEPLOY_STATUS="skipped"
+  else
+    DEPLOY_STATUS="planned"
+  fi
+
+  debug "template_tenant=$TEMPLATE_TENANT fqdn=$FQDN"
+  debug "state dns=$DNS_STATUS domain=$DOMAIN_STATUS deploy=$DEPLOY_STATUS tenant=$TENANT_STATUS user=$USER_STATUS membership=$MEMBERSHIP_STATUS sessions_before=$SESSION_COUNT_BEFORE"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    print_plan
+    return 0
+  fi
+
+  trigger_redeploy_if_needed
+  wait_for_https
+  wait_for_db_ready
+
+  phase "ensure_db"
+  local upsert_sql
+  read -r -d '' upsert_sql <<'SQL' || true
+WITH upsert_tenant AS (
+  INSERT INTO tenant (
+    name,
+    "companyName",
+    light,
+    dark,
+    active,
+    system,
+    "defaultNoteFormat",
+    "registrationEnabled",
+    "echoEnabled",
+    "patientConsultationCreationEnabled",
+    "copilotEnabled",
+    "consultationEnabled"
+  ) VALUES (
+    :'slug',
+    :'company_name',
+    :'light',
+    :'dark',
+    true,
+    'pharmia',
+    :'default_note_format',
+    :'registration_enabled'::boolean,
+    :'echo_enabled'::boolean,
+    :'patient_consultation_creation_enabled'::boolean,
+    :'copilot_enabled'::boolean,
+    :'consultation_enabled'::boolean
+  )
+  ON CONFLICT (name) DO UPDATE SET
+    "companyName" = EXCLUDED."companyName",
+    light = EXCLUDED.light,
+    dark = EXCLUDED.dark,
+    "defaultNoteFormat" = EXCLUDED."defaultNoteFormat",
+    "registrationEnabled" = EXCLUDED."registrationEnabled",
+    "echoEnabled" = EXCLUDED."echoEnabled",
+    "patientConsultationCreationEnabled" = EXCLUDED."patientConsultationCreationEnabled",
+    "copilotEnabled" = EXCLUDED."copilotEnabled",
+    "consultationEnabled" = EXCLUDED."consultationEnabled",
+    "updatedAt" = now()
+  RETURNING name
+),
+inserted_user AS (
+  INSERT INTO ba_user (
+    id,
+    email,
+    email_verified,
+    name,
+    given_name,
+    family_name,
+    phone_number,
+    tenant,
+    role
+  ) VALUES (
+    gen_random_uuid()::text,
+    :'owner_email',
+    true,
+    :'owner_name',
+    :'owner_first_name',
+    :'owner_last_name',
+    NULLIF(:'owner_phone', ''),
+    :'slug',
+    'tenantadministrator'
+  )
+  ON CONFLICT (email) DO NOTHING
+  RETURNING id
+),
+updated_user AS (
+  UPDATE ba_user
+  SET
+    phone_number = NULLIF(:'owner_phone', ''),
+    "updatedAt" = now()
+  WHERE email = :'owner_email'
+    AND NOT EXISTS (SELECT 1 FROM inserted_user)
+    AND NULLIF(:'owner_phone', '') IS NOT NULL
+    AND COALESCE(phone_number, '') = ''
+  RETURNING id
+),
+resolved_user AS (
+  SELECT id
+  FROM inserted_user
+  UNION ALL
+  SELECT id
+  FROM updated_user
+  UNION ALL
+  SELECT id
+  FROM ba_user
+  WHERE email = :'owner_email'
+    AND NOT EXISTS (SELECT 1 FROM inserted_user)
+    AND NOT EXISTS (SELECT 1 FROM updated_user)
+),
+upsert_membership AS (
+  INSERT INTO ba_user_tenant_membership (
+    id,
+    user_id,
+    tenant,
+    status,
+    role,
+    expires_at
+  )
+  SELECT
+    gen_random_uuid()::text,
+    id,
+    :'slug',
+    'enrolled',
+    'tenantadministrator',
+    NULL
+  FROM resolved_user
+  ON CONFLICT (user_id, tenant) DO UPDATE SET
+    status = EXCLUDED.status,
+    role = EXCLUDED.role,
+    expires_at = NULL,
+    "updatedAt" = now()
+  RETURNING user_id
+)
+SELECT json_build_object(
+  'tenant', (SELECT name FROM upsert_tenant),
+  'userId', (SELECT id FROM resolved_user LIMIT 1),
+  'membershipUserId', (SELECT user_id FROM upsert_membership)
+);
+SQL
+
+  UPSERT_RESULT_JSON="$(sql_json_one \
+    "$upsert_sql" \
+    -v slug="$SLUG" \
+    -v company_name="$COMPANY_NAME" \
+    -v light="$DESIRED_LIGHT" \
+    -v dark="$DESIRED_DARK" \
+    -v default_note_format="$DESIRED_DEFAULT_NOTE_FORMAT" \
+    -v registration_enabled="$DESIRED_REGISTRATION_ENABLED" \
+    -v echo_enabled="$DESIRED_ECHO_ENABLED" \
+    -v patient_consultation_creation_enabled="$DESIRED_PATIENT_CONSULTATION_CREATION_ENABLED" \
+    -v copilot_enabled="$DESIRED_COPILOT_ENABLED" \
+    -v consultation_enabled="$DESIRED_CONSULTATION_ENABLED" \
+    -v owner_email="$OWNER_EMAIL" \
+    -v owner_name="$OWNER_NAME" \
+    -v owner_first_name="$OWNER_FIRST_NAME" \
+    -v owner_last_name="$OWNER_LAST_NAME" \
+    -v owner_phone="$NORMALIZED_OWNER_PHONE")"
+  debug "upsert_result=$UPSERT_RESULT_JSON"
+  SESSION_STATUS="untouched"
+
+  phase "verify"
+  wait_for_https
+
+  local final_tenant_json final_user_json final_membership_json
+  final_tenant_json="$(sql_json_one "$existing_tenant_sql" -v slug="$SLUG")"
+  final_user_json="$(sql_json_one "$existing_user_sql" -v owner_email="$OWNER_EMAIL")"
+  final_membership_json="$(sql_json_one "$existing_membership_sql" -v owner_email="$OWNER_EMAIL" -v slug="$SLUG")"
+  SESSION_COUNT_AFTER="$(sql_scalar "$session_count_sql" -v owner_email="$OWNER_EMAIL")"
+  SESSION_COUNT_AFTER="${SESSION_COUNT_AFTER:-0}"
+
+  tenant_matches "$final_tenant_json" "$DESIRED_TENANT_JSON" || die "Final tenant verification failed"
+  user_matches "$final_user_json" "$DESIRED_USER_JSON" || die "Final user verification failed"
+  membership_matches "$final_membership_json" || die "Final membership verification failed"
+
+  cat <<EOF
+result.url=https://$FQDN
+result.slug=$SLUG
+result.company_name=$COMPANY_NAME
+result.owner_email=$OWNER_EMAIL
+result.owner_phone=$NORMALIZED_OWNER_PHONE
+result.compose_id=$COMPOSE_ID
+result.app_name=$APP_NAME
+result.server_ip=$SERVER_IP
+result.dns=$DNS_STATUS
+result.domain=$DOMAIN_STATUS
+result.redeploy=$DEPLOY_STATUS
+result.tenant=$TENANT_STATUS
+result.owner_user=$USER_STATUS
+result.membership=$MEMBERSHIP_STATUS
+result.sessions_before=$SESSION_COUNT_BEFORE
+result.sessions_after=$SESSION_COUNT_AFTER
+EOF
+}
+
+# ------------ destroy ------------
+
+cmd_destroy() {
+  die "destroy: not yet implemented. Too risky — needs its own careful design pass."
+}
+
+# ------------ arg parsing ------------
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 1
+fi
+
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+  create|status|list|destroy)
+    ;;
+  *)
+    usage
+    die "Unknown command: $COMMAND"
+    ;;
+esac
+
+# Allow a positional slug for status/destroy: `pharmia-tenant status <slug> --env qa`
+if [[ "$COMMAND" == "status" || "$COMMAND" == "destroy" ]]; then
+  if [[ $# -gt 0 && "$1" != -* ]]; then
+    SLUG="$1"
+    shift
+  fi
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --env)
+      TARGET_ENV="$2"
+      shift 2
+      ;;
+    --slug)
+      SLUG="$2"
+      shift 2
+      ;;
+    --company-name)
+      COMPANY_NAME="$2"
+      shift 2
+      ;;
+    --owner-email)
+      OWNER_EMAIL="$2"
+      shift 2
+      ;;
+    --owner-first-name)
+      OWNER_FIRST_NAME="$2"
+      shift 2
+      ;;
+    --owner-last-name)
+      OWNER_LAST_NAME="$2"
+      shift 2
+      ;;
+    --owner-phone)
+      OWNER_PHONE="$2"
+      shift 2
+      ;;
+    --template-tenant)
+      TEMPLATE_TENANT="$2"
+      shift 2
+      ;;
+    --registration-enabled)
+      REGISTRATION_ENABLED="true"
+      shift
+      ;;
+    --no-registration-enabled)
+      REGISTRATION_ENABLED="false"
+      shift
+      ;;
+    --echo-enabled)
+      ECHO_ENABLED="true"
+      shift
+      ;;
+    --no-echo-enabled)
+      ECHO_ENABLED="false"
+      shift
+      ;;
+    --copilot-enabled)
+      COPILOT_ENABLED="true"
+      shift
+      ;;
+    --no-copilot-enabled)
+      COPILOT_ENABLED="false"
+      shift
+      ;;
+    --consultation-enabled)
+      CONSULTATION_ENABLED="true"
+      shift
+      ;;
+    --no-consultation-enabled)
+      CONSULTATION_ENABLED="false"
+      shift
+      ;;
+    --patient-consultation-creation-enabled)
+      PATIENT_CONSULTATION_CREATION_ENABLED="true"
+      shift
+      ;;
+    --no-patient-consultation-creation-enabled)
+      PATIENT_CONSULTATION_CREATION_ENABLED="false"
+      shift
+      ;;
+    --light)
+      LIGHT="$2"
+      shift 2
+      ;;
+    --dark)
+      DARK="$2"
+      shift 2
+      ;;
+    --default-note-format)
+      DEFAULT_NOTE_FORMAT="$2"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --debug)
+      DEBUG=true
+      shift
+      ;;
+    --confirm-prod)
+      CONFIRM_PROD=true
+      shift
+      ;;
+    --check-live)
+      CHECK_LIVE=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      die "Unknown flag: $1"
+      ;;
+  esac
+done
+
+resolve_env_config
+prod_banner
+
+case "$COMMAND" in
+  create)
+    cmd_create
+    ;;
+  status)
+    # status exit codes are signal (0/1/2) — disable ERR trap noise
+    trap - ERR
+    set +e
+    cmd_status
+    STATUS_EXIT=$?
+    exit "$STATUS_EXIT"
+    ;;
+  list)
+    cmd_list
+    ;;
+  destroy)
+    # arm audit before destroy gate aborts so we still record the attempt
+    if [[ "$TARGET_ENV" == "prod" && "$DRY_RUN" != true && "$CONFIRM_PROD" != true ]]; then
+      AUDIT_ARMED=true
+      die "prod destroy requires --confirm-prod (see CLAUDE.md: always use --confirm-prod for prod writes)"
+    fi
+    AUDIT_ARMED=true
+    cmd_destroy
+    ;;
+esac

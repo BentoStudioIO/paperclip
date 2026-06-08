@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+# tempo — query Grafana Tempo traces via the Grafana datasource proxy.
+#
+# Renders span trees instead of raw OTLP by default, exposes `slowest` /
+# `services` / `from-log` helpers, and understands loki-style `--since 30m`
+# / `--last 6h` / `--service api` shortcuts on top of TraceQL.
+#
+# Environments: dev, qa, canary  (GRAFANA_URL_<ENV> + GRAFANA_TOKEN_<ENV>)
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: tempo <env> <command> [args]
+
+Environments: dev, qa, canary
+
+Commands:
+  search [TraceQL] [--since DUR | --start ISO --end ISO] [--limit N] [--service X] [--json]
+      Search traces. TraceQL examples: '{status=error}', '{resource.service.name="api"}'
+      With no TraceQL, matches '{}'. Default window: last 1h.
+
+  trace <trace-id> [--raw] [--attrs]
+      Render the trace as an indented span tree (SERVICE  OPERATION  DURATION [STATUS]).
+      --raw   dump the full OTLP JSON (previous default behaviour)
+      --attrs show span attributes as indented key=value lines under each span
+
+  slowest [--service X] [--since DUR] [--limit N] [--min-duration DUR] [--json]
+      Top-N slowest traces in the window, sorted desc by duration.
+      Default: --since 1h --limit 20.
+
+  from-log <trace-id> [--since DUR]
+      Print Grafana Explore deep-links for Tempo + Loki around the trace's
+      start time (±30m by default, overridable with --since). Falls back to a
+      Loki command template if the trace hasn't been ingested yet.
+
+  services
+      List services currently emitting spans (resource.service.name tag-values).
+
+  tags
+      List available search tags.
+
+  tag-values <tag>
+      List values for a search tag (v2 endpoint).
+
+  status
+      Show Tempo build info.
+
+Duration syntax for --since / --last / --min-duration:
+  30s, 30m, 6h, 1d, 7d  (suffix is required)
+EOF
+  exit 1
+}
+
+[[ $# -lt 2 ]] && usage
+if [[ "$1" == "--help" || "$1" == "-h" ]]; then usage; fi
+
+ENV_IN="$1"
+ENV="${ENV_IN^^}"
+CMD="$2"
+shift 2
+
+# Resolve env -> Grafana URL + token. Stash the plain URL (pre-proxy) so we
+# can build Explore deep-links without parsing env vars twice.
+case "$ENV" in
+  DEV)    GRAFANA_URL="${GRAFANA_URL_DEV:?Set GRAFANA_URL_DEV}"; TOKEN="${GRAFANA_TOKEN_DEV:?Set GRAFANA_TOKEN_DEV}" ;;
+  QA)     GRAFANA_URL="${GRAFANA_URL_QA:?Set GRAFANA_URL_QA}"; TOKEN="${GRAFANA_TOKEN_QA:?Set GRAFANA_TOKEN_QA}" ;;
+  CANARY) GRAFANA_URL="${GRAFANA_URL_CANARY:?Set GRAFANA_URL_CANARY}"; TOKEN="${GRAFANA_TOKEN_CANARY:?Set GRAFANA_TOKEN_CANARY}" ;;
+  *)      echo "Unknown env: $ENV_IN (use dev, qa, canary)" >&2; exit 1 ;;
+esac
+
+BASE="$GRAFANA_URL/api/datasources/proxy/uid/tempo"
+
+gfetch() { curl -sf -H "Authorization: Bearer $TOKEN" "$@"; }
+
+urlencode() { python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+
+# Parse loki-style duration (30s|30m|6h|1d|7d) -> seconds. Required suffix.
+parse_duration() {
+  local d="$1"
+  [[ "$d" =~ ^([0-9]+)([smhdw])$ ]] || { echo "Invalid duration: $d (use 30s, 30m, 6h, 1d, 7d)" >&2; return 1; }
+  local n="${BASH_REMATCH[1]}" u="${BASH_REMATCH[2]}"
+  case "$u" in
+    s) echo "$n" ;;
+    m) echo $(( n * 60 )) ;;
+    h) echo $(( n * 3600 )) ;;
+    d) echo $(( n * 86400 )) ;;
+    w) echo $(( n * 604800 )) ;;
+  esac
+}
+
+# Parse ISO-8601 (or any date(1)-parseable string) -> Unix seconds. GNU date.
+parse_iso() { date -u -d "$1" +%s 2>/dev/null || { echo "Unparseable time: $1" >&2; return 1; }; }
+
+# Build a Grafana Explore deep-link for a Tempo trace.
+explore_tempo_url() {
+  local trace_id="$1"
+  local payload
+  payload=$(jq -cn --arg t "$trace_id" '{datasource:"tempo",queries:[{query:$t,queryType:"traceql"}]}')
+  echo "${GRAFANA_URL}/explore?orgId=1&left=$(urlencode "$payload")"
+}
+
+# Build a Grafana Explore deep-link for a Loki query over [from_ms, to_ms].
+explore_loki_url() {
+  local logql="$1" from_ms="$2" to_ms="$3"
+  local payload
+  payload=$(jq -cn --arg q "$logql" --arg f "$from_ms" --arg t "$to_ms" \
+    '{datasource:"loki",queries:[{expr:$q,queryType:"range",refId:"A"}],range:{from:$f,to:$t}}')
+  echo "${GRAFANA_URL}/explore?orgId=1&left=$(urlencode "$payload")"
+}
+
+# Human-readable duration from nanoseconds (µs / ms / s / m).
+fmt_nanos() {
+  awk -v n="$1" 'BEGIN{
+    if (n+0==0) {printf "0µs"; exit}
+    if (n<1000)        {printf "%dns", n}
+    else if (n<1e6)    {printf "%.1fµs", n/1e3}
+    else if (n<1e9)    {printf "%.1fms", n/1e6}
+    else if (n<60e9)   {printf "%.2fs", n/1e9}
+    else               {printf "%dm%.0fs", int(n/60e9), (n/1e9)%60}
+  }'
+}
+
+# Render a trace's span tree from the Tempo OTLP response on stdin.
+# Args: $1 = show_attrs (0|1)
+render_tree() {
+  local show_attrs="$1"
+  jq -r --argjson attrs "$show_attrs" '
+    # Decode base64 (std or url-safe, with/without padding) to lowercase hex.
+    def b64hex:
+      . as $s
+      | ($s | gsub("-"; "+") | gsub("_"; "/"))
+      | . + (["", "=", "==", "==="][3 - ((length - 1) % 4)] // "")
+      | @base64d
+      | explode
+      | map(if . < 0 then . + 256 else . end)
+      | map(if . < 16 then "0" + ([.] | implode | @uri | ltrimstr("%")) else ([.] | implode | @uri | ltrimstr("%")) end)
+      | join("")
+      | ascii_downcase;
+
+    def fmt_dur($ns):
+      if $ns < 1000 then "\($ns)ns"
+      elif $ns < 1000000 then "\(($ns/1000*10|floor)/10)µs"
+      elif $ns < 1000000000 then "\(($ns/1000000*10|floor)/10)ms"
+      elif $ns < 60000000000 then "\(($ns/1000000000*100|floor)/100)s"
+      else "\(($ns/60000000000|floor))m\((($ns%60000000000)/1000000000|floor))s"
+      end;
+
+    def attr_value(a):
+      a.value
+      | (.stringValue // .intValue // .boolValue // .doubleValue // (.arrayValue.values | tostring? // "")) // "";
+
+    # Flatten every span + attach its batch-level service.name.
+    [ .batches[] as $b
+      | ($b.resource.attributes | map(select(.key=="service.name")) | first | .value.stringValue // "unknown") as $svc
+      | $b.scopeSpans[]?.spans[]?
+      | { svc: $svc,
+          id:  (.spanId    | b64hex),
+          pid: ((.parentSpanId // "") | if . == "" then "" else b64hex end),
+          name: (.name // "?"),
+          start: (.startTimeUnixNano | tonumber),
+          dur: ((.endTimeUnixNano | tonumber) - (.startTimeUnixNano | tonumber)),
+          status: (.status.code // 0),
+          attrs: (.attributes // [])
+        }
+    ] as $spans
+
+    # Parent -> children map.
+    | ($spans | group_by(.pid) | map({key: .[0].pid, value: .}) | from_entries) as $by_parent
+    | ($spans | map({key: .id, value: true}) | from_entries) as $known
+
+    # Roots: spans whose pid is empty OR points to an unknown span (dangling).
+    | ($spans | map(select(.pid == "" or ($known[.pid] // false | not)))) as $roots
+
+    # Recursive render. Walks from a span, prints it, then recurses into
+    # children sorted by start time.
+    | def render($span; $depth):
+        ("  " * $depth) as $indent
+        | ($span.svc) as $svc
+        | ($span.name) as $op
+        | (fmt_dur($span.dur)) as $d
+        | (if $span.status == 2 then "  [ERROR]"
+           elif $span.status == 1 then "  [OK]"
+           else "" end) as $st
+        | "\($indent)\($svc)  \($op)  \($d)\($st)",
+          ( if $attrs == 1 and ($span.attrs | length) > 0
+            then $span.attrs[] | "\($indent)  · \(.key)=\(attr_value(.))"
+            else empty end ),
+          ( ($by_parent[$span.id] // []) | sort_by(.start)[] | render(.; $depth + 1) );
+
+    $roots | sort_by(.start)[] | render(.; 0)
+  '
+}
+
+case "$CMD" in
+  search|slowest)
+    TRACEQL=""
+    START="" END=""
+    SINCE=""
+    LIMIT=20
+    SERVICE=""
+    MIN_DURATION=""
+    OUT_JSON=0
+    if [[ "$CMD" == "search" ]]; then SINCE="1h"; else SINCE="1h"; fi
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --start)        START=$(parse_iso "$2"); shift 2 ;;
+        --end)          END=$(parse_iso "$2"); shift 2 ;;
+        --since|--last) SINCE="$2"; shift 2 ;;
+        --limit)        LIMIT="$2"; shift 2 ;;
+        --service)      SERVICE="$2"; shift 2 ;;
+        --min-duration) MIN_DURATION="$2"; shift 2 ;;
+        --json)         OUT_JSON=1; shift ;;
+        -h|--help)      usage ;;
+        --*)            echo "Unknown flag: $1" >&2; exit 1 ;;
+        *)              TRACEQL="$1"; shift ;;
+      esac
+    done
+
+    # Window resolution: explicit --start/--end win, else --since from now.
+    if [[ -z "$END" ]]; then END=$(date -u +%s); fi
+    if [[ -z "$START" ]]; then
+      SECONDS_BACK=$(parse_duration "$SINCE")
+      START=$(( END - SECONDS_BACK ))
+    fi
+
+    # Build the TraceQL expression.
+    if [[ "$CMD" == "slowest" ]]; then
+      # TraceQL needs a condition before `|`. Start from a service filter
+      # (if provided) or a always-true shape, then append any user-TraceQL
+      # as an `&& <user>` clause (already wrapped in {}).
+      BASE_EXPR="{}"
+      [[ -n "$SERVICE" ]] && BASE_EXPR="{resource.service.name=\"$SERVICE\"}"
+      [[ -n "$TRACEQL" ]] && BASE_EXPR="$BASE_EXPR && $TRACEQL"
+      if [[ -n "$MIN_DURATION" ]]; then
+        BASE_EXPR="$BASE_EXPR && { duration > ${MIN_DURATION} }"
+      fi
+      # `select(...)` surfaces duration fields; Tempo still returns durationMs
+      # in the response envelope regardless of select, so we rely on that.
+      TRACEQL="$BASE_EXPR"
+    else
+      # search: just compose {service} && user-expr.
+      if [[ -n "$SERVICE" ]]; then
+        if [[ -n "$TRACEQL" ]]; then
+          TRACEQL="{resource.service.name=\"$SERVICE\"} && $TRACEQL"
+        else
+          TRACEQL="{resource.service.name=\"$SERVICE\"}"
+        fi
+      fi
+      [[ -z "$TRACEQL" ]] && TRACEQL="{}"
+    fi
+
+    PARAMS="start=${START}&end=${END}&limit=${LIMIT}&q=$(urlencode "$TRACEQL")"
+    RESP=$(gfetch "$BASE/api/search?$PARAMS")
+
+    # Sort + enrich with grafana_url; share this for search and slowest.
+    ENRICHED=$(echo "$RESP" | jq --arg url "$GRAFANA_URL" '
+      .traces = ((.traces // []) | sort_by(-(.durationMs // 0)) | map(
+        . + { grafana_url: ($url + "/explore?orgId=1&left=" + (
+          {datasource:"tempo",queries:[{query:.traceID,queryType:"traceql"}]}
+          | @json | @uri)) }
+      ))
+    ')
+
+    if [[ "$OUT_JSON" == "1" ]]; then
+      echo "$ENRICHED" | jq '.traces'
+    else
+      # Human table: TRACE_ID  SERVICE  OPERATION  START  DUR  STATUS
+      echo "$ENRICHED" | jq -r '
+        def fmt_ms($ms): if $ms < 1000 then "\($ms)ms" else "\(($ms/1000*100|floor)/100)s" end;
+        (.traces // []) | .[] |
+        [ .traceID,
+          (.rootServiceName // "-"),
+          (.rootTraceName // "-"),
+          ((.startTimeUnixNano | tonumber) / 1e9 | strftime("%Y-%m-%dT%H:%M:%SZ")),
+          fmt_ms(.durationMs // 0),
+          (if (.spanSet.matched // 0) > 0 then "\(.spanSet.matched) spans" else "-" end),
+          .grafana_url
+        ] | @tsv
+      ' | column -t -s $'\t' -N "TRACE_ID,SERVICE,OPERATION,START,DUR,MATCH,URL" 2>/dev/null \
+        || echo "$ENRICHED" | jq -r '(.traces // [])[] | "\(.traceID)\t\(.rootServiceName)\t\(.durationMs)ms\t\(.grafana_url)"'
+    fi
+    ;;
+
+  trace)
+    [[ $# -lt 1 ]] && { echo "Usage: tempo $ENV_IN trace <trace-id> [--raw] [--attrs]" >&2; exit 1; }
+    TRACE_ID="$1"; shift
+    RAW=0 ATTRS=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --raw)   RAW=1; shift ;;
+        --attrs) ATTRS=1; shift ;;
+        *) echo "Unknown flag: $1" >&2; exit 1 ;;
+      esac
+    done
+    RESP=$(gfetch "$BASE/api/traces/$TRACE_ID")
+    if [[ "$RAW" == "1" ]]; then
+      echo "$RESP" | jq '.'
+    else
+      echo "$RESP" | render_tree "$ATTRS"
+    fi
+    ;;
+
+  from-log)
+    [[ $# -lt 1 ]] && { echo "Usage: tempo $ENV_IN from-log <trace-id> [--since DUR]" >&2; exit 1; }
+    TRACE_ID="$1"; shift
+    SINCE="30m"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --since|--last) SINCE="$2"; shift 2 ;;
+        *) echo "Unknown flag: $1" >&2; exit 1 ;;
+      esac
+    done
+    HALF_WINDOW=$(parse_duration "$SINCE")
+
+    # Try to fetch the trace and anchor the window to its start time. If the
+    # trace isn't ingested yet, fall back to a now-centered window.
+    TRACE_JSON=$(gfetch "$BASE/api/traces/$TRACE_ID" 2>/dev/null || true)
+    CENTER_NS=$(echo "$TRACE_JSON" | jq -r '[.batches[]?.scopeSpans[]?.spans[]?.startTimeUnixNano | tonumber] | min // empty' 2>/dev/null || true)
+
+    if [[ -n "$CENTER_NS" && "$CENTER_NS" != "null" ]]; then
+      CENTER_MS=$(( CENTER_NS / 1000000 ))
+      FROM_MS=$(( CENTER_MS - HALF_WINDOW * 1000 ))
+      TO_MS=$(( CENTER_MS + HALF_WINDOW * 1000 ))
+      echo "# Trace $TRACE_ID found — window ±${SINCE} around $(date -u -d "@$((CENTER_MS/1000))" +%FT%TZ)"
+    else
+      NOW_MS=$(( $(date -u +%s) * 1000 ))
+      FROM_MS=$(( NOW_MS - HALF_WINDOW * 1000 ))
+      TO_MS="$NOW_MS"
+      echo "# Trace $TRACE_ID not yet ingested — falling back to now±${SINCE}" >&2
+    fi
+
+    echo "Tempo:  $(explore_tempo_url "$TRACE_ID")"
+    echo "Loki:   $(explore_loki_url "{service_name=~\".+\"} |= \`$TRACE_ID\`" "$FROM_MS" "$TO_MS")"
+    echo
+    echo "# Or run loki directly:"
+    echo "loki ${ENV_IN} search \"$TRACE_ID\" --since ${SINCE}"
+    ;;
+
+  services)
+    # Use the v2 tag-values endpoint: richer response, scoped to resource-level
+    # service.name. Window defaults to the last 1h for cheapness.
+    START=$(date -u -d '1 hour ago' +%s)
+    END=$(date -u +%s)
+    gfetch "$BASE/api/v2/search/tag/resource.service.name/values?start=${START}&end=${END}" \
+      | jq -r '.tagValues[]?.value' \
+      | sort -u
+    ;;
+
+  tags)
+    gfetch "$BASE/api/search/tags" | jq -r '.tagNames[]?' 2>/dev/null \
+      || gfetch "$BASE/api/search/tags" | jq '.'
+    ;;
+
+  tag-values)
+    [[ $# -lt 1 ]] && { echo "Usage: tempo $ENV_IN tag-values <tag>" >&2; exit 1; }
+    TAG="$1"
+    START=$(date -u -d '1 hour ago' +%s)
+    END=$(date -u +%s)
+    # v2 first (richer, scoped); fall back to v1 for older Tempo.
+    gfetch "$BASE/api/v2/search/tag/${TAG}/values?start=${START}&end=${END}" 2>/dev/null \
+      | jq -r '.tagValues[]?.value' 2>/dev/null \
+      || gfetch "$BASE/api/search/tag/${TAG}/values" | jq -r '.tagValues[]?' 2>/dev/null \
+      || gfetch "$BASE/api/search/tag/${TAG}/values" | jq '.'
+    ;;
+
+  status)
+    gfetch "$BASE/api/status/buildinfo" | jq '.'
+    ;;
+
+  -h|--help|help) usage ;;
+
+  *)
+    echo "Unknown command: $CMD" >&2
+    usage
+    ;;
+esac

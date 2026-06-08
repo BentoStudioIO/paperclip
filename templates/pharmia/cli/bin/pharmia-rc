@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# pharmia-rc — idempotent control for the single Claude Code Remote Control
+# environment (systemd user service claude-rc-pharmamate).
+#
+# Design goals: exactly ONE environment, never duplicated, never routinely
+# recycled, self-healing on crash AND wedge AND suspend/resume, survives
+# reboot/updates.
+#
+#   pharmia-rc up        ensure it's running (idempotent — no-op if already up)
+#   pharmia-rc status    state + the ONE current environment URL
+#   pharmia-rc url       print just the current environment URL
+#   pharmia-rc open      print URL + try to open it in the default browser
+#   pharmia-rc restart   clean restart (mints a fresh env id — use sparingly)
+#   pharmia-rc doctor    reap duplicates; restart ONLY if logically disconnected
+#   pharmia-rc logs      tail the daemon log
+set -euo pipefail
+
+SVC=claude-rc-pharmamate.service
+NAME=PharmaMate
+LOG="$HOME/.local/share/claude/rc-pharmamate.log"
+LOG_MAX=$((5 * 1024 * 1024))   # 5MB — reconnect spinner spams ANSI; cap it
+GRACE=20                       # debounce before a restart (avoid needless new env id)
+UC() { systemctl --user "$@"; }
+
+_pid()   { UC show "$SVC" -p ExecMainPID --value 2>/dev/null; }
+_clean() { sed 's/\x1b\[[0-9;]*m//g' "$LOG" 2>/dev/null; }
+_url()   { _clean | grep -ao 'environment=env_[A-Za-z0-9]*' | tail -1 | sed 's/^environment=//'; }
+_estab() { local p="$1"; [ -n "$p" ] && [ "$p" != 0 ] || { echo 0; return; }
+           ss -tanp 2>/dev/null | grep -c "ESTAB.*pid=$p," || echo 0; }
+
+# Logically connected? Source of truth = the daemon's own lifecycle log.
+# A live ESTAB socket alone is NOT sufficient: during an infinite reconnect loop
+# on a dead env id, sockets flap to ESTAB then die at the app layer, so `ss` can
+# read 1 while claude.ai still shows the environment disconnected.
+_connected() {
+  local p="${1:-0}" tail
+  [ "$p" != 0 ] || return 1
+  [ "$(_estab "$p")" -ge 1 ] || return 1
+  tail="$(_clean | grep -vE '^[[:space:]]*$' | tail -4)"
+  echo "$tail" | grep -q 'Reconnecting' && return 1
+  echo "$tail" | grep -qE 'Ready|Reconnected|Capacity:|Code anywhere' && return 0
+  return 1
+}
+
+# Enforce single environment: kill any PharmaMate daemon that is not the managed
+# service PID (e.g. one launched by hand / a stale leftover from a bad restart).
+_reap_dupes() {
+  local keep="${1:-0}" p
+  for p in $(pgrep -f "claude remote-control .*--name $NAME" 2>/dev/null || true); do
+    [ "$p" = "$keep" ] && continue
+    kill "$p" 2>/dev/null && echo "doctor: reaped duplicate $NAME daemon pid=$p"
+  done
+}
+
+_trim_log() {
+  [ -f "$LOG" ] || return 0
+  local sz; sz=$(stat -c%s "$LOG" 2>/dev/null || echo 0)
+  if [ "$sz" -gt "$LOG_MAX" ]; then
+    tail -c $((LOG_MAX / 2)) "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
+  fi
+}
+
+case "${1:-status}" in
+  up)
+    UC start "$SVC"; echo "up: $(UC is-active "$SVC")"
+    ;;
+  restart)
+    UC restart "$SVC"; sleep 6
+    echo "restarted. env: $(_url || echo '(pending — run: pharmia-rc url)')"
+    ;;
+  url)
+    u="$(_url)"; [ -n "$u" ] && echo "$u" || { echo "no env yet" >&2; exit 1; }
+    ;;
+  open)
+    u="$(_url)"; [ -z "$u" ] && { echo "no env yet" >&2; exit 1; }
+    echo "https://claude.ai/code?environment=$u"
+    command -v xdg-open >/dev/null && xdg-open "https://claude.ai/code?environment=$u" >/dev/null 2>&1 || true
+    ;;
+  doctor)
+    _trim_log
+    pid="$(_pid)"; act="$(UC is-active "$SVC" || true)"
+    if [ "$act" != active ] || [ -z "$pid" ] || [ "$pid" = 0 ]; then
+      echo "doctor: not active ($act) — starting"; UC start "$SVC"; sleep 6
+      _reap_dupes "$(_pid)"; exit 0
+    fi
+    _reap_dupes "$pid"
+    if _connected "$pid"; then
+      echo "doctor: healthy (pid=$pid, $(_estab "$pid") live, connected)"; exit 0
+    fi
+    # Debounce: a momentary blip shouldn't trigger a restart (a restart mints a
+    # new env id). Re-check after a grace window; restart only if still down.
+    echo "doctor: not connected (pid=$pid) — grace ${GRACE}s before restart"
+    sleep "$GRACE"
+    pid="$(_pid)"
+    if _connected "$pid"; then
+      echo "doctor: recovered on its own (pid=$pid)"; exit 0
+    fi
+    echo "doctor: WEDGED — restarting to mint a fresh environment"
+    UC restart "$SVC"; sleep 6; _reap_dupes "$(_pid)"
+    ;;
+  logs)
+    tail -n "${2:-40}" "$LOG" | sed 's/\x1b\[[0-9;]*m//g'
+    ;;
+  status|*)
+    pid="$(_pid)"
+    _connected "${pid:-0}" && st="connected" || st="DISCONNECTED"
+    echo "service : $(UC is-active "$SVC")  (enabled: $(UC is-enabled "$SVC" 2>/dev/null))"
+    echo "pid     : ${pid:-none}"
+    echo "link    : $st  ($(_estab "${pid:-0}") established)"
+    echo "env URL : $(_url || echo '(none yet)')"
+    echo "connect : https://claude.ai/code   (pick the '$NAME' device)"
+    ;;
+esac

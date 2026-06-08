@@ -1,0 +1,2602 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# comp — CLI for the self-hosted Comp AI GRC platform.
+# Sibling of `ol`, `dokploy`, `cfdns`, `twenty`: bash + curl + jq wrapper.
+#
+# Config: ~/.config/comp/config  (shell-sourced; see keys at bottom of --help)
+# Most subcommands hit the NestJS API; the control/framework layer is not
+# exposed by the API, so `controls list` and `tgv status` fall back to a
+# read-only psql query over SSH.
+
+CONF_DIR="${HOME}/.config/comp"
+CONF_SHELL="${CONF_DIR}/config"
+
+if [[ ! -f "$CONF_SHELL" ]]; then
+  cat >&2 <<EOF
+Error: config not found at $CONF_SHELL
+Create it with:
+  mkdir -p $CONF_DIR
+  cat > $CONF_SHELL <<'CONF'
+  COMP_URL="https://comp.bentostudio.io/v1"
+  COMP_API_KEY="comp-mcp-key-..."
+  COMP_ORG_ID="org_..."
+  COMP_USER_ID="usr_..."
+  COMP_DB_SSH="devops"
+  COMP_DB_CONTAINER="comp-ai-0h3htf-postgres-1"
+  COMP_DB_USER="postgres"
+  COMP_DB_NAME="comp"
+  COMP_TGV_FRAMEWORK_ID="frk_tgv_msss_2024"
+  CONF
+EOF
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONF_SHELL"
+
+BASE="${COMP_URL:?Set COMP_URL in $CONF_SHELL}"
+API_KEY="${COMP_API_KEY:?Set COMP_API_KEY in $CONF_SHELL}"
+ORG_ID="${COMP_ORG_ID:?Set COMP_ORG_ID in $CONF_SHELL}"
+USER_ID="${COMP_USER_ID:-}"
+DB_SSH="${COMP_DB_SSH:-}"
+DB_CONTAINER="${COMP_DB_CONTAINER:-}"
+DB_USER="${COMP_DB_USER:-postgres}"
+DB_NAME="${COMP_DB_NAME:-comp}"
+TGV_FRAMEWORK_ID="${COMP_TGV_FRAMEWORK_ID:-frk_tgv_msss_2024}"
+
+usage() {
+  cat <<'EOF'
+Usage: comp <command> [args]
+
+Policies:
+  policies list [--json] [--ids-only]      List all policies.
+                                           Columns: id | name | status | updated
+  policies get <id> [--json]               Fetch a single policy.
+  policies create --name NAME --file PATH [--description D] [--json]
+                                           Create a policy. FILE is markdown;
+                                           it is wrapped into TipTap JSON content.
+  policies update <id> --file PATH [--dry-run] [--yes]
+                                           Replace a policy's content from a
+                                           markdown FILE (re-wrapped to TipTap).
+                                           SQL-backed — no API endpoint.
+  policies publish <id> [--changelog TEXT] [--set-active] [--json]
+                                           Publish a new version of a policy.
+
+  Local mirror (git-like: Comp = origin, local md = working tree):
+  policies pull [--all|--id POL] [--dir PATH] [--include-archived]
+                                           Pull Comp → local <DOC-XXX>.md files
+                                           + manifest.json (id, sha256, version).
+                                           Default dir:
+                                             ~/Documents/bento-docs/derived/
+                                             legal/tgv/policies/
+  policies push [--dir PATH] [--dry-run] [--yes] [--changelog TEXT]
+                                           Push local md → Comp. Only sha256-
+                                           changed files. Snapshots current
+                                           live content to .rollback/<id>.<ts>
+                                           .json before each push. Default is
+                                           --dry-run; --yes required to write.
+
+Tasks:
+  tasks list [--json] [--ids-only] [--status S]
+                                           List all tasks (optionally filter
+                                           by status client-side).
+                                           Columns: id | title | status | updated
+  tasks get <id> [--json]                  Fetch a single task.
+  tasks set-status <id> <status>           Update task status.
+                                           status: todo | in_progress | in_review
+                                                   | done | not_relevant | failed
+  tasks create --name N --control CTL [--status S] [--description D]
+               [--dry-run] [--yes]         Create a Task row (SQL) and link it
+                                           1:1 to a control via _ControlToTask,
+                                           in one transaction. Not exposed by
+                                           the API. status defaults to todo.
+  tasks bulk-set-status --file CSV [--framework tgv|soc2|law25|bill3|pipeda]
+                        [--sep '|'] [--dry-run] [--yes]
+                                           Update many Task statuses in one
+                                           transaction. CSV rows:
+                                             criterion_code|status
+                                           (e.g. 'P01.01|done'). The code is
+                                           matched against control name prefix
+                                           '[CODE]…' in the chosen framework.
+                                           Lines starting with # are ignored.
+                                           Default framework: tgv.
+
+Evidence (task attachments):
+  evidence list <taskId> [--json]          List attachments on a task.
+  evidence upload <taskId> <file> [--description D] [--user usr_...] [--json]
+                                           Upload a file as evidence. The file is
+                                           base64-encoded; userId is auto-injected
+                                           (COMP_USER_ID) for API-key auth.
+  evidence download <taskId> <attId> [--json]
+                                           Print a signed download URL.
+
+Policies (SQL-backed mutation — no API endpoint):
+  policies archive <id> [--dry-run] [--yes]
+                                           Supersede a policy: set isArchived,
+                                           lastArchivedAt, status=needs_review,
+                                           and prefix name with [SUPERSÉDÉ].
+
+Controls & frameworks (read-only DB fallback — no API endpoint):
+  controls list [--framework tgv|<frameworkId>] [--json] [--ids-only]
+                                           List controls. Default: all controls
+                                           in the org. --framework filters by a
+                                           mapped framework (tgv = TGV MSSS 2024).
+  controls update <id> [--name N] [--description D] [--dry-run] [--yes]
+                                           Rename a control or update its
+                                           description. SQL-backed (no API).
+  controls create --name N [--description D] [--id ctl_...]
+                  [--template-id frk_ct_...] [--dry-run] [--yes]
+                                           Create a framework-agnostic control +
+                                           its 1:1 control template in one tx.
+                                           Mirrors the ctl_qcblind_* blind-spot
+                                           pattern (no RequirementMap → not bound
+                                           to any framework). Pass --id for a
+                                           readable id (e.g. ctl_qcblind_casl);
+                                           template id is derived as
+                                           frk_ct_<id-without-ctl_>. Omit --id to
+                                           use generated cuids. Link tasks via
+                                           `tasks create --control`, policies via
+                                           `control link-policy`.
+  frameworks list [--json]                 List FrameworkInstance rows in the org
+                                           with their underlying frameworkId.
+  coverage <fw|alias> [--json] [--by-control]
+                                           Per-framework policy coverage report —
+                                           total controls, French-only, English-only,
+                                           both, none. Aliases: soc2, law25, bill3,
+                                           pipeda, tgv. --by-control lists each
+                                           control's linked policies tagged fr/en.
+  status [<fw|alias>|--all] [--json] [--by-control]
+                                           Per-framework compliance status —
+                                           aggregates Task state across each
+                                           control: done / partial / in_progress /
+                                           todo / not_relevant / no_tasks.
+                                           --all shows every framework instance.
+                                           --by-control drills down per control.
+  policies link <id> --criteria CODE[,CODE...] [--framework tgv|soc2|...]
+               [--dry-run] [--yes]         Attach a Policy to one or more
+                                           Controls. Codes are criterion
+                                           prefixes (e.g. S08.01,S08.03) —
+                                           matched against control name prefix
+                                           '[CODE]…' in the chosen framework.
+                                           Idempotent (ON CONFLICT DO NOTHING).
+  policies frameworks <id> [--json]        For one policy, list which framework
+                                           instances it serves and how many controls.
+
+Control links (SQL-backed — no API endpoint):
+  control tasks <controlId> [--json] [--ids-only] [--status S]
+                                           List tasks linked to a control.
+  control tasks --like 'ctl_qcfix_%' [--status S] [--json]
+                                           Bulk: list tasks across many controls.
+                                           Pattern uses SQL LIKE (% and _).
+                                           Output adds a control column.
+  control policies <controlId> [--json] [--ids-only]
+                                           List policies linked to a control.
+  control link-task <controlId> <taskId> [--dry-run] [--yes]
+  control unlink-task <controlId> <taskId> [--dry-run] [--yes]
+                                           Add/remove a _ControlToTask link.
+  control link-policy <controlId> <policyId> [--dry-run] [--yes]
+  control unlink-policy <controlId> <policyId> [--dry-run] [--yes]
+                                           Add/remove a _ControlToPolicy link.
+
+TGV:
+  tgv status [--json]                      One-shot TGV roll-up: 254-control count,
+                                           task statuses, attachment counts.
+  tgv seed-tasks [--dry-run] [--yes]       Bulk: create one per-criterion Task
+                                           for every TGV control that lacks one,
+                                           linked 1:1 via _ControlToTask. Idempotent,
+                                           single BEGIN/COMMIT transaction.
+
+Risks & vendors (read-only API pass-through):
+  risks list   [--json] [--limit N] [--org ORG]
+                                           List risks. Columns:
+                                           id | title | status | category | assignee
+  vendors list [--json] [--limit N] [--org ORG]
+                                           List vendors. Columns:
+                                           id | name | status | category | assignee
+
+Policy reading (TipTap -> markdown):
+  policies show <id-or-title> [--text|--md] [--include-drafts] [--include-archived]
+                                           Render a policy body as readable
+                                           markdown. Fuzzy title match if not a
+                                           pol_… id. --text strips markup. Pages
+                                           through $PAGER on a TTY.
+  policies search <terms> [--json] [--include-drafts] [--include-archived] [--no-cache]
+                                           Grep policy titles + bodies. Caches
+                                           extracted text at
+                                           ~/.cache/comp/<org>/policies/<id>.txt
+                                           keyed by updatedAt; warm runs instant.
+
+Context (org Q&A pairs):
+  context list [--json]                    List Context entries (DPO, sign-off,
+                                           data location, etc.).
+                                           Columns: id | question | answer(80)
+  context get <id> [--json]                Show one Q&A in full.
+
+SQL escape hatch:
+  sql <query> [--dry-run] [--yes]          Run arbitrary SQL. Reads run freely;
+  sql --file PATH [--dry-run] [--yes]      writes (INSERT/UPDATE/DELETE/DDL)
+                                           require --yes or confirmation.
+
+Diagnostics:
+  doctor                                   Probe schema + API health: catches
+                                           upstream Prisma drift before bulk
+                                           writes corrupt state. Exits non-zero
+                                           if any probe fails.
+
+Other:
+  whoami                                   Show org id and configured user.
+  comp --help / comp <command> --help
+
+Safety:
+  --dry-run   Print the exact SQL without executing it.
+  --yes       Skip the interactive confirmation prompt.
+
+Config: ~/.config/comp/config
+  COMP_URL, COMP_API_KEY, COMP_ORG_ID, COMP_USER_ID,
+  COMP_DB_SSH, COMP_DB_CONTAINER, COMP_DB_USER, COMP_DB_NAME,
+  COMP_TGV_FRAMEWORK_ID
+EOF
+  exit 1
+}
+
+# ---- API helpers -----------------------------------------------------------
+
+# api <METHOD> <path> [curl-args...]
+# Emits the raw response body. On HTTP error, prints an actionable message and exits 1.
+api() {
+  local method="$1" path="$2"; shift 2
+  local tmp http body
+  local attempt=0 max_attempts=8
+  # Retry loop is for HTTP 429 (rate-limit) only. Other failures still
+  # exit on the first attempt — we don't want to retry e.g. 401/404.
+  while :; do
+    attempt=$((attempt + 1))
+    tmp="$(mktemp)"
+    http="$(curl -s -o "$tmp" -w '%{http_code}' \
+      -X "$method" \
+      -H "X-API-Key: ${API_KEY}" \
+      -H "X-Organization-Id: ${ORG_ID}" \
+      -H "Content-Type: application/json" \
+      "$@" "${BASE}${path}" 2>/dev/null || echo "000")"
+    body="$(cat "$tmp")"; rm -f "$tmp"
+
+    case "$http" in
+      2*)
+        printf '%s' "$body"
+        return 0
+        ;;
+      000)
+        echo "Error: cannot reach Comp API at ${BASE} (network/DNS failure)." >&2
+        exit 1
+        ;;
+      401|403)
+        local msg; msg="$(printf '%s' "$body" | jq -r '.message // .error // empty' 2>/dev/null || true)"
+        echo "Error: authentication failed (HTTP $http)${msg:+: $msg}" >&2
+        echo "Check COMP_API_KEY and COMP_ORG_ID in $CONF_SHELL." >&2
+        exit 1
+        ;;
+      404)
+        echo "Error: not found (HTTP 404) — ${method} ${path}" >&2
+        exit 1
+        ;;
+      429)
+        # Rate-limited. Exponential backoff capped at 60s: 1, 2, 4, 8, 16, 32,
+        # 60, 60 — ~3 min total tolerance across 8 attempts. ThrottlerException
+        # windows on Comp's API can be 60s+; flat 60s ceiling avoids 256s+ waits.
+        if [[ "$attempt" -ge "$max_attempts" ]]; then
+          echo "Error: API request failed (HTTP 429): rate-limit exceeded after ${max_attempts} attempts (${method} ${path})" >&2
+          exit 1
+        fi
+        local wait_s=$((2 ** (attempt - 1)))
+        [[ "$wait_s" -gt 60 ]] && wait_s=60
+        echo "  · HTTP 429 (rate-limit) — backing off ${wait_s}s then retrying (attempt ${attempt}/${max_attempts})" >&2
+        sleep "$wait_s"
+        continue
+        ;;
+      *)
+        local msg; msg="$(printf '%s' "$body" | jq -r 'if type=="object" then (.message // .error) else . end | if type=="array" then join("; ") else . end // empty' 2>/dev/null || true)"
+        echo "Error: API request failed (HTTP $http)${msg:+: $msg}" >&2
+        exit 1
+        ;;
+    esac
+  done
+}
+
+# ---- DB fallback helper ----------------------------------------------------
+
+# require_db — assert the SSH/container DB path is configured.
+require_db() {
+  [[ -n "$DB_SSH" && -n "$DB_CONTAINER" ]] || {
+    echo "Error: DB access not configured. Set COMP_DB_SSH and COMP_DB_CONTAINER in $CONF_SHELL." >&2
+    exit 1
+  }
+}
+
+# db_query <SQL>  — runs a read-only psql query over SSH, tab-separated, no headers.
+db_query() {
+  require_db
+  local sql="$1"
+  local err out rc
+  err=$(mktemp)
+  # -tA: tuples-only, unaligned; -F $'\t': tab field separator.
+  out="$(ssh "$DB_SSH" "docker exec ${DB_CONTAINER} psql -U ${DB_USER} -d ${DB_NAME} -tA -F $'\t' -c \"${sql//\"/\\\"}\"" 2>"$err")"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "Error: DB query failed (exit ${rc}). SSH='$DB_SSH' container='$DB_CONTAINER'." >&2
+    cat "$err" >&2
+    rm -f "$err"
+    exit 1
+  fi
+  rm -f "$err"
+  printf '%s\n' "$out"
+}
+
+# db_exec <SQL>  — runs a write/DDL statement (or a multi-statement BEGIN…COMMIT
+# block) over SSH. Stops on the first error (-v ON_ERROR_STOP=1) so a failed
+# statement aborts the transaction. Emits psql status lines (INSERT 0 1, etc.).
+# SQL is piped over stdin to avoid shell quoting hell with embedded text.
+db_exec() {
+  require_db
+  local sql="$1"
+  printf '%s\n' "$sql" \
+    | ssh "$DB_SSH" "docker exec -i ${DB_CONTAINER} psql -U ${DB_USER} -d ${DB_NAME} -v ON_ERROR_STOP=1" 2>&1 \
+    || {
+      echo "Error: SQL execution failed (transaction rolled back if wrapped in BEGIN/COMMIT)." >&2
+      exit 1
+    }
+}
+
+# sql_lit <value>  — escape a string for safe inclusion as a SQL string literal
+# (single quotes doubled). Caller wraps the result in quotes.
+sql_lit() { printf "%s" "${1//\'/\'\'}"; }
+
+# confirm <prompt>  — interactive y/N gate. Honors the global $ASSUME_YES flag
+# (set by --yes). Aborts the program on anything other than y/Y.
+ASSUME_YES=false
+confirm() {
+  $ASSUME_YES && return 0
+  # Probe for a usable controlling terminal. `[[ -r /dev/tty ]]` is not
+  # sufficient — the device node can exist while the process has no
+  # controlling terminal (background jobs, pipelines), so actually try to
+  # open it and fall back to a clean refusal if that fails.
+  if ! { exec 9</dev/tty; } 2>/dev/null; then
+    echo "Error: confirmation required but no interactive terminal is available." >&2
+    echo "Re-run with --yes to execute non-interactively." >&2
+    exit 1
+  fi
+  local reply
+  printf '%s [y/N] ' "$1" >&2
+  read -r reply <&9 || reply=""
+  exec 9<&-
+  case "$reply" in
+    y|Y|yes|YES) return 0 ;;
+    *) echo "Aborted." >&2; exit 1 ;;
+  esac
+}
+
+# run_write <description> <SQL>  — the common write path for every mutating
+# subcommand. With $DRY_RUN it prints the SQL and exits the action; otherwise
+# it confirms, then executes.
+DRY_RUN=false
+run_write() {
+  local desc="$1" sql="$2"
+  if $DRY_RUN; then
+    echo "-- DRY RUN: $desc"
+    echo "-- (no statements executed)"
+    printf '%s\n' "$sql"
+    return 0
+  fi
+  echo "About to execute ($desc):" >&2
+  printf '%s\n' "$sql" >&2
+  confirm "Proceed?"
+  db_exec "$sql"
+}
+
+# Resolve a framework alias/id to a concrete frameworkId.
+resolve_framework() {
+  # Same alias map as `tasks bulk-set-status`. Anything that isn't a known
+  # alias passes through as-is — supports raw frk_… ids.
+  case "$1" in
+    tgv|TGV)        echo "$TGV_FRAMEWORK_ID" ;;
+    soc2|SOC2)      echo "frk_683f377429b8408d1c85f9bd" ;;
+    law25|LAW25)    echo "frk_qclaw25_2024" ;;
+    bill3|BILL3)    echo "frk_qcbill3_2024" ;;
+    pipeda|PIPEDA)  echo "frk_capipeda_2025" ;;
+    *)              echo "$1" ;;
+  esac
+}
+
+# ---- markdown -> TipTap JSON ----------------------------------------------
+# Delegates to the `comp-md2tiptap` Node sidecar (uses `marked` + a custom
+# emitter that produces the same TipTap node + mark set the reader handles).
+# Emits a JSON array of TipTap block nodes on stdout. Required for policy
+# creates/updates whose markdown bodies contain lists, code fences, tables,
+# blockquotes, inline marks, or links — the prior jq-only writer (a 12-line
+# stub) silently dropped all of those.
+md_to_tiptap() {
+  local file="$1"
+  [[ -x "$(command -v comp-md2tiptap)" ]] || {
+    echo "Error: comp-md2tiptap sidecar not found on PATH. Install with: npm i -g marked && symlink comp-md2tiptap into ~/.local/bin/" >&2
+    return 1
+  }
+  comp-md2tiptap < "$file"
+}
+
+# ---- TipTap -> markdown / text --------------------------------------------
+# Reads a TipTap content JSON value on stdin (either the bare array of block
+# nodes, or an object with a `.content` array). Emits markdown on stdout; with
+# --text it strips heading markers and bold/italic for piping into other tools.
+# Port of comp-ai/repo/apps/api/src/vector-store/lib/utils/extract-policy-text.ts —
+# kept in jq so the same node walker serves `policies show`, `policies search`,
+# and any future caller (no bash recursion, no shell quoting hell with policy
+# bodies that approach MAX_ARG_STRLEN).
+_comp_tiptap_to_md() {
+  local mode="${1:-md}"  # md | text
+  local text_flag=false
+  [[ "$mode" == "text" ]] && text_flag=true
+  jq -r --argjson text "$text_flag" '
+    def render_text($text):
+      if .type == "text" then
+        (.text // "") as $t
+        | if $text then $t
+          else
+            ((.marks // []) | map(.type)) as $m
+            # Find the link mark (only one allowed per text run) and pull its
+            # href out so we can wrap the final string in [text](href). Apply
+            # the link wrap LAST (outermost) so bold/italic/code syntax lives
+            # inside the link text. Apply code FIRST (innermost) so the
+            # backticks are not surrounded by emphasis asterisks the reader
+            # cannot disambiguate on a future re-parse.
+            | ((.marks // []) | map(select(.type == "link")) | .[0] // null) as $link
+            | $t
+            | (if ($m | index("code"))   then "`"  + . + "`"  else . end)
+            | (if ($m | index("italic")) then "*"  + . + "*"  else . end)
+            | (if ($m | index("bold"))   then "**" + . + "**" else . end)
+            | (if $link != null then "[" + . + "](" + ($link.attrs.href // "") + ")" else . end)
+          end
+      elif .type == "hardBreak" then "\n"
+      else (.content // []) | map(render_text($text)) | join("")
+      end;
+    # Render a single table cell down to plain inline text (its single
+    # paragraph child becomes one cell line; pipe characters in cell text are
+    # escaped so they do not break the table syntax).
+    def render_cell($text):
+      ((.content // []) | map(render_text($text)) | join(" "))
+      | gsub("\\|"; "\\|")
+      | gsub("\n"; " ");
+    def render_block($text):
+      if   .type == "heading" then
+            (.attrs.level // 1) as $lvl
+            | ((.content // []) | map(render_text($text)) | join("")) as $h
+            | if $text then $h else (("#" * $lvl) + " " + $h) end
+      elif .type == "paragraph" then
+            (.content // []) | map(render_text($text)) | join("")
+      elif .type == "bulletList" then
+            (.content // [])
+            | map(
+                if .type == "listItem" then
+                  ((.content // []) | map(render_block($text)) | join("\n")) as $body
+                  | "- " + ($body | gsub("\n"; "\n  "))
+                else render_block($text) end)
+            | join("\n")
+      elif .type == "orderedList" then
+            ([(.content // [])[] | select(.type == "listItem")]) as $items
+            | [ range(0; $items | length) as $i
+                | (($items[$i].content // []) | map(render_block($text)) | join("\n")) as $body
+                | (($i + 1) | tostring) + ". " + ($body | gsub("\n"; "\n   ")) ]
+            | join("\n")
+      elif .type == "codeBlock" then
+            ((.content // []) | map(render_text(true)) | join("")) as $c
+            | (.attrs.language // null) as $lang
+            | if $text then $c
+              else "```" + ($lang // "") + "\n" + $c + "\n```"
+              end
+      elif .type == "blockquote" then
+            ((.content // []) | map(render_block($text)) | join("\n")) as $body
+            | if $text then $body else ($body | split("\n") | map("> " + .) | join("\n")) end
+      elif .type == "horizontalRule" then
+            if $text then "" else "---" end
+      elif .type == "table" then
+            # Emit GFM pipe table: header row, alignment row, body rows. Cell
+            # content rendered via render_cell so inline marks survive. Skips
+            # entirely in text mode (table reduces to its cell text joined).
+            ((.content // []) | map(select(.type == "tableRow"))) as $rows
+            | if ($rows | length) == 0 then ""
+              else
+                ($rows[0].content // []) as $hcells
+                | ($hcells | length) as $ncol
+                | if $text then
+                    [ $rows[]
+                      | (.content // [])
+                      | map(render_cell($text))
+                      | join(" | ") ]
+                    | join("\n")
+                  else
+                    ([ $hcells | map("| " + render_cell($text)) | join(" ") + " |" ]) as $hline
+                    | ("| " + ([range(0; $ncol)] | map("---") | join(" | ")) + " |") as $sep
+                    | ([ $rows[1:][]
+                          | (.content // [])
+                          | map(render_cell($text))
+                          | "| " + join(" | ") + " |" ]) as $brows
+                    | ($hline + [$sep] + $brows) | join("\n")
+                  end
+              end
+      elif .type == "text" then render_text($text)
+      else (.content // []) | map(render_block($text)) | join("\n")
+      end;
+    (if type == "array" then . else (.content // [.]) end)
+    | map(render_block($text))
+    | map(select(. != null and . != ""))
+    | join("\n\n")
+  '
+}
+
+# ---- Policy resolver + cache ----------------------------------------------
+# Resolve <id-or-title> to a single policy id by exact-id match, then fuzzy
+# case-insensitive substring match on title. Honours the same draft/archived
+# filters used by `show` and `search` so a query never resolves to a hidden
+# policy the caller intended to exclude.
+#
+# Args: <query> <include_drafts:true|false> <include_archived:true|false>
+# Stdout: the resolved id (single line) on success.
+# On 0 / 2-5 / >5 matches: prints a helpful error to stderr and exits 1.
+_comp_resolve_policy_id() {
+  local q="$1" include_drafts="$2" include_archived="$3"
+  if [[ "$q" =~ ^pol_ ]]; then
+    printf '%s\n' "$q"; return 0
+  fi
+  local list filtered count
+  list="$(api GET /policies)"
+  filtered="$(printf '%s' "$list" | jq --arg q "$q" --argjson d "$include_drafts" --argjson a "$include_archived" '
+    [ (.data // .)[]
+      | select($a or (.isArchived != true))
+      | select($d or (.status == "published"))
+      | select((.name // "") | ascii_downcase | contains($q | ascii_downcase))
+      | {id, name, status} ]')"
+  count="$(printf '%s' "$filtered" | jq 'length')"
+  case "$count" in
+    0)
+      echo "Error: no policy matches '${q}'" >&2
+      echo "  (filters: drafts=${include_drafts}, archived=${include_archived})" >&2
+      return 1 ;;
+    1)
+      printf '%s' "$filtered" | jq -r '.[0].id'; return 0 ;;
+    2|3|4|5)
+      echo "Error: '${q}' matches ${count} policies — be more specific:" >&2
+      printf '%s' "$filtered" | jq -r '.[] | "  " + .id + "  " + .name' >&2
+      return 1 ;;
+    *)
+      echo "Error: '${q}' matches ${count} policies — too many, refine your query." >&2
+      return 1 ;;
+  esac
+}
+
+# Cache extracted policy body text at ~/.cache/comp/<org>/policies/<id>.txt,
+# invalidated when Policy.updatedAt is newer than the cached file mtime. Used by
+# `policies search` so the 111-policy corpus isn't re-fetched on every query.
+#
+# Args: <policy_id> <updatedAt_iso8601> [--no-cache]
+# Stdout: the extracted body text.
+_comp_policy_body_text() {
+  local pid="$1" updated="$2" no_cache="${3:-}"
+  local cache_dir="${HOME}/.cache/comp/${ORG_ID}/policies"
+  local cache_file="${cache_dir}/${pid}.txt"
+  mkdir -p "$cache_dir"
+  if [[ "$no_cache" != "--no-cache" && -f "$cache_file" && -n "$updated" ]]; then
+    # GNU date converts ISO 8601 to epoch; compare against file mtime.
+    local upd_epoch file_epoch
+    upd_epoch="$(date -d "$updated" +%s 2>/dev/null || echo 0)"
+    file_epoch="$(stat -c %Y "$cache_file" 2>/dev/null || echo 0)"
+    if [[ "$file_epoch" -ge "$upd_epoch" && "$upd_epoch" -gt 0 ]]; then
+      cat "$cache_file"
+      return 0
+    fi
+  fi
+  local body
+  body="$(api GET "/policies/${pid}" | jq '.content' | _comp_tiptap_to_md text)"
+  printf '%s' "$body" > "$cache_file"
+  printf '%s' "$body"
+}
+
+[[ $# -lt 1 ]] && usage
+[[ "$1" == "--help" || "$1" == "-h" ]] && usage
+
+case "$1" in
+
+  # ======================= POLICIES =======================
+  policies)
+    shift
+    [[ $# -lt 1 || "$1" == "--help" ]] && {
+      echo "Usage: comp policies <list|get|show|search|create|update|publish|archive|frameworks|pull|push> ..." >&2; exit 1; }
+    sub="$1"; shift
+    case "$sub" in
+      list)
+        mode="default"
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --json)     mode="json"; shift ;;
+            --ids-only) mode="ids"; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp policies list'" >&2; exit 1 ;;
+          esac
+        done
+        result="$(api GET /policies)"
+        case "$mode" in
+          json) echo "$result" | jq '.data' ;;
+          ids)  echo "$result" | jq -r '.data[].id' ;;
+          default)
+            echo "$result" | jq -r '
+              .data[] | [.id, (.name // "—"),
+                         (.status // "—"),
+                         ((.updatedAt // .createdAt // "") | .[:10])] | @tsv' \
+              | column -t -s $'\t'
+            ;;
+        esac
+        ;;
+      get)
+        [[ $# -lt 1 ]] && { echo "Usage: comp policies get <id> [--json]" >&2; exit 1; }
+        id="$1"; shift
+        as_json=false
+        [[ "${1:-}" == "--json" ]] && as_json=true
+        result="$(api GET "/policies/${id}")"
+        if $as_json; then
+          echo "$result" | jq '.'
+        else
+          echo "$result" | jq -r '
+            "Policy: " + (.name // "—")
+            + "\nID: " + .id
+            + "\nStatus: " + (.status // "—")
+            + "\nDepartment: " + (.department // "—")
+            + "\nFrequency: " + (.frequency // "—")
+            + "\nUpdated: " + (.updatedAt // .createdAt // "—")
+            + (if .description then "\n\n" + .description else "" end)'
+        fi
+        ;;
+      show)
+        [[ $# -lt 1 ]] && {
+          echo "Usage: comp policies show <id-or-title> [--text|--md] [--include-drafts] [--include-archived]" >&2; exit 1; }
+        query="$1"; shift
+        render_mode="md"
+        include_drafts=false include_archived=false
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --text)              render_mode="text"; shift ;;
+            --md)                render_mode="md"; shift ;;
+            --include-drafts)    include_drafts=true; shift ;;
+            --include-archived)  include_archived=true; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp policies show'" >&2; exit 1 ;;
+          esac
+        done
+        pid="$(_comp_resolve_policy_id "$query" "$include_drafts" "$include_archived")" || exit 1
+        # /v1/policies/:id returns 404 for ids hidden by the org/list filter; the
+        # resolver already enforces the visibility rules so this fetch is safe.
+        policy="$(api GET "/policies/${pid}")"
+        title="$(printf '%s' "$policy" | jq -r '.name // "—"')"
+        status="$(printf '%s' "$policy" | jq -r '.status // "—"')"
+        updated="$(printf '%s' "$policy" | jq -r '(.updatedAt // .createdAt // "") | .[:10]')"
+        # Header (always rendered as-is, even in --text mode, so the caller sees
+        # which policy this body belongs to).
+        underline="$(printf '%*s' "${#title}" '' | tr ' ' '=')"
+        body="$(printf '%s' "$policy" | jq '.content' | _comp_tiptap_to_md "$render_mode")"
+        output="$(printf '%s\n%s\n%s\n\n%s' \
+          "$title" \
+          "$underline" \
+          "ID: ${pid}  •  Status: ${status}  •  Updated: ${updated}" \
+          "$body")"
+        if [[ -t 1 ]]; then
+          printf '%s\n' "$output" | ${PAGER:-less -R}
+        else
+          printf '%s\n' "$output"
+        fi
+        ;;
+      search)
+        terms="" as_json=false include_drafts=false include_archived=false no_cache=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --json)              as_json=true; shift ;;
+            --include-drafts)    include_drafts=true; shift ;;
+            --include-archived)  include_archived=true; shift ;;
+            --no-cache)          no_cache="--no-cache"; shift ;;
+            --*) echo "Error: unknown flag '$1' for 'comp policies search'" >&2; exit 1 ;;
+            *)
+              if [[ -z "$terms" ]]; then terms="$1"
+              else terms="${terms} $1"; fi
+              shift ;;
+          esac
+        done
+        [[ -z "$terms" ]] && {
+          echo "Usage: comp policies search <terms> [--json] [--include-drafts] [--include-archived] [--no-cache]" >&2; exit 1; }
+        list="$(api GET /policies)"
+        # Filter visible policies once; iterate the rest with the body cache.
+        visible="$(printf '%s' "$list" | jq --argjson d "$include_drafts" --argjson a "$include_archived" '
+          [ (.data // .)[]
+            | select($a or (.isArchived != true))
+            | select($d or (.status == "published"))
+            | {id, name, updatedAt: (.updatedAt // .createdAt // "")} ]')"
+        count="$(printf '%s' "$visible" | jq 'length')"
+        # Short title for the human output: drop bracketed prefixes like
+        # "[DOC-B6] " / "[Ensemble … (REQ-002)] " so the column stays readable.
+        results_json="["
+        first=true
+        # Title match also counts as a hit — print a synthetic match line so
+        # the searcher knows the policy itself is relevant even if the body
+        # doesn't contain the term.
+        while IFS=$'\t' read -r pid pname pupdated; do
+          [[ -z "$pid" ]] && continue
+          short="$(printf '%s' "$pname" | sed -E 's/^\[[^]]+\][[:space:]]*\[[^]]+\][[:space:]]*//; s/^\[[^]]+\][[:space:]]*//')"
+          body="$(_comp_policy_body_text "$pid" "$pupdated" "$no_cache" 2>/dev/null || true)"
+          # Build the candidate corpus: prefix the title so a title-only hit
+          # surfaces too.
+          corpus="$(printf 'TITLE: %s\n%s\n' "$pname" "$body")"
+          matches="$(printf '%s' "$corpus" | grep -iF -- "$terms" || true)"
+          [[ -z "$matches" ]] && continue
+          if $as_json; then
+            $first || results_json+=","
+            first=false
+            results_json+="$(jq -nc --arg id "$pid" --arg title "$pname" \
+              --arg matches "$matches" \
+              '{id:$id, title:$title, matches:($matches | split("\n") | map(select(length>0)))}')"
+          else
+            printf '%s\n' "$matches" | while IFS= read -r line; do
+              [[ -z "$line" ]] && continue
+              printf '%s  %s  | %s\n' "$pid" "$short" "$line"
+            done
+          fi
+        done < <(printf '%s' "$visible" | jq -r '.[] | [.id, .name, .updatedAt] | @tsv')
+        if $as_json; then
+          results_json+="]"
+          printf '%s\n' "$results_json" | jq '.'
+        fi
+        ;;
+      create)
+        name="" file="" description=""
+        as_json=false
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --name)        name="$2"; shift 2 ;;
+            --file)        file="$2"; shift 2 ;;
+            --description) description="$2"; shift 2 ;;
+            --json)        as_json=true; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp policies create'" >&2; exit 1 ;;
+          esac
+        done
+        [[ -z "$name" || -z "$file" ]] && {
+          echo "Usage: comp policies create --name NAME --file PATH [--description D] [--json]" >&2; exit 1; }
+        [[ -f "$file" ]] || { echo "Error: file not found: $file" >&2; exit 1; }
+        # Build the request body entirely via files — TipTap JSON for a full
+        # policy document exceeds Linux MAX_ARG_STRLEN (128 KiB) for a single
+        # argv argument, so it must never be passed on a command line.
+        content_tmp="$(mktemp)"; body_tmp="$(mktemp)"
+        md_to_tiptap "$file" > "$content_tmp"
+        jq -nc --arg n "$name" --arg d "$description" --slurpfile c "$content_tmp" \
+          '{name:$n, content:$c[0]} + (if $d != "" then {description:$d} else {} end)' > "$body_tmp"
+        result="$(api POST /policies -d "@$body_tmp")"
+        rm -f "$content_tmp" "$body_tmp"
+        if $as_json; then
+          echo "$result" | jq '.'
+        else
+          echo "$result" | jq -r '"Created policy: " + (.name // "—") + " (" + .id + ") status=" + (.status // "—")'
+        fi
+        ;;
+      update)
+        [[ $# -lt 1 ]] && {
+          echo "Usage: comp policies update <id> --file PATH [--dry-run] [--yes]" >&2; exit 1; }
+        id="$1"; shift
+        file=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --file)    file="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=true; shift ;;
+            --yes)     ASSUME_YES=true; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp policies update'" >&2; exit 1 ;;
+          esac
+        done
+        [[ -z "$file" ]] && {
+          echo "Usage: comp policies update <id> --file PATH [--dry-run] [--yes]" >&2; exit 1; }
+        [[ -f "$file" ]] || { echo "Error: file not found: $file" >&2; exit 1; }
+        # Re-wrap the markdown body into TipTap JSON and replace the policy's
+        # content column in place. SQL-backed: the Comp API exposes no
+        # content-update endpoint (same constraint as `archive`). db_exec
+        # pipes the statement over stdin, so the TipTap payload is not argv-bound.
+        # "Policy".content is jsonb[] (one TipTap node per element), so the JSON
+        # array is expanded into a Postgres array via jsonb_array_elements.
+        content_json="$(md_to_tiptap "$file" | jq -c '.')"
+        # Write BOTH content AND draftContent. The publish path (per
+        # apps/api/src/policies/policies.service.ts:722-726) prefers draftContent
+        # when copying to PolicyVersion + content on publish; if we only update
+        # content, the next publish reads stale draftContent and silently reverts.
+        # Reset draftContent to NULL too so the "no draft pending" state is
+        # accurate after a content rewrite.
+        sql="UPDATE \"Policy\"
+SET content = ARRAY(SELECT jsonb_array_elements('$(sql_lit "$content_json")'::jsonb)),
+    \"draftContent\" = NULL,
+    \"updatedAt\" = NOW()
+WHERE id = '$(sql_lit "$id")' AND \"organizationId\" = '$(sql_lit "$ORG_ID")';"
+        run_write "update policy ${id} content from ${file}" "$sql"
+        ;;
+      publish)
+        [[ $# -lt 1 ]] && {
+          echo "Usage: comp policies publish <id> [--changelog TEXT] [--set-active] [--json]" >&2; exit 1; }
+        id="$1"; shift
+        changelog="" set_active=false as_json=false
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --changelog)  changelog="$2"; shift 2 ;;
+            --set-active) set_active=true; shift ;;
+            --json)       as_json=true; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp policies publish'" >&2; exit 1 ;;
+          esac
+        done
+        body="$(jq -nc --arg cl "$changelog" --argjson sa "$set_active" \
+          '(if $cl != "" then {changelog:$cl} else {} end) + (if $sa then {setAsActive:true} else {} end)')"
+        result="$(api POST "/policies/${id}/versions/publish" -d "$body")"
+        if $as_json; then
+          echo "$result" | jq '.'
+        else
+          echo "$result" | jq -r '"Published policy " + ($id // "") + " — version " + ((.data.version // .data.id // "?") | tostring)' --arg id "$id"
+        fi
+        ;;
+      archive)
+        [[ $# -lt 1 ]] && {
+          echo "Usage: comp policies archive <id> [--dry-run] [--yes]" >&2; exit 1; }
+        id="$1"; shift
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --dry-run) DRY_RUN=true; shift ;;
+            --yes)     ASSUME_YES=true; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp policies archive'" >&2; exit 1 ;;
+          esac
+        done
+        i_lit="$(sql_lit "$id")"
+        # Supersede: flag archived, stamp lastArchivedAt, drop status to
+        # needs_review (PolicyStatus has no dedicated "retired" value), and
+        # prefix the name once. The CASE guards against double-prefixing on
+        # repeated runs (idempotent).
+        sql="UPDATE \"Policy\"
+SET \"isArchived\" = true,
+    \"lastArchivedAt\" = NOW(),
+    status = 'needs_review',
+    name = CASE WHEN name LIKE '[SUPERSÉDÉ] %' THEN name
+                ELSE '[SUPERSÉDÉ] ' || name END
+WHERE id = '${i_lit}' AND \"organizationId\" = '$(sql_lit "$ORG_ID")';"
+        run_write "archive (supersede) policy ${id}" "$sql"
+        ;;
+      delete)
+        # Hard-delete a policy and its FK children (PolicyVersion rows +
+        # _ControlToPolicy links) in one transaction. Use for genuine junk
+        # (test artifacts, accidental drafts) — prefer `archive` for anything
+        # that ever represented real compliance content.
+        [[ $# -lt 1 ]] && {
+          echo "Usage: comp policies delete <id> [<id>...] [--dry-run] [--yes]" >&2; exit 1; }
+        del_ids=()
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --dry-run) DRY_RUN=true; shift ;;
+            --yes)     ASSUME_YES=true; shift ;;
+            --*) echo "Error: unknown flag '$1' for 'comp policies delete'" >&2; exit 1 ;;
+            *) del_ids+=("$1"); shift ;;
+          esac
+        done
+        [[ ${#del_ids[@]} -eq 0 ]] && {
+          echo "Usage: comp policies delete <id> [<id>...] [--dry-run] [--yes]" >&2; exit 1; }
+        # Build a quoted, comma-separated id list for the IN clauses.
+        in_list=""
+        for did in "${del_ids[@]}"; do
+          in_list+="${in_list:+, }'$(sql_lit "$did")'"
+        done
+        o_lit="$(sql_lit "$ORG_ID")"
+        sql="BEGIN;
+DELETE FROM \"PolicyVersion\" WHERE \"policyId\" IN (${in_list});
+DELETE FROM \"_ControlToPolicy\" WHERE \"B\" IN (${in_list});
+DELETE FROM \"Policy\" WHERE id IN (${in_list}) AND \"organizationId\" = '${o_lit}';
+COMMIT;"
+        run_write "delete ${#del_ids[@]} policy(ies) + FK children" "$sql"
+        ;;
+      frameworks)
+        [[ $# -lt 1 ]] && { echo "Usage: comp policies frameworks <id> [--json]" >&2; exit 1; }
+        pid="$1"; shift
+        as_json=false
+        [[ "${1:-}" == "--json" ]] && as_json=true
+        rows="$(db_query "
+SELECT fi.id, fi.\"frameworkId\", COUNT(DISTINCT rm.\"controlId\") AS controls
+FROM \"_ControlToPolicy\" cp
+JOIN \"RequirementMap\" rm ON rm.\"controlId\" = cp.\"A\"
+JOIN \"FrameworkInstance\" fi ON fi.id = rm.\"frameworkInstanceId\"
+WHERE cp.\"B\" = '$(sql_lit "$pid")'
+  AND fi.\"organizationId\" = '$(sql_lit "$ORG_ID")'
+GROUP BY fi.id, fi.\"frameworkId\" ORDER BY fi.id")"
+        if $as_json; then
+          printf '%s\n' "$rows" | jq -Rn '[inputs | select(length>0) | split("\t") | {frameworkInstanceId:.[0], frameworkId:.[1], controls:(.[2]|tonumber)}]'
+        else
+          if [[ -z "$rows" ]]; then echo "(no framework controls linked to $pid)"; else
+            { echo -e "framework_instance\tframeworkId\tcontrols"; echo "$rows"; } | column -t -s $'\t'
+          fi
+        fi
+        ;;
+      link)
+        # Attach a Policy to one or more Controls (creates _ControlToPolicy
+        # rows; idempotent via ON CONFLICT DO NOTHING). Controls are resolved
+        # by criterion-code prefix `[CODE]…` within a framework.
+        pid=""; codes=""; fw_alias="tgv"
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --criteria|--criterion) codes="$2"; shift 2 ;;
+            --framework)            fw_alias="$2"; shift 2 ;;
+            --dry-run)              DRY_RUN=true; shift ;;
+            --yes)                  ASSUME_YES=true; shift ;;
+            -*) echo "Error: unknown flag '$1' for 'comp policies link'" >&2; exit 1 ;;
+            *)  [[ -z "$pid" ]] && pid="$1" || { echo "Error: extra arg '$1'" >&2; exit 1; }; shift ;;
+          esac
+        done
+        [[ -z "$pid" || -z "$codes" ]] && {
+          echo "Usage: comp policies link <policy_id> --criteria CODE[,CODE...] [--framework tgv|soc2|law25|bill3|pipeda] [--dry-run] [--yes]" >&2
+          echo "  Codes are criterion prefixes like S08.01,S08.03 — matched against control name prefix '[CODE]…'." >&2
+          exit 1; }
+        case "$fw_alias" in
+          tgv)    frk="frk_tgv_msss_2024" ;;
+          soc2)   frk="frk_683f377429b8408d1c85f9bd" ;;
+          law25)  frk="frk_qclaw25_2024" ;;
+          bill3)  frk="frk_qcbill3_2024" ;;
+          pipeda) frk="frk_capipeda_2025" ;;
+          *) echo "Error: unknown framework alias '$fw_alias'" >&2; exit 1 ;;
+        esac
+        o_lit="$(sql_lit "$ORG_ID")"
+        p_lit="$(sql_lit "$pid")"
+        fw_id="$(db_query "SELECT id FROM \"FrameworkInstance\" WHERE \"organizationId\" = '${o_lit}' AND \"frameworkId\" = '$(sql_lit "$frk")' LIMIT 1")"
+        [[ -z "$fw_id" ]] && { echo "Error: no FrameworkInstance for '${fw_alias}'" >&2; exit 1; }
+        f_lit="$(sql_lit "$fw_id")"
+        # Build a VALUES list from the comma-separated codes.
+        values=""
+        IFS=',' read -ra codearr <<< "$codes"
+        for code in "${codearr[@]}"; do
+          code="${code## }"; code="${code%% }"
+          [[ -z "$code" ]] && continue
+          c_lit="$(sql_lit "$code")"
+          [[ -n "$values" ]] && values+=","
+          values+="('${c_lit}')"
+        done
+        [[ -z "$values" ]] && { echo "Error: no valid criteria parsed" >&2; exit 1; }
+
+        # Preview: how many controls will resolve?
+        preview="$(db_query "
+WITH codes(code) AS (VALUES ${values}),
+  resolved AS (
+    SELECT codes.code, c.id, c.name
+    FROM codes
+    JOIN \"Control\" c ON c.\"organizationId\" = '${o_lit}' AND c.name LIKE '[' || codes.code || ']%'
+    JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id AND rm.\"frameworkInstanceId\" = '${f_lit}'
+  )
+SELECT (SELECT COUNT(*) FROM codes) AS input,
+       (SELECT COUNT(*) FROM resolved) AS resolved,
+       (SELECT COUNT(*) FROM codes WHERE NOT EXISTS (SELECT 1 FROM resolved r WHERE r.code = codes.code)) AS unresolved")"
+        in_count=$(echo "$preview" | cut -f1)
+        res_count=$(echo "$preview" | cut -f2)
+        un_count=$(echo "$preview" | cut -f3)
+        echo "Link preview (policy ${pid} -> ${fw_alias} criteria):"
+        echo "  Input codes:  ${in_count}"
+        echo "  Resolved:     ${res_count}"
+        echo "  Unresolved:   ${un_count}"
+
+        sql="BEGIN;
+WITH codes(code) AS (VALUES ${values})
+INSERT INTO \"_ControlToPolicy\" (\"A\",\"B\")
+SELECT c.id, '${p_lit}'
+FROM codes
+JOIN \"Control\" c ON c.\"organizationId\" = '${o_lit}' AND c.name LIKE '[' || codes.code || ']%'
+JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id AND rm.\"frameworkInstanceId\" = '${f_lit}'
+ON CONFLICT DO NOTHING;
+COMMIT;"
+        run_write "link policy ${pid} to ${res_count} ${fw_alias} controls" "$sql"
+        ;;
+
+      # =================================================================
+      # LOCAL MIRROR: export (Comp → md) / import (md → Comp)
+      #
+      # Mental model: Comp AI = origin, local md dir = working tree.
+      #   export = pull   (Comp → local files)
+      #   import = push   (local files → Comp)
+      #
+      # Bridged by the same converters used everywhere else:
+      #   TipTap JSON  →  md   (via `comp policies show` / _comp_tiptap_to_md)
+      #   md           →  TipTap JSON  (via comp-md2tiptap)
+      #
+      # Phase-0 fidelity gate (2026-05-30): all 5 representative policy
+      # shapes (table / lists / code+accents / structure / table) round-
+      # trip LOSSLESS at the semantic-equality level. See
+      # /tmp/comp-fidelity/ for the test harness.
+      # =================================================================
+
+      pull|export)  # 'export' kept as a hidden back-compat alias for 'pull'
+        # comp policies pull [--all | --id POL_ID] [--dir PATH] [--include-archived]
+        # Default: --all, dir=~/Documents/bento-docs/derived/legal/tgv/policies/
+        dir="$HOME/Documents/bento-docs/derived/legal/tgv/policies"
+        only_id="" include_archived=false
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --all)               shift ;;
+            --id)                only_id="$2"; shift 2 ;;
+            --dir)               dir="$2"; shift 2 ;;
+            --include-archived)  include_archived=true; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp policies pull'" >&2; exit 1 ;;
+          esac
+        done
+        mkdir -p "$dir"
+        # Pull the full policy list once (id, name, status, isArchived,
+        # currentVersionId/version, updatedAt). One round-trip beats N.
+        all_policies="$(api GET /policies | jq -c '.data')"
+        # Apply filters
+        filtered="$(echo "$all_policies" | jq -c --arg only "$only_id" --argjson incarch "$include_archived" '
+          map(select(($only == "" or .id == $only) and ($incarch or (.isArchived // false) == false)))
+        ')"
+        count="$(echo "$filtered" | jq 'length')"
+        if [[ "$count" == "0" ]]; then
+          echo "No policies match the filter."
+          exit 0
+        fi
+        echo "Exporting ${count} policies to ${dir}/ ..." >&2
+
+        manifest_tmp="$(mktemp)"
+        echo "[]" > "$manifest_tmp"
+        # Track filename collisions: derive slug from [DOC-XXX] bracket prefix.
+        # When two policies want the same slug, append -<short-id> to the second.
+        declare -A slug_seen=()
+
+        n=0
+        echo "$filtered" | jq -c '.[]' | while IFS= read -r pol; do
+          n=$((n + 1))
+          pid="$(echo "$pol" | jq -r '.id')"
+          pname="$(echo "$pol" | jq -r '.name // "untitled"')"
+          pstatus="$(echo "$pol" | jq -r '.status // "?"')"
+          parchived="$(echo "$pol" | jq -r '.isArchived // false')"
+          pupd="$(echo "$pol" | jq -r '.updatedAt // .createdAt // ""')"
+
+          # Derive slug from [DOC-XXX] bracket prefix; fall back to policy id.
+          slug="$(echo "$pname" | sed -nE 's/^\[([A-Za-z0-9._/-]+)\].*/\1/p' | sed 's,/,_,g')"
+          [[ -z "$slug" ]] && slug="${pid}"
+          # Disambiguate collision
+          if [[ -n "${slug_seen[$slug]:-}" ]]; then
+            slug="${slug}-${pid: -8}"
+          fi
+          slug_seen[$slug]=1
+
+          target="$dir/${slug}.md"
+          # Pull the rendered markdown body (skip the 4 CLI-chrome lines).
+          # Re-use the exact same render path the user sees on `policies show`,
+          # so what they export is what they could re-import losslessly.
+          #
+          # Inter-request pacing: env-controllable via COMP_PACE_MS (ms).
+          # Default 500ms matches the LIVE comp-ai server's 100/min/IP
+          # throttle (60000ms / 100req ≈ 600ms per call comfortably). Once
+          # the server-side throttle is bumped (env-configurable in
+          # app.module.ts post-2026-05-30, default 100k/min when deployed):
+          # set COMP_PACE_MS=0 in your shell to remove the artificial delay.
+          # The 429 exponential backoff in api() stays as the safety net.
+          pace_ms="${COMP_PACE_MS:-500}"
+          if [[ "$pace_ms" != "0" ]]; then
+            # bash sleep accepts decimal seconds; convert ms → s.
+            sleep "$(awk -v ms="$pace_ms" 'BEGIN{printf "%.3f", ms/1000}')"
+          fi
+          body="$(api GET "/policies/${pid}" | jq '.content' | _comp_tiptap_to_md md)"
+          if [[ -z "$body" ]]; then
+            echo "  ⚠ ${slug} — empty render (policy has no content?); skipping" >&2
+            continue
+          fi
+          printf '%s\n' "$body" > "$target"
+
+          sha="$(sha256sum "$target" | awk '{print $1}')"
+          # Append manifest entry
+          entry="$(jq -nc \
+            --arg id "$pid" \
+            --arg filename "${slug}.md" \
+            --arg name "$pname" \
+            --arg status "$pstatus" \
+            --argjson archived "$parchived" \
+            --arg updated "$pupd" \
+            --arg sha "$sha" \
+            --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            '{id:$id, filename:$filename, name:$name, status:$status,
+              isArchived:$archived, updatedAt:$updated,
+              content_sha256:$sha, exported_at:$ts}')"
+          jq --argjson e "$entry" '. + [$e]' "$manifest_tmp" > "${manifest_tmp}.next" \
+            && mv "${manifest_tmp}.next" "$manifest_tmp"
+          echo "  ✓ ${slug}.md (${pstatus})" >&2
+        done
+
+        # Wrap entries in the manifest envelope
+        final_manifest="$dir/manifest.json"
+        jq -n \
+          --argjson policies "$(cat "$manifest_tmp")" \
+          --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+          '{comp_export_version: 1, exported_at: $ts, policies: $policies}' \
+          > "$final_manifest"
+        rm -f "$manifest_tmp"
+        n_out="$(jq '.policies | length' "$final_manifest")"
+        echo "Wrote ${n_out} policies + manifest to ${dir}/" >&2
+        echo "$final_manifest"
+        ;;
+
+      push|import)  # 'import' kept as a hidden back-compat alias for 'push'
+        # comp policies push [--dir PATH] [--dry-run | --yes] [--changelog TEXT]
+        # Default: --dry-run, dir=~/Documents/bento-docs/derived/legal/tgv/policies/
+        #
+        # Workflow:
+        #   1. Re-hash each <slug>.md in --dir; compare to manifest.json's
+        #      stored content_sha256. Only changed files enter the push set.
+        #   2. Per changed file: snapshot CURRENT live policy JSON to
+        #      <dir>/.rollback/<pol_id>.<UTC>.json (so we can restore byte-
+        #      for-byte if needed).
+        #   3. `comp policies update --file <slug>.md --yes` (SQL write).
+        #   4. `comp policies publish --changelog "$changelog"` (new version).
+        #   5. Update manifest entry with the new sha + ts.
+        # --dry-run prints the push set + per-file diff summary (no writes).
+        #
+        # SAFETY: dry-run is the DEFAULT. --yes is required to actually push.
+        # Idempotent: re-running with no md changes is a no-op.
+        dir="$HOME/Documents/bento-docs/derived/legal/tgv/policies"
+        do_yes=false
+        # NOTE: --dry-run is implicit (no --yes); kept as a no-op flag for clarity.
+        changelog=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --dir)        dir="$2"; shift 2 ;;
+            --dry-run)    do_yes=false; shift ;;
+            --yes)        do_yes=true; shift ;;
+            --changelog)  changelog="$2"; shift 2 ;;
+            *) echo "Error: unknown flag '$1' for 'comp policies push'" >&2; exit 1 ;;
+          esac
+        done
+        manifest="$dir/manifest.json"
+        [[ -f "$manifest" ]] || { echo "Error: manifest not found at $manifest (run 'comp policies pull' first)" >&2; exit 1; }
+        rollback_dir="$dir/.rollback"
+        mkdir -p "$rollback_dir"
+
+        # Build push set: rows where the on-disk sha != manifest sha
+        # (and the .md file actually exists; vanished files are reported but skipped).
+        push_set_tmp="$(mktemp)"
+        echo "[]" > "$push_set_tmp"
+        missing_count=0 unchanged_count=0 changed_count=0
+        while IFS= read -r entry; do
+          pid="$(echo "$entry" | jq -r '.id')"
+          fn="$(echo "$entry" | jq -r '.filename')"
+          old_sha="$(echo "$entry" | jq -r '.content_sha256')"
+          fpath="$dir/$fn"
+          if [[ ! -f "$fpath" ]]; then
+            echo "  ⚠ ${fn} — missing on disk (skipped)" >&2
+            missing_count=$((missing_count + 1))
+            continue
+          fi
+          new_sha="$(sha256sum "$fpath" | awk '{print $1}')"
+          if [[ "$new_sha" == "$old_sha" ]]; then
+            unchanged_count=$((unchanged_count + 1))
+            continue
+          fi
+          changed_count=$((changed_count + 1))
+          entry2="$(echo "$entry" | jq --arg ns "$new_sha" '. + {new_sha:$ns}')"
+          jq --argjson e "$entry2" '. + [$e]' "$push_set_tmp" > "${push_set_tmp}.next" \
+            && mv "${push_set_tmp}.next" "$push_set_tmp"
+        done < <(jq -c '.policies[]' "$manifest")
+
+        echo "Push set: ${changed_count} changed · ${unchanged_count} unchanged · ${missing_count} missing-on-disk" >&2
+        if [[ "$changed_count" == "0" ]]; then
+          echo "Nothing to push. (idempotent no-op)" >&2
+          rm -f "$push_set_tmp"
+          exit 0
+        fi
+
+        # Diff summary per file (always shown, in both dry-run and yes mode)
+        echo "" >&2
+        echo "=== Push set ===" >&2
+        jq -c '.[]' "$push_set_tmp" | while IFS= read -r e; do
+          pid="$(echo "$e" | jq -r '.id')"
+          fn="$(echo "$e" | jq -r '.filename')"
+          name="$(echo "$e" | jq -r '.name')"
+          old_sha="$(echo "$e" | jq -r '.content_sha256')"
+          new_sha="$(echo "$e" | jq -r '.new_sha')"
+          fpath="$dir/$fn"
+          # Render live policy to md for the diff comparison
+          live_md_tmp="$(mktemp)"
+          api GET "/policies/${pid}" 2>/dev/null | jq '.content' | _comp_tiptap_to_md md > "$live_md_tmp" || true
+          old_lines="$(wc -l < "$live_md_tmp")"
+          new_lines="$(wc -l < "$fpath")"
+          # diff -y header for quick scan; full diff sent to stderr.
+          added="$(diff -u "$live_md_tmp" "$fpath" | grep -c '^+[^+]' || true)"
+          removed="$(diff -u "$live_md_tmp" "$fpath" | grep -c '^-[^-]' || true)"
+          rm -f "$live_md_tmp"
+          echo "  ${fn}  →  ${name}" >&2
+          echo "    sha: ${old_sha:0:12}… → ${new_sha:0:12}…   lines: ${old_lines} → ${new_lines}   (+${added} / -${removed})" >&2
+        done
+
+        if ! $do_yes; then
+          echo "" >&2
+          echo "DRY-RUN — no writes. Pass --yes to push." >&2
+          rm -f "$push_set_tmp"
+          exit 0
+        fi
+
+        # ============ EXECUTE ============
+        echo "" >&2
+        echo "=== Executing push (--yes) ===" >&2
+        push_ts="$(date -u +"%Y%m%dT%H%M%SZ")"
+        fail_count=0 ok_count=0
+        # Build a new manifest as we go (start from the existing one, replace
+        # changed entries with their new sha + new exported_at).
+        new_manifest_tmp="$(mktemp)"
+        jq '.' "$manifest" > "$new_manifest_tmp"
+
+        jq -c '.[]' "$push_set_tmp" | while IFS= read -r e; do
+          pid="$(echo "$e" | jq -r '.id')"
+          fn="$(echo "$e" | jq -r '.filename')"
+          new_sha="$(echo "$e" | jq -r '.new_sha')"
+          fpath="$dir/$fn"
+
+          # 1. Snapshot current live content (raw TipTap JSON, byte-for-byte restorable)
+          snap="$rollback_dir/${pid}.${push_ts}.json"
+          api GET "/policies/${pid}" 2>/dev/null > "$snap" || { echo "  ✗ ${fn}: failed to snapshot (aborting this file)" >&2; fail_count=$((fail_count+1)); continue; }
+          echo "  · snapshot → ${snap}" >&2
+
+          # 2. Update via existing comp policies update (which uses md_to_tiptap + SQL write)
+          if ! "$0" policies update "$pid" --file "$fpath" --yes >/dev/null 2>&1; then
+            echo "  ✗ ${fn}: update failed (rollback file at ${snap})" >&2
+            fail_count=$((fail_count+1))
+            continue
+          fi
+
+          # 3. Publish a new version
+          cl="${changelog:-Imported from local mirror ${fpath}}"
+          if ! "$0" policies publish "$pid" --changelog "$cl" >/dev/null 2>&1; then
+            echo "  ✗ ${fn}: publish failed (content was updated; rollback at ${snap})" >&2
+            fail_count=$((fail_count+1))
+            continue
+          fi
+
+          # 4. Update the in-progress manifest copy: replace this entry's sha + ts
+          jq --arg pid "$pid" --arg sha "$new_sha" --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            '.policies = (.policies | map(if .id == $pid then . + {content_sha256:$sha, exported_at:$ts} else . end))' \
+            "$new_manifest_tmp" > "${new_manifest_tmp}.next" \
+            && mv "${new_manifest_tmp}.next" "$new_manifest_tmp"
+
+          echo "  ✓ ${fn}" >&2
+          ok_count=$((ok_count + 1))
+        done
+
+        # Commit the updated manifest
+        mv "$new_manifest_tmp" "$manifest"
+        rm -f "$push_set_tmp"
+
+        echo "" >&2
+        echo "Push complete: ${ok_count} ok · ${fail_count} failed" >&2
+        echo "Rollback snapshots: ${rollback_dir}/*.${push_ts}.json" >&2
+        [[ "$fail_count" -gt 0 ]] && exit 2
+        ;;
+
+      *) echo "Unknown policies subcommand: $sub" >&2; exit 1 ;;
+    esac
+    ;;
+
+  # ======================= TASKS =======================
+  tasks)
+    shift
+    [[ $# -lt 1 || "$1" == "--help" ]] && {
+      echo "Usage: comp tasks <list|get|set-status> ..." >&2; exit 1; }
+    sub="$1"; shift
+    case "$sub" in
+      list)
+        mode="default" status_filter=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --json)     mode="json"; shift ;;
+            --ids-only) mode="ids"; shift ;;
+            --status)   status_filter="$2"; shift 2 ;;
+            *) echo "Error: unknown flag '$1' for 'comp tasks list'" >&2; exit 1 ;;
+          esac
+        done
+        result="$(api GET /tasks)"
+        # API returns a bare array.
+        if [[ -n "$status_filter" ]]; then
+          result="$(echo "$result" | jq --arg s "$status_filter" '[.[] | select(.status == $s)]')"
+        fi
+        case "$mode" in
+          json) echo "$result" | jq '.' ;;
+          ids)  echo "$result" | jq -r '.[].id' ;;
+          default)
+            echo "$result" | jq -r '
+              .[] | [.id, (.title // "—"),
+                     (.status // "—"),
+                     ((.updatedAt // .createdAt // "") | .[:10])] | @tsv' \
+              | column -t -s $'\t'
+            ;;
+        esac
+        ;;
+      get)
+        [[ $# -lt 1 ]] && { echo "Usage: comp tasks get <id> [--json]" >&2; exit 1; }
+        id="$1"; shift
+        as_json=false
+        [[ "${1:-}" == "--json" ]] && as_json=true
+        result="$(api GET "/tasks/${id}")"
+        if $as_json; then
+          echo "$result" | jq '.'
+        else
+          echo "$result" | jq -r '
+            "Task: " + (.title // "—")
+            + "\nID: " + .id
+            + "\nStatus: " + (.status // "—")
+            + "\nDepartment: " + (.department // "—")
+            + "\nFrequency: " + (.frequency // "—")
+            + "\nUpdated: " + (.updatedAt // .createdAt // "—")
+            + (if .description then "\n\n" + .description else "" end)'
+        fi
+        ;;
+      set-status)
+        [[ $# -lt 2 ]] && {
+          echo "Usage: comp tasks set-status <id> <status> [--dry-run] [--yes]" >&2
+          echo "  status: todo | in_progress | in_review | done | not_relevant | failed" >&2
+          exit 1; }
+        id="$1"; status="$2"; shift 2
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --dry-run) DRY_RUN=true; shift ;;
+            --yes)     ASSUME_YES=true; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp tasks set-status'" >&2; exit 1 ;;
+          esac
+        done
+        case "$status" in
+          todo|in_progress|in_review|done|not_relevant|failed) ;;
+          *) echo "Error: invalid status '$status'." >&2
+             echo "Valid: todo, in_progress, in_review, done, not_relevant, failed" >&2
+             exit 1 ;;
+        esac
+        # The live API rejects PATCH /tasks/:id under API-key auth — it requires
+        # an authenticated user session. Task.status is a plain enum column;
+        # set it directly via SQL, consistent with the other write subcommands
+        # ($status is validated against the enum whitelist above, so it is safe
+        # to interpolate; id is escaped).
+        id_lit="$(sql_lit "$id")"
+        sql="UPDATE \"Task\" SET status = '${status}', \"updatedAt\" = NOW() WHERE id = '${id_lit}';"
+        run_write "set task ${id} status -> ${status}" "$sql"
+        ;;
+      create)
+        name="" control_id="" status="todo" description=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --name)        name="$2"; shift 2 ;;
+            --control)     control_id="$2"; shift 2 ;;
+            --status)      status="$2"; shift 2 ;;
+            --description) description="$2"; shift 2 ;;
+            --dry-run)     DRY_RUN=true; shift ;;
+            --yes)         ASSUME_YES=true; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp tasks create'" >&2; exit 1 ;;
+          esac
+        done
+        [[ -z "$name" || -z "$control_id" ]] && {
+          echo "Usage: comp tasks create --name N --control CTL [--status S] [--description D] [--dry-run] [--yes]" >&2; exit 1; }
+        case "$status" in
+          todo|in_progress|in_review|done|not_relevant|failed) ;;
+          *) echo "Error: invalid status '$status'. Valid: todo, in_progress, in_review, done, not_relevant, failed" >&2; exit 1 ;;
+        esac
+        # description is NOT NULL in the schema with no default — fall back to name.
+        [[ -z "$description" ]] && description="$name"
+        n_lit="$(sql_lit "$name")"
+        d_lit="$(sql_lit "$description")"
+        c_lit="$(sql_lit "$control_id")"
+        o_lit="$(sql_lit "$ORG_ID")"
+        # Single transaction: INSERT Task (id via DB cuid fn), then link it.
+        # A CTE captures the generated id so the link insert references the
+        # same row without a second round trip.
+        sql="BEGIN;
+WITH new_task AS (
+  INSERT INTO \"Task\" (id, title, description, status, \"organizationId\", \"updatedAt\")
+  VALUES (generate_prefixed_cuid('tsk'), '${n_lit}', '${d_lit}', '${status}', '${o_lit}', NOW())
+  RETURNING id
+)
+INSERT INTO \"_ControlToTask\" (\"A\", \"B\")
+SELECT '${c_lit}', id FROM new_task;
+COMMIT;"
+        run_write "create task '${name}' linked to control ${control_id}" "$sql"
+        ;;
+      bulk-set-status)
+        # Bulk-update Task.status for many controls in one transaction. The
+        # input CSV maps a criterion code (e.g. P01.01, S06.06, I02) to a
+        # target status. We resolve the code to a control by exact-prefix match
+        # on the control name `[CODE]…` within the chosen framework, then
+        # update the single Task linked to it (the TGV import is 1:1
+        # control:task — verified at integration time).
+        fw_alias="tgv"; csv_file=""; sep="|"
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --framework) fw_alias="$2"; shift 2 ;;
+            --file)      csv_file="$2"; shift 2 ;;
+            --sep)       sep="$2"; shift 2 ;;
+            --dry-run)   DRY_RUN=true; shift ;;
+            --yes)       ASSUME_YES=true; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp tasks bulk-set-status'" >&2; exit 1 ;;
+          esac
+        done
+        [[ -z "$csv_file" ]] && {
+          echo "Usage: comp tasks bulk-set-status --file CSV [--framework tgv|soc2|law25|bill3|pipeda] [--sep '|'] [--dry-run] [--yes]" >&2
+          echo "  CSV rows: criterion_code${sep}status      (lines starting with # are ignored)" >&2
+          echo "  status: todo | in_progress | in_review | done | not_relevant | failed" >&2
+          exit 1; }
+        [[ ! -f "$csv_file" ]] && { echo "Error: CSV file not found: $csv_file" >&2; exit 1; }
+        case "$fw_alias" in
+          tgv)    frk="frk_tgv_msss_2024" ;;
+          soc2)   frk="frk_683f377429b8408d1c85f9bd" ;;
+          law25)  frk="frk_qclaw25_2024" ;;
+          bill3)  frk="frk_qcbill3_2024" ;;
+          pipeda) frk="frk_capipeda_2025" ;;
+          *) echo "Error: unknown framework alias '$fw_alias'" >&2; exit 1 ;;
+        esac
+        o_lit="$(sql_lit "$ORG_ID")"
+        fw_id="$(db_query "SELECT id FROM \"FrameworkInstance\" WHERE \"organizationId\" = '${o_lit}' AND \"frameworkId\" = '$(sql_lit "$frk")' LIMIT 1")"
+        [[ -z "$fw_id" ]] && { echo "Error: no FrameworkInstance for '${fw_alias}' in org" >&2; exit 1; }
+        f_lit="$(sql_lit "$fw_id")"
+
+        # Parse the CSV → an in-SQL VALUES clause so the whole bulk runs in
+        # one transaction. We validate the status enum per-row in shell first
+        # so SQL errors don't roll back valid rows.
+        values=""; row_count=0; skipped=0
+        while IFS="$sep" read -r code status rest; do
+          # Strip whitespace + ignore blanks and # comments.
+          code="${code## }"; code="${code%% }"
+          status="${status## }"; status="${status%% }"
+          [[ -z "$code" || "${code:0:1}" == "#" ]] && continue
+          case "$status" in
+            todo|in_progress|in_review|done|not_relevant|failed) ;;
+            *) echo "Skipping row '${code}': invalid status '${status}'" >&2; skipped=$((skipped+1)); continue ;;
+          esac
+          c_lit="$(sql_lit "$code")"
+          s_lit="$(sql_lit "$status")"
+          [[ -n "$values" ]] && values+=","
+          values+="('${c_lit}','${s_lit}')"
+          row_count=$((row_count+1))
+        done < "$csv_file"
+        [[ $row_count -eq 0 ]] && { echo "Error: no valid rows in CSV" >&2; exit 1; }
+
+        # Preview: how many rows resolve to a real control + task?
+        preview_sql="
+WITH input(code, target) AS (VALUES ${values}),
+  matched AS (
+    SELECT i.code, i.target, c.id AS cid, c.name AS cname, t.id AS tid, t.status::text AS cur
+    FROM input i
+    JOIN \"Control\" c ON c.\"organizationId\" = '${o_lit}'
+      AND c.name LIKE '[' || i.code || ']%'
+    JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id AND rm.\"frameworkInstanceId\" = '${f_lit}'
+    JOIN \"_ControlToTask\" ct ON ct.\"A\" = c.id
+    JOIN \"Task\" t ON t.id = ct.\"B\" AND t.\"organizationId\" = '${o_lit}'
+  )
+SELECT
+  (SELECT COUNT(*) FROM input) AS input_rows,
+  (SELECT COUNT(*) FROM matched) AS matched_rows,
+  (SELECT COUNT(*) FROM matched WHERE cur <> target) AS will_change,
+  (SELECT COUNT(*) FROM input i WHERE NOT EXISTS (SELECT 1 FROM matched m WHERE m.code = i.code)) AS unresolved"
+        preview="$(db_query "$preview_sql")"
+        in_rows=$(echo "$preview" | cut -f1)
+        matched_rows=$(echo "$preview" | cut -f2)
+        will_change=$(echo "$preview" | cut -f3)
+        unresolved=$(echo "$preview" | cut -f4)
+        echo "Bulk-set-status preview (framework: ${fw_alias}):"
+        echo "  Input rows:    ${in_rows} (parsed) + ${skipped} skipped"
+        echo "  Matched ctrls: ${matched_rows}"
+        echo "  Unresolved:    ${unresolved}"
+        echo "  Will change:   ${will_change} (no-op for the rest)"
+
+        if [[ "$unresolved" -gt 0 ]]; then
+          echo ""
+          echo "Unresolved criterion codes (no [CODE] control found in '${fw_alias}'):"
+          db_query "
+WITH input(code) AS (VALUES $(echo "$values" | sed -E \"s/,/ , /g; s/'([^']+)','[^']+'/'\\1'/g\" )),
+  matched AS (SELECT i.code FROM input i JOIN \"Control\" c ON c.\"organizationId\" = '${o_lit}' AND c.name LIKE '[' || i.code || ']%' JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id AND rm.\"frameworkInstanceId\" = '${f_lit}')
+SELECT i.code FROM input i WHERE NOT EXISTS (SELECT 1 FROM matched m WHERE m.code = i.code) ORDER BY i.code" | sed 's/^/  /'
+        fi
+
+        update_sql="BEGIN;
+WITH input(code, target) AS (VALUES ${values})
+UPDATE \"Task\" t SET status = i.target::\"TaskStatus\", \"updatedAt\" = NOW()
+FROM input i
+JOIN \"Control\" c ON c.\"organizationId\" = '${o_lit}' AND c.name LIKE '[' || i.code || ']%'
+JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id AND rm.\"frameworkInstanceId\" = '${f_lit}'
+JOIN \"_ControlToTask\" ct ON ct.\"A\" = c.id
+WHERE t.id = ct.\"B\" AND t.\"organizationId\" = '${o_lit}' AND t.status <> i.target::\"TaskStatus\";
+COMMIT;"
+        run_write "bulk-set ${will_change} task statuses in '${fw_alias}'" "$update_sql"
+        ;;
+      *) echo "Unknown tasks subcommand: $sub" >&2; exit 1 ;;
+    esac
+    ;;
+
+  # ======================= EVIDENCE =======================
+  evidence)
+    shift
+    [[ $# -lt 1 || "$1" == "--help" ]] && {
+      echo "Usage: comp evidence <list|upload|download> ..." >&2; exit 1; }
+    sub="$1"; shift
+    case "$sub" in
+      list)
+        [[ $# -lt 1 ]] && { echo "Usage: comp evidence list <taskId> [--json]" >&2; exit 1; }
+        task_id="$1"; shift
+        as_json=false
+        [[ "${1:-}" == "--json" ]] && as_json=true
+        result="$(api GET "/tasks/${task_id}/attachments")"
+        if $as_json; then
+          echo "$result" | jq '.'
+        else
+          echo "$result" | jq -r '
+            .[] | [.id, (.fileName // .name // "—"),
+                   (.fileType // .type // "—"),
+                   ((.fileSize // .size // 0) | tostring),
+                   ((.createdAt // "") | .[:10])] | @tsv' \
+            | column -t -s $'\t'
+        fi
+        ;;
+      upload)
+        [[ $# -lt 2 ]] && {
+          echo "Usage: comp evidence upload <taskId> <file> [--description D] [--user usr_...] [--json]" >&2; exit 1; }
+        task_id="$1"; file="$2"; shift 2
+        description="" upload_user="$USER_ID" as_json=false
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --description) description="$2"; shift 2 ;;
+            --user)        upload_user="$2"; shift 2 ;;
+            --json)        as_json=true; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp evidence upload'" >&2; exit 1 ;;
+          esac
+        done
+        [[ -f "$file" ]] || { echo "Error: file not found: $file" >&2; exit 1; }
+        [[ -n "$upload_user" ]] || {
+          echo "Error: no userId available. Set COMP_USER_ID in $CONF_SHELL or pass --user usr_..." >&2
+          echo "API-key uploads require a valid userId in the request body." >&2
+          exit 1; }
+        file_name="$(basename "$file")"
+        file_type="$(file --brief --mime-type "$file" 2>/dev/null || echo "application/octet-stream")"
+        # Stream base64 + body through temp files so PDFs >~1MB don't overflow ARG_MAX
+        # (the prior `jq --arg fd "$file_data"` + `curl -d "$body"` both passed the
+        # blob via argv).
+        b64_path="$(mktemp -t comp-evidence-b64.XXXXXX)"
+        body_path="$(mktemp -t comp-evidence-body.XXXXXX)"
+        trap 'rm -f "$b64_path" "$body_path"' RETURN
+        base64 -w0 "$file" > "$b64_path"
+        jq -nc \
+          --arg fn "$file_name" --arg ft "$file_type" \
+          --rawfile fd "$b64_path" --arg u "$upload_user" --arg d "$description" \
+          '{fileName:$fn, fileType:$ft, fileData:$fd, userId:$u}
+           + (if $d != "" then {description:$d} else {} end)' > "$body_path"
+        rm -f "$b64_path"
+        result="$(api POST "/tasks/${task_id}/attachments" --data-binary "@$body_path")"
+        rm -f "$body_path"
+        if $as_json; then
+          echo "$result" | jq '.'
+        else
+          echo "$result" | jq -r '"Uploaded evidence: " + (.fileName // .name // "?") + " (" + .id + ")"'
+        fi
+        ;;
+      download)
+        [[ $# -lt 2 ]] && {
+          echo "Usage: comp evidence download <taskId> <attId> [--json]" >&2; exit 1; }
+        task_id="$1"; att_id="$2"; shift 2
+        as_json=false
+        [[ "${1:-}" == "--json" ]] && as_json=true
+        result="$(api GET "/tasks/${task_id}/attachments/${att_id}/download")"
+        if $as_json; then
+          echo "$result" | jq '.'
+        else
+          echo "$result" | jq -r '.downloadUrl'
+        fi
+        ;;
+      *) echo "Unknown evidence subcommand: $sub" >&2; exit 1 ;;
+    esac
+    ;;
+
+  # ======================= CONTROLS (DB fallback) =======================
+  controls)
+    shift
+    [[ $# -lt 1 || "$1" == "--help" ]] && {
+      echo "Usage: comp controls list [--framework tgv|<id>] [--json] [--ids-only]" >&2; exit 1; }
+    sub="$1"; shift
+    case "$sub" in
+      list) ;;  # handled below
+      update)
+        # Rename a control or update its description. SQL-backed (no API).
+        [[ $# -lt 1 ]] && {
+          echo "Usage: comp controls update <id> [--name N] [--description D] [--dry-run] [--yes]" >&2; exit 1; }
+        cid="$1"; shift
+        new_name="" new_desc=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --name)        new_name="$2"; shift 2 ;;
+            --description) new_desc="$2"; shift 2 ;;
+            --dry-run)     DRY_RUN=true; shift ;;
+            --yes)         ASSUME_YES=true; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp controls update'" >&2; exit 1 ;;
+          esac
+        done
+        [[ -z "$new_name" && -z "$new_desc" ]] && {
+          echo "Error: pass at least one of --name or --description" >&2; exit 1; }
+        sets=()
+        [[ -n "$new_name" ]] && sets+=("name = '$(sql_lit "$new_name")'")
+        [[ -n "$new_desc" ]] && sets+=("description = '$(sql_lit "$new_desc")'")
+        joined="$(IFS=,; echo "${sets[*]}")"
+        sql="UPDATE \"Control\" SET ${joined} WHERE id = '$(sql_lit "$cid")' AND \"organizationId\" = '$(sql_lit "$ORG_ID")';"
+        run_write "update control ${cid}" "$sql"
+        exit 0
+        ;;
+      create)
+        # Create a framework-agnostic "blind-spot" Control + its 1:1
+        # FrameworkEditorControlTemplate in one transaction. Mirrors the existing
+        # ctl_qcblind_* pattern: no RequirementMap row, so the control is not
+        # bound to any framework (it shows in `controls list` org-wide but not
+        # under --framework). Link tasks with `comp tasks create --control` and
+        # policies with `comp control link-policy`.
+        cid="" tplid="" new_name="" new_desc=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --id)          cid="$2"; shift 2 ;;
+            --name)        new_name="$2"; shift 2 ;;
+            --description) new_desc="$2"; shift 2 ;;
+            --template-id) tplid="$2"; shift 2 ;;
+            --dry-run)     DRY_RUN=true; shift ;;
+            --yes)         ASSUME_YES=true; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp controls create'" >&2; exit 1 ;;
+          esac
+        done
+        [[ -z "$new_name" ]] && {
+          echo "Usage: comp controls create --name N [--description D] [--id ctl_...] [--template-id frk_ct_...] [--dry-run] [--yes]" >&2; exit 1; }
+        # description is NOT NULL on both tables — fall back to name.
+        [[ -z "$new_desc" ]] && new_desc="$new_name"
+        # Derive template id from control id when not given (ctl_x -> frk_ct_x).
+        [[ -z "$tplid" && -n "$cid" ]] && tplid="frk_ct_${cid#ctl_}"
+        n_lit="$(sql_lit "$new_name")"
+        d_lit="$(sql_lit "$new_desc")"
+        o_lit="$(sql_lit "$ORG_ID")"
+        # Explicit ids (recommended for the named qcblind convention) or DB cuids.
+        if [[ -n "$cid" && -n "$tplid" ]]; then
+          tpl_id_expr="'$(sql_lit "$tplid")'"
+          ctl_id_val="'$(sql_lit "$cid")'"
+        elif [[ -z "$cid" && -z "$tplid" ]]; then
+          tpl_id_expr="generate_prefixed_cuid('frk_ct')"
+          ctl_id_val="generate_prefixed_cuid('ctl')"
+        else
+          echo "Error: pass both --id and --template-id, or neither." >&2; exit 1
+        fi
+        sql="BEGIN;
+WITH new_tpl AS (
+  INSERT INTO \"FrameworkEditorControlTemplate\" (id, name, description, \"updatedAt\")
+  VALUES (${tpl_id_expr}, '${n_lit}', '${d_lit}', NOW())
+  RETURNING id
+)
+INSERT INTO \"Control\" (id, name, description, \"organizationId\", \"controlTemplateId\")
+SELECT ${ctl_id_val}, '${n_lit}', '${d_lit}', '${o_lit}', id FROM new_tpl;
+COMMIT;"
+        run_write "create control '${new_name}'${cid:+ (${cid})}" "$sql"
+        exit 0
+        ;;
+      *) echo "Unknown controls subcommand: $sub" >&2; exit 1 ;;
+    esac
+    framework="" mode="default"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --framework) framework="$(resolve_framework "$2")"; shift 2 ;;
+        --json)      mode="json"; shift ;;
+        --ids-only)  mode="ids"; shift ;;
+        *) echo "Error: unknown flag '$1' for 'comp controls list'" >&2; exit 1 ;;
+      esac
+    done
+
+    # regexp_replace collapses newlines/tabs in description so each control
+    # stays on a single tab-separated output row.
+    desc="regexp_replace(COALESCE(c.description,''), '[\r\n\t]+', ' ', 'g')"
+    if [[ -n "$framework" ]]; then
+      sql="SELECT DISTINCT c.id, c.name, ${desc}
+           FROM \"Control\" c
+           JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id
+           JOIN \"FrameworkInstance\" fi ON fi.id = rm.\"frameworkInstanceId\"
+           WHERE c.\"organizationId\" = '${ORG_ID}'
+             AND fi.\"frameworkId\" = '${framework}'
+           ORDER BY c.name;"
+    else
+      sql="SELECT c.id, c.name, ${desc}
+           FROM \"Control\" c
+           WHERE c.\"organizationId\" = '${ORG_ID}'
+           ORDER BY c.name;"
+    fi
+    rows="$(db_query "$sql")"
+
+    case "$mode" in
+      json)
+        printf '%s\n' "$rows" | jq -Rn '
+          [ inputs | select(length>0) | split("\t")
+            | {id:.[0], name:.[1], description:.[2]} ]'
+        ;;
+      ids)
+        printf '%s\n' "$rows" | awk -F'\t' 'NF{print $1}'
+        ;;
+      default)
+        printf '%s\n' "$rows" | awk -F'\t' 'NF{print $1"\t"$2}' | column -t -s $'\t'
+        ;;
+    esac
+    ;;
+
+  # ======================= CONTROL LINKS (DB fallback) =======================
+  control)
+    shift
+    [[ $# -lt 1 || "$1" == "--help" ]] && {
+      echo "Usage: comp control <tasks|policies|link-task|unlink-task|link-policy|unlink-policy> ..." >&2; exit 1; }
+    sub="$1"; shift
+    case "$sub" in
+      tasks|policies)
+        # Accept either a literal controlId (positional) OR --like <pattern>
+        # (SQL LIKE — % and _ wildcards). With --like, the result includes a
+        # `control` column so the caller knows which control each row came
+        # from. Optional --status <s> filter (tasks only) avoids the chain
+        # of one-call-per-control + client-side grep that came before.
+        control_id=""; like_pat=""; status_filter=""; fw_filter=""
+        mode="default"
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --json)      mode="json"; shift ;;
+            --ids-only)  mode="ids"; shift ;;
+            --like)      like_pat="$2"; shift 2 ;;
+            --status)    status_filter="$2"; shift 2 ;;
+            --framework) fw_filter="$(resolve_framework "$2")"; shift 2 ;;
+            --*)         echo "Error: unknown flag '$1' for 'comp control $sub'" >&2; exit 1 ;;
+            *)
+              if [[ -z "$control_id" ]]; then control_id="$1"; shift
+              else echo "Error: unexpected arg '$1' for 'comp control $sub'" >&2; exit 1; fi ;;
+          esac
+        done
+        if [[ -z "$control_id" && -z "$like_pat" && -z "$fw_filter" ]]; then
+          echo "Usage: comp control $sub <controlId> [--json] [--ids-only] [--status S]" >&2
+          echo "   or: comp control $sub --like 'ctl_qcfix_%' [--status S] [--json]" >&2
+          echo "   or: comp control $sub --framework law25|bill3|pipeda|soc2|tgv [--status S]" >&2
+          exit 1
+        fi
+        # Mutually-exclusive scopes — pick one.
+        scopes=0
+        [[ -n "$control_id" ]] && scopes=$((scopes+1))
+        [[ -n "$like_pat"  ]] && scopes=$((scopes+1))
+        [[ -n "$fw_filter" ]] && scopes=$((scopes+1))
+        if [[ $scopes -gt 1 ]]; then
+          echo "Error: provide only one of controlId, --like, or --framework" >&2; exit 1
+        fi
+        if [[ -n "$status_filter" && "$sub" != "tasks" ]]; then
+          echo "Error: --status only applies to 'comp control tasks'" >&2; exit 1
+        fi
+        # `multi_control` controls the default output: when scope spans many
+        # controls (--like or --framework), include the control id column.
+        multi_control=false
+        if [[ -n "$control_id" ]]; then
+          c_lit="$(sql_lit "$control_id")"
+          where="ctt.\"A\" = '${c_lit}'"
+          fw_join=""
+        elif [[ -n "$like_pat" ]]; then
+          l_lit="$(sql_lit "$like_pat")"
+          where="ctt.\"A\" LIKE '${l_lit}'"
+          fw_join=""
+          multi_control=true
+        else
+          f_lit="$(sql_lit "$fw_filter")"
+          where="fi.\"frameworkId\" = '${f_lit}' AND c.\"organizationId\" = '${ORG_ID}'"
+          fw_join="JOIN \"Control\" c ON c.id = ctt.\"A\"
+                    JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id
+                    JOIN \"FrameworkInstance\" fi ON fi.id = rm.\"frameworkInstanceId\""
+          multi_control=true
+        fi
+        if [[ "$sub" == "tasks" ]]; then
+          status_clause=""
+          if [[ -n "$status_filter" ]]; then
+            s_lit="$(sql_lit "$status_filter")"
+            status_clause="AND t.status::text = '${s_lit}'"
+          fi
+          sql="SELECT DISTINCT t.id, t.title, t.status::text, ctt.\"A\"
+               FROM \"_ControlToTask\" ctt
+               JOIN \"Task\" t ON t.id = ctt.\"B\"
+               ${fw_join}
+               WHERE ${where} ${status_clause}
+               ORDER BY ctt.\"A\", t.title;"
+        else
+          # Policies path: same join shape against _ControlToPolicy.
+          if [[ -n "$fw_filter" ]]; then
+            f_lit="$(sql_lit "$fw_filter")"
+            sql="SELECT DISTINCT p.id, p.name, p.status::text, ctp.\"A\"
+                 FROM \"_ControlToPolicy\" ctp
+                 JOIN \"Policy\" p ON p.id = ctp.\"B\"
+                 JOIN \"Control\" c ON c.id = ctp.\"A\"
+                 JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id
+                 JOIN \"FrameworkInstance\" fi ON fi.id = rm.\"frameworkInstanceId\"
+                 WHERE fi.\"frameworkId\" = '${f_lit}' AND c.\"organizationId\" = '${ORG_ID}'
+                 ORDER BY ctp.\"A\", p.name;"
+          else
+            sql="SELECT p.id, p.name, p.status::text, ctp.\"A\"
+                 FROM \"_ControlToPolicy\" ctp
+                 JOIN \"Policy\" p ON p.id = ctp.\"B\"
+                 WHERE ${where//ctt/ctp}
+                 ORDER BY ctp.\"A\", p.name;"
+          fi
+        fi
+        rows="$(db_query "$sql")"
+        case "$mode" in
+          json)
+            printf '%s\n' "$rows" | jq -Rn '
+              [ inputs | select(length>0) | split("\t")
+                | {id:.[0], name:.[1], status:.[2], control:.[3]} ]'
+            ;;
+          ids)
+            printf '%s\n' "$rows" | awk -F'\t' 'NF{print $1}'
+            ;;
+          default)
+            if $multi_control; then
+              # Multi-control scope (--like or --framework): surface the control id.
+              printf '%s\n' "$rows" | awk -F'\t' 'NF{print $4"\t"$1"\t"$3"\t"$2}' | column -t -s $'\t'
+            else
+              printf '%s\n' "$rows" | awk -F'\t' 'NF{print $1"\t"$2"\t"$3}' | column -t -s $'\t'
+            fi
+            ;;
+        esac
+        ;;
+      link-task|unlink-task|link-policy|unlink-policy)
+        [[ $# -lt 2 ]] && {
+          echo "Usage: comp control $sub <controlId> <${sub#*-}Id> [--dry-run] [--yes]" >&2; exit 1; }
+        control_id="$1"; target_id="$2"; shift 2
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --dry-run) DRY_RUN=true; shift ;;
+            --yes)     ASSUME_YES=true; shift ;;
+            *) echo "Error: unknown flag '$1' for 'comp control $sub'" >&2; exit 1 ;;
+          esac
+        done
+        c_lit="$(sql_lit "$control_id")"
+        t_lit="$(sql_lit "$target_id")"
+        case "$sub" in
+          link-task)
+            # ON CONFLICT keeps it idempotent — the AB pair is the primary key.
+            sql="INSERT INTO \"_ControlToTask\" (\"A\", \"B\")
+VALUES ('${c_lit}', '${t_lit}')
+ON CONFLICT (\"A\", \"B\") DO NOTHING;"
+            run_write "link control ${control_id} -> task ${target_id}" "$sql" ;;
+          unlink-task)
+            sql="DELETE FROM \"_ControlToTask\"
+WHERE \"A\" = '${c_lit}' AND \"B\" = '${t_lit}';"
+            run_write "unlink control ${control_id} -X- task ${target_id}" "$sql" ;;
+          link-policy)
+            sql="INSERT INTO \"_ControlToPolicy\" (\"A\", \"B\")
+VALUES ('${c_lit}', '${t_lit}')
+ON CONFLICT (\"A\", \"B\") DO NOTHING;"
+            run_write "link control ${control_id} -> policy ${target_id}" "$sql" ;;
+          unlink-policy)
+            sql="DELETE FROM \"_ControlToPolicy\"
+WHERE \"A\" = '${c_lit}' AND \"B\" = '${t_lit}';"
+            run_write "unlink control ${control_id} -X- policy ${target_id}" "$sql" ;;
+        esac
+        ;;
+      *) echo "Unknown control subcommand: $sub" >&2; exit 1 ;;
+    esac
+    ;;
+
+  # ======================= TGV (DB fallback) =======================
+  tgv)
+    shift
+    [[ $# -lt 1 || "$1" == "--help" ]] && { echo "Usage: comp tgv <status|seed-tasks> [opts]" >&2; exit 1; }
+    tgv_sub="$1"; shift
+
+    if [[ "$tgv_sub" == "seed-tasks" ]]; then
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --dry-run) DRY_RUN=true; shift ;;
+          --yes)     ASSUME_YES=true; shift ;;
+          *) echo "Error: unknown flag '$1' for 'comp tgv seed-tasks'" >&2; exit 1 ;;
+        esac
+      done
+      o_lit="$(sql_lit "$ORG_ID")"
+      f_lit="$(sql_lit "$TGV_FRAMEWORK_ID")"
+      # Idempotent bulk seed in one transaction:
+      #   tgv_controls   — the org's controls mapped to the TGV framework
+      #   needs_task     — those WITHOUT any existing _ControlToTask link, with
+      #                    the task id pre-generated per row so the Task insert
+      #                    and the link insert reference the SAME id. (A name-
+      #                    based join would cross-product on duplicate control
+      #                    names; pairing on a precomputed id is collision-proof.)
+      #   ins_tasks      — one Task row per needy control.
+      sql="BEGIN;
+WITH tgv_controls AS (
+  SELECT DISTINCT c.id, c.name
+  FROM \"Control\" c
+  JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id
+  JOIN \"FrameworkInstance\" fi ON fi.id = rm.\"frameworkInstanceId\"
+  WHERE c.\"organizationId\" = '${o_lit}'
+    AND fi.\"frameworkId\" = '${f_lit}'
+),
+needs_task AS (
+  SELECT tc.id AS control_id,
+         tc.name,
+         generate_prefixed_cuid('tsk') AS task_id
+  FROM tgv_controls tc
+  WHERE NOT EXISTS (
+    SELECT 1 FROM \"_ControlToTask\" ctt WHERE ctt.\"A\" = tc.id
+  )
+),
+ins_tasks AS (
+  INSERT INTO \"Task\" (id, title, description, status, \"organizationId\", \"updatedAt\")
+  SELECT task_id, name, name, 'todo', '${o_lit}', NOW()
+  FROM needs_task
+  RETURNING id
+)
+INSERT INTO \"_ControlToTask\" (\"A\", \"B\")
+SELECT control_id, task_id FROM needs_task;
+COMMIT;"
+      if $DRY_RUN; then
+        # Show the real backlog count so the operator sees the scale.
+        pending="$(db_query "
+          WITH tgv_controls AS (
+            SELECT DISTINCT c.id
+            FROM \"Control\" c
+            JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id
+            JOIN \"FrameworkInstance\" fi ON fi.id = rm.\"frameworkInstanceId\"
+            WHERE c.\"organizationId\" = '${o_lit}'
+              AND fi.\"frameworkId\" = '${f_lit}'
+          )
+          SELECT count(*) FROM tgv_controls tc
+          WHERE NOT EXISTS (SELECT 1 FROM \"_ControlToTask\" ctt WHERE ctt.\"A\" = tc.id);" \
+          | tr -d '[:space:]')"
+        echo "-- DRY RUN: tgv seed-tasks"
+        echo "-- TGV controls without a per-criterion task (rows this would INSERT): ${pending:-unknown}"
+        echo "-- (no statements executed)"
+        printf '%s\n' "$sql"
+      else
+        run_write "seed one per-criterion task for each unlinked TGV control" "$sql"
+      fi
+      exit 0
+    fi
+
+    [[ "$tgv_sub" != "status" ]] && { echo "Unknown tgv subcommand: $tgv_sub" >&2; exit 1 ; }
+    as_json=false
+    [[ "${1:-}" == "--json" ]] && as_json=true
+
+    # Single SQL roll-up: control count, task statuses, attachment count.
+    sql="
+      WITH tgv_controls AS (
+        SELECT DISTINCT c.id
+        FROM \"Control\" c
+        JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id
+        JOIN \"FrameworkInstance\" fi ON fi.id = rm.\"frameworkInstanceId\"
+        WHERE c.\"organizationId\" = '${ORG_ID}'
+          AND fi.\"frameworkId\" = '${TGV_FRAMEWORK_ID}'
+      ),
+      tgv_tasks AS (
+        SELECT DISTINCT t.id, t.status
+        FROM tgv_controls tc
+        JOIN \"_ControlToTask\" ctt ON ctt.\"A\" = tc.id
+        JOIN \"Task\" t ON t.id = ctt.\"B\"
+      )
+      SELECT 'controls', count(*)::text FROM tgv_controls
+      UNION ALL
+      SELECT 'task:'||status, count(*)::text FROM tgv_tasks GROUP BY status
+      UNION ALL
+      SELECT 'tasks_total', count(*)::text FROM tgv_tasks
+      UNION ALL
+      SELECT 'attachments', count(*)::text
+        FROM \"Attachment\" a
+        WHERE a.\"organizationId\" = '${ORG_ID}'
+          AND a.\"entityType\" = 'task'
+          AND a.\"entityId\" IN (SELECT id FROM tgv_tasks);
+    "
+    rows="$(db_query "$sql")"
+
+    if $as_json; then
+      printf '%s\n' "$rows" | jq -Rn '
+        ([ inputs | select(length>0) | split("\t") | {(.[0]): (.[1]|tonumber)} ]
+          | add) as $m
+        | {
+            framework: "TGV — Trousse globale de vérification (MSSS 2024)",
+            controls: ($m.controls // 0),
+            tasks: {
+              total:        ($m.tasks_total  // 0),
+              todo:         ($m["task:todo"] // 0),
+              in_progress:  ($m["task:in_progress"] // 0),
+              in_review:    ($m["task:in_review"] // 0),
+              done:         ($m["task:done"] // 0),
+              not_relevant: ($m["task:not_relevant"] // 0),
+              failed:       ($m["task:failed"] // 0)
+            },
+            attachments: ($m.attachments // 0)
+          }'
+    else
+      get() { printf '%s\n' "$rows" | awk -F'\t' -v k="$1" '$1==k{print $2}'; }
+      controls="$(get controls)"; controls="${controls:-0}"
+      total="$(get tasks_total)"; total="${total:-0}"
+      done_c="$(get task:done)"; done_c="${done_c:-0}"
+      echo "TGV — Trousse globale de vérification (MSSS 2024)"
+      echo "-------------------------------------------------"
+      printf '  Controls:       %s\n' "$controls"
+      printf '  Tasks total:    %s\n' "$total"
+      printf '    todo:         %s\n' "$(x=$(get task:todo); echo "${x:-0}")"
+      printf '    in_progress:  %s\n' "$(x=$(get task:in_progress); echo "${x:-0}")"
+      printf '    in_review:    %s\n' "$(x=$(get task:in_review); echo "${x:-0}")"
+      printf '    done:         %s\n' "$done_c"
+      printf '    not_relevant: %s\n' "$(x=$(get task:not_relevant); echo "${x:-0}")"
+      printf '    failed:       %s\n' "$(x=$(get task:failed); echo "${x:-0}")"
+      printf '  Attachments:    %s\n' "$(x=$(get attachments); echo "${x:-0}")"
+    fi
+    ;;
+
+  # ======================= SQL ESCAPE HATCH =======================
+  sql)
+    shift
+    [[ $# -lt 1 || "$1" == "--help" ]] && {
+      echo "Usage: comp sql <query> [--dry-run] [--yes]" >&2
+      echo "   or: comp sql --file PATH [--dry-run] [--yes]" >&2
+      exit 1; }
+    sql_text="" sql_file="" no_header=false
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --file)      sql_file="$2"; shift 2 ;;
+        --dry-run)   DRY_RUN=true; shift ;;
+        --yes)       ASSUME_YES=true; shift ;;
+        # Tuples-only + unaligned + tab-separated output. The plan-prescribed
+        # invocation for any read-modify-write or piped-into-another-CLI flow.
+        # When set, suppresses psql column headers and the row-count footer.
+        --no-header) no_header=true; shift ;;
+        --*) echo "Error: unknown flag '$1' for 'comp sql'" >&2; exit 1 ;;
+        *) sql_text="$1"; shift ;;
+      esac
+    done
+    if [[ -n "$sql_file" ]]; then
+      [[ -f "$sql_file" ]] || { echo "Error: file not found: $sql_file" >&2; exit 1; }
+      sql_text="$(cat "$sql_file")"
+    fi
+    [[ -z "$sql_text" ]] && { echo "Error: no SQL provided." >&2; exit 1; }
+    # Classify: a write needs gating, a read runs free. Detection scans the
+    # leading keyword of each statement so a SELECT with the word "update" in a
+    # string literal is not misflagged.
+    is_write=false
+    if printf '%s\n' "$sql_text" \
+        | grep -iqE '(^|;)[[:space:]]*(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE)[[:space:]]'; then
+      is_write=true
+    fi
+    if $is_write; then
+      run_write "raw SQL (write detected)" "$sql_text"
+    else
+      if $DRY_RUN; then
+        echo "-- DRY RUN: raw SQL (read-only)"
+        echo "-- (no statements executed)"
+        printf '%s\n' "$sql_text"
+      else
+        # Default: aligned psql output for human readability.
+        # --no-header: tuples-only + unaligned + tab-separated (scripting form).
+        require_db
+        _psql_flags="-v ON_ERROR_STOP=1"
+        $no_header && _psql_flags="-tA -F $'\t' $_psql_flags"
+        printf '%s\n' "$sql_text" \
+          | ssh "$DB_SSH" "docker exec -i ${DB_CONTAINER} psql -U ${DB_USER} -d ${DB_NAME} ${_psql_flags}" 2>&1 \
+          || { echo "Error: SQL query failed." >&2; exit 1; }
+      fi
+    fi
+    ;;
+
+  # ======================= WHOAMI =======================
+  # ======================= FRAMEWORKS =======================
+  frameworks)
+    shift
+    [[ $# -lt 1 || "$1" == "--help" ]] && {
+      echo "Usage: comp frameworks list [--json]" >&2; exit 1; }
+    sub="$1"; shift
+    case "$sub" in
+      list)
+        as_json=false
+        [[ "${1:-}" == "--json" ]] && as_json=true
+        rows="$(db_query "
+SELECT id, \"frameworkId\"
+FROM \"FrameworkInstance\"
+WHERE \"organizationId\" = '$(sql_lit "$ORG_ID")'
+ORDER BY id")"
+        if $as_json; then
+          printf '%s\n' "$rows" | jq -Rn '[inputs | select(length>0) | split("\t") | {id:.[0], frameworkId:.[1]}]'
+        else
+          { echo -e "id\tframeworkId"; echo "$rows"; } | column -t -s $'\t'
+        fi
+        ;;
+      *) echo "Unknown frameworks subcommand: $sub" >&2; exit 1 ;;
+    esac
+    ;;
+
+  # ======================= COVERAGE =======================
+  # Per-framework policy coverage. Buckets each control as fr-only / en-only /
+  # both / none based on whether its linked policies have the [DOC-/[Ensemble
+  # prefix (French dossier) or are plain English stock policies. [SUPERSÉDÉ] /
+  # [REMPLACÉ] are excluded from both buckets.
+  coverage)
+    shift
+    [[ $# -lt 1 || "$1" == "--help" ]] && {
+      echo "Usage: comp coverage <frameworkInstance|alias> [--json] [--by-control]" >&2
+      echo "  Aliases: soc2, law25, bill3, pipeda, tgv" >&2
+      exit 1; }
+    fw_arg="$1"; shift
+    case "$fw_arg" in
+      tgv)    frk="frk_tgv_msss_2024" ;;
+      soc2)   frk="frk_683f377429b8408d1c85f9bd" ;;
+      law25)  frk="frk_qclaw25_2024" ;;
+      bill3)  frk="frk_qcbill3_2024" ;;
+      pipeda) frk="frk_capipeda_2025" ;;
+      *)      frk="" ;;  # treat as instance id verbatim
+    esac
+    if [[ -n "$frk" ]]; then
+      fw_id="$(db_query "SELECT id FROM \"FrameworkInstance\" WHERE \"organizationId\" = '$(sql_lit "$ORG_ID")' AND \"frameworkId\" = '$(sql_lit "$frk")' LIMIT 1")"
+      [[ -z "$fw_id" ]] && { echo "Error: no FrameworkInstance for alias '$fw_arg' (frameworkId=$frk) in org $ORG_ID" >&2; exit 1; }
+    else
+      fw_id="$fw_arg"
+    fi
+    by_control=false; as_json=false
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json)        as_json=true; shift ;;
+        --by-control)  by_control=true; shift ;;
+        *) echo "Error: unknown flag '$1' for 'comp coverage'" >&2; exit 1 ;;
+      esac
+    done
+    o_lit="$(sql_lit "$ORG_ID")"
+    f_lit="$(sql_lit "$fw_id")"
+    if $by_control; then
+      sql="
+WITH ctrls AS (
+  SELECT DISTINCT c.id, c.name
+  FROM \"Control\" c
+  JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id
+  WHERE c.\"organizationId\" = '${o_lit}' AND rm.\"frameworkInstanceId\" = '${f_lit}'
+)
+SELECT ctrls.id, ctrls.name,
+  COALESCE(STRING_AGG(DISTINCT
+    CASE
+      WHEN p.name LIKE '[DOC-%' OR p.name LIKE '[Ensemble%' THEN 'fr:' || p.id
+      WHEN p.name LIKE '[SUPERS%' OR p.name LIKE '[REMPL%' THEN 'arc:' || p.id
+      WHEN p.id IS NOT NULL THEN 'en:' || p.id
+    END, '|'), '(none)') AS policies
+FROM ctrls
+LEFT JOIN \"_ControlToPolicy\" cp ON cp.\"A\" = ctrls.id
+LEFT JOIN \"Policy\" p ON p.id = cp.\"B\" AND p.\"organizationId\" = '${o_lit}'
+GROUP BY ctrls.id, ctrls.name
+ORDER BY ctrls.name"
+      rows="$(db_query "$sql")"
+      if $as_json; then
+        printf '%s\n' "$rows" | jq -Rn '[inputs | select(length>0) | split("\t") | {control_id:.[0], control_name:.[1], policies:(.[2]|split("|"))}]'
+      else
+        { echo -e "control_id\tcontrol_name\tpolicies"; echo "$rows"; } | column -t -s $'\t'
+      fi
+    else
+      sql="
+WITH ctrls AS (
+  SELECT DISTINCT c.id
+  FROM \"Control\" c
+  JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id
+  WHERE c.\"organizationId\" = '${o_lit}' AND rm.\"frameworkInstanceId\" = '${f_lit}'
+),
+cov AS (
+  SELECT ctrls.id,
+    BOOL_OR(p.name LIKE '[DOC-%' OR p.name LIKE '[Ensemble%') AS has_fr,
+    BOOL_OR(p.id IS NOT NULL AND NOT (p.name LIKE '[DOC-%' OR p.name LIKE '[Ensemble%' OR p.name LIKE '[SUPERS%' OR p.name LIKE '[REMPL%')) AS has_en
+  FROM ctrls
+  LEFT JOIN \"_ControlToPolicy\" cp ON cp.\"A\" = ctrls.id
+  LEFT JOIN \"Policy\" p ON p.id = cp.\"B\" AND p.\"organizationId\" = '${o_lit}'
+  GROUP BY ctrls.id
+)
+SELECT COUNT(*),
+  SUM((COALESCE(has_fr,false) AND COALESCE(has_en,false))::int),
+  SUM((COALESCE(has_fr,false) AND NOT COALESCE(has_en,false))::int),
+  SUM((NOT COALESCE(has_fr,false) AND COALESCE(has_en,false))::int),
+  SUM((NOT COALESCE(has_fr,false) AND NOT COALESCE(has_en,false))::int)
+FROM cov"
+      row="$(db_query "$sql")"
+      total=$(echo "$row" | cut -f1)
+      both=$(echo "$row" | cut -f2)
+      fr_only=$(echo "$row" | cut -f3)
+      en_only=$(echo "$row" | cut -f4)
+      none=$(echo "$row" | cut -f5)
+      if $as_json; then
+        jq -nc --arg fw "$fw_id" --argjson t "${total:-0}" --argjson b "${both:-0}" --argjson fo "${fr_only:-0}" --argjson eo "${en_only:-0}" --argjson n "${none:-0}" \
+          '{frameworkInstanceId:$fw, total:$t, both:$b, french_only:$fo, english_only:$eo, no_policy:$n}'
+      else
+        printf 'Framework: %s\n' "$fw_id"
+        printf '  Total controls:   %s\n' "$total"
+        printf '  Both fr + en:     %s\n' "$both"
+        printf '  French only:      %s\n' "$fr_only"
+        printf '  English only:     %s\n' "$en_only"
+        printf '  No policy:        %s\n' "$none"
+      fi
+    fi
+    ;;
+
+  status)
+    shift
+    by_control=false; as_json=false; all_fw=false; fw_arg=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json)        as_json=true; shift ;;
+        --by-control)  by_control=true; shift ;;
+        --all)         all_fw=true; shift ;;
+        --help)        echo "Usage: comp status [<fw|alias>|--all] [--json] [--by-control]" >&2; exit 0 ;;
+        -*)            echo "Error: unknown flag '$1' for 'comp status'" >&2; exit 1 ;;
+        *)             fw_arg="$1"; shift ;;
+      esac
+    done
+    [[ -z "$fw_arg" && $all_fw == false ]] && { echo "Error: pass <fw|alias> or --all" >&2; exit 1; }
+    o_lit="$(sql_lit "$ORG_ID")"
+
+    # Build the WHERE clause: either one framework or all instances in the org.
+    if $all_fw; then
+      fw_filter="rm.\"frameworkInstanceId\" IN (SELECT id FROM \"FrameworkInstance\" WHERE \"organizationId\" = '${o_lit}')"
+    else
+      case "$fw_arg" in
+        tgv)    frk="frk_tgv_msss_2024" ;;
+        soc2)   frk="frk_683f377429b8408d1c85f9bd" ;;
+        law25)  frk="frk_qclaw25_2024" ;;
+        bill3)  frk="frk_qcbill3_2024" ;;
+        pipeda) frk="frk_capipeda_2025" ;;
+        *)      frk="" ;;
+      esac
+      if [[ -n "$frk" ]]; then
+        fw_id="$(db_query "SELECT id FROM \"FrameworkInstance\" WHERE \"organizationId\" = '${o_lit}' AND \"frameworkId\" = '$(sql_lit "$frk")' LIMIT 1")"
+        [[ -z "$fw_id" ]] && { echo "Error: no FrameworkInstance for alias '$fw_arg'" >&2; exit 1; }
+      else
+        fw_id="$fw_arg"
+      fi
+      fw_filter="rm.\"frameworkInstanceId\" = '$(sql_lit "$fw_id")'"
+    fi
+
+    if $by_control; then
+      sql="
+WITH ctrl_tasks AS (
+  SELECT rm.\"frameworkInstanceId\" AS fw, c.id AS cid, c.name AS cname,
+         COUNT(t.id) AS task_count,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_count,
+         COUNT(*) FILTER (WHERE t.status = 'in_progress') AS prog_count,
+         COUNT(*) FILTER (WHERE t.status = 'in_review') AS review_count,
+         COUNT(*) FILTER (WHERE t.status = 'todo') AS todo_count,
+         COUNT(*) FILTER (WHERE t.status = 'not_relevant') AS na_count
+  FROM \"Control\" c
+  JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id
+  LEFT JOIN \"_ControlToTask\" ct ON ct.\"A\" = c.id
+  LEFT JOIN \"Task\" t ON t.id = ct.\"B\" AND t.\"organizationId\" = '${o_lit}'
+  JOIN \"FrameworkInstance\" fi ON fi.id = rm.\"frameworkInstanceId\"
+  WHERE c.\"organizationId\" = '${o_lit}' AND ${fw_filter}
+  GROUP BY rm.\"frameworkInstanceId\", fi.\"frameworkId\", c.id),
+fw_alias AS (
+  SELECT id AS fw,
+    CASE \"frameworkId\"
+      WHEN 'frk_tgv_msss_2024' THEN 'tgv'
+      WHEN 'frk_683f377429b8408d1c85f9bd' THEN 'soc2'
+      WHEN 'frk_qclaw25_2024' THEN 'law25'
+      WHEN 'frk_qcbill3_2024' THEN 'bill3'
+      WHEN 'frk_capipeda_2025' THEN 'pipeda'
+      ELSE \"frameworkId\"
+    END AS alias
+  FROM \"FrameworkInstance\"
+  WHERE \"organizationId\" = '${o_lit}'
+)
+SELECT fa.alias, ct.cid, ct.cname, ct.task_count, ct.done_count, ct.prog_count, ct.review_count, ct.todo_count, ct.na_count,
+  CASE
+    WHEN ct.task_count = 0 THEN 'no_tasks'
+    WHEN ct.na_count = ct.task_count THEN 'not_relevant'
+    WHEN ct.done_count = ct.task_count THEN 'done'
+    WHEN ct.done_count > 0 AND ct.done_count < ct.task_count THEN 'partial'
+    WHEN ct.review_count > 0 AND ct.prog_count = 0 THEN 'in_review'
+    WHEN ct.prog_count + ct.review_count > 0 THEN 'in_progress'
+    ELSE 'todo'
+  END AS rollup
+FROM ctrl_tasks ct
+JOIN fw_alias fa ON fa.fw = ct.fw
+ORDER BY fa.alias, ct.cname"
+      rows="$(db_query "$sql")"
+      if $as_json; then
+        printf '%s\n' "$rows" | jq -Rn '[inputs | select(length>0) | split("\t") | {framework:.[0], control_id:.[1], control_name:.[2], task_count:(.[3]|tonumber), done:(.[4]|tonumber), in_progress:(.[5]|tonumber), in_review:(.[6]|tonumber), todo:(.[7]|tonumber), not_relevant:(.[8]|tonumber), rollup:.[9]}]'
+      else
+        { echo -e "framework\tcontrol_id\tcontrol_name\ttasks\tdone\tprog\treview\ttodo\tna\trollup"; echo "$rows"; } | column -t -s $'\t'
+      fi
+    else
+      sql="
+WITH ctrl_tasks AS (
+  SELECT rm.\"frameworkInstanceId\" AS fw, c.id AS cid,
+         COUNT(t.id) AS task_count,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_count,
+         COUNT(*) FILTER (WHERE t.status = 'in_progress') AS prog_count,
+         COUNT(*) FILTER (WHERE t.status = 'in_review') AS review_count,
+         COUNT(*) FILTER (WHERE t.status = 'todo') AS todo_count,
+         COUNT(*) FILTER (WHERE t.status = 'not_relevant') AS na_count
+  FROM \"Control\" c
+  JOIN \"RequirementMap\" rm ON rm.\"controlId\" = c.id
+  LEFT JOIN \"_ControlToTask\" ct ON ct.\"A\" = c.id
+  LEFT JOIN \"Task\" t ON t.id = ct.\"B\" AND t.\"organizationId\" = '${o_lit}'
+  JOIN \"FrameworkInstance\" fi ON fi.id = rm.\"frameworkInstanceId\"
+  WHERE c.\"organizationId\" = '${o_lit}' AND ${fw_filter}
+  GROUP BY rm.\"frameworkInstanceId\", fi.\"frameworkId\", c.id),
+fw_alias AS (
+  SELECT id AS fw,
+    CASE \"frameworkId\"
+      WHEN 'frk_tgv_msss_2024' THEN 'tgv'
+      WHEN 'frk_683f377429b8408d1c85f9bd' THEN 'soc2'
+      WHEN 'frk_qclaw25_2024' THEN 'law25'
+      WHEN 'frk_qcbill3_2024' THEN 'bill3'
+      WHEN 'frk_capipeda_2025' THEN 'pipeda'
+      ELSE \"frameworkId\"
+    END AS alias
+  FROM \"FrameworkInstance\"
+  WHERE \"organizationId\" = '${o_lit}'
+),
+rolled AS (
+  SELECT fa.alias AS fw_alias,
+    CASE
+      WHEN ct.task_count = 0 THEN 'no_tasks'
+      WHEN ct.na_count = ct.task_count THEN 'not_relevant'
+      WHEN ct.done_count = ct.task_count THEN 'done'
+      WHEN ct.done_count > 0 AND ct.done_count < ct.task_count THEN 'partial'
+      WHEN ct.review_count > 0 AND ct.prog_count = 0 THEN 'in_review'
+      WHEN ct.prog_count + ct.review_count > 0 THEN 'in_progress'
+      ELSE 'todo'
+    END AS rollup
+  FROM ctrl_tasks ct
+  JOIN fw_alias fa ON fa.fw = ct.fw
+)
+SELECT fw_alias,
+  COUNT(*) AS total,
+  COUNT(*) FILTER (WHERE rollup='done') AS done,
+  COUNT(*) FILTER (WHERE rollup='partial') AS partial,
+  COUNT(*) FILTER (WHERE rollup='in_progress') AS in_progress,
+  COUNT(*) FILTER (WHERE rollup='in_review') AS in_review,
+  COUNT(*) FILTER (WHERE rollup='todo') AS todo,
+  COUNT(*) FILTER (WHERE rollup='not_relevant') AS not_relevant,
+  COUNT(*) FILTER (WHERE rollup='no_tasks') AS no_tasks
+FROM rolled
+GROUP BY fw_alias
+ORDER BY fw_alias"
+      rows="$(db_query "$sql")"
+      if $as_json; then
+        printf '%s\n' "$rows" | jq -Rn '[inputs | select(length>0) | split("\t") | {frameworkAlias:.[0], total:(.[1]|tonumber), done:(.[2]|tonumber), partial:(.[3]|tonumber), in_progress:(.[4]|tonumber), in_review:(.[5]|tonumber), todo:(.[6]|tonumber), not_relevant:(.[7]|tonumber), no_tasks:(.[8]|tonumber)}]'
+      else
+        { echo -e "framework\ttotal\tdone\tpartial\tprog\treview\ttodo\tn/a\tno_tasks"; echo "$rows"; } | column -t -s $'\t'
+      fi
+    fi
+    ;;
+
+  whoami)
+    echo "API:  ${BASE}"
+    echo "Org:  ${ORG_ID}"
+    echo "User: ${USER_ID:-<unset>} (injected for API-key writes)"
+    ;;
+
+  # ======================= RISKS (API pass-through) =======================
+  risks)
+    shift
+    [[ $# -lt 1 || "$1" == "--help" ]] && {
+      echo "Usage: comp risks list [--json] [--limit N] [--org ORG]" >&2; exit 1; }
+    sub="$1"; shift
+    [[ "$sub" != "list" ]] && { echo "Unknown risks subcommand: $sub" >&2; exit 1; }
+    mode="default" limit="" org_override=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json)  mode="json"; shift ;;
+        --limit) limit="$2"; shift 2 ;;
+        --org)   org_override="$2"; shift 2 ;;
+        *) echo "Error: unknown flag '$1' for 'comp risks list'" >&2; exit 1 ;;
+      esac
+    done
+    # Per-call org override: re-export ORG_ID before calling api() so the
+    # X-Organization-Id header reflects the override without touching config.
+    [[ -n "$org_override" ]] && ORG_ID="$org_override"
+    result="$(api GET /risks)"
+    if [[ -n "$limit" ]]; then
+      result="$(echo "$result" | jq --argjson n "$limit" '.data |= .[:$n] | .count = (.data | length)')"
+    fi
+    case "$mode" in
+      json) echo "$result" | jq '.' ;;
+      default)
+        echo "$result" | jq -r '
+          .data[] | [.id, (.title // "—"),
+                     (.status // "—"),
+                     (.category // "—"),
+                     (.assigneeId // "—")] | @tsv' \
+          | column -t -s $'\t'
+        ;;
+    esac
+    ;;
+
+  # ======================= VENDORS (API pass-through) =======================
+  vendors)
+    shift
+    [[ $# -lt 1 || "$1" == "--help" ]] && {
+      echo "Usage: comp vendors list [--json] [--limit N] [--org ORG]" >&2; exit 1; }
+    sub="$1"; shift
+    [[ "$sub" != "list" ]] && { echo "Unknown vendors subcommand: $sub" >&2; exit 1; }
+    mode="default" limit="" org_override=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json)  mode="json"; shift ;;
+        --limit) limit="$2"; shift 2 ;;
+        --org)   org_override="$2"; shift 2 ;;
+        *) echo "Error: unknown flag '$1' for 'comp vendors list'" >&2; exit 1 ;;
+      esac
+    done
+    [[ -n "$org_override" ]] && ORG_ID="$org_override"
+    result="$(api GET /vendors)"
+    if [[ -n "$limit" ]]; then
+      result="$(echo "$result" | jq --argjson n "$limit" '.data |= .[:$n] | .count = (.data | length)')"
+    fi
+    case "$mode" in
+      json) echo "$result" | jq '.' ;;
+      default)
+        echo "$result" | jq -r '
+          .data[] | [.id, (.name // "—"),
+                     (.status // "—"),
+                     (.category // "—"),
+                     (.assigneeId // "—")] | @tsv' \
+          | column -t -s $'\t'
+        ;;
+    esac
+    ;;
+
+  # ======================= DOCTOR (schema-drift probe) =======================
+  # Probes the assumptions baked into the SQL paths. Catches upstream Prisma
+  # migrations BEFORE they corrupt a bulk write (tgv seed-tasks, bulk-set-status,
+  # policies update, etc.). Each probe prints ✓ / ✗ / ~ (skip) and a one-liner.
+  # Exits non-zero if any hard probe fails. SSH/DB unreachable degrades to skip
+  # for DB probes (not a hard fail — the CLI may be used in API-only mode).
+  doctor)
+    shift
+    [[ "${1:-}" == "--help" ]] && {
+      echo "Usage: comp doctor" >&2
+      echo "  Probes schema + API health. Exits non-zero on any failure." >&2
+      exit 0; }
+    fails=0
+    pass() { echo "✓ $1"; }
+    fail() { echo "✗ $1" >&2; fails=$((fails+1)); }
+    skip() { echo "~ $1 (skipped: $2)"; }
+
+    # --- API health -------------------------------------------------------
+    # The /v1/health endpoint is public (no guard). We hit it without the
+    # api() helper so a 200 doesn't get tangled with auth fallbacks.
+    health_tmp="$(mktemp)"
+    health_http="$(curl -s -o "$health_tmp" -w '%{http_code}' "${BASE}/health" 2>/dev/null || echo "000")"
+    health_body="$(cat "$health_tmp")"; rm -f "$health_tmp"
+    case "$health_http" in
+      200)
+        status="$(printf '%s' "$health_body" | jq -r '.status // "?"' 2>/dev/null || echo "?")"
+        uptime="$(printf '%s' "$health_body" | jq -r '.uptime // 0 | floor | tostring' 2>/dev/null || echo "?")"
+        pass "API /v1/health OK (status=${status}, uptime=${uptime}s)"
+        ;;
+      000) fail "API unreachable at ${BASE} (network/DNS)" ;;
+      *)   fail "API /v1/health returned HTTP ${health_http}" ;;
+    esac
+
+    # --- DB probes --------------------------------------------------------
+    # Each DB probe runs independently; failures are tallied, not fatal, so
+    # one missing column doesn't hide the next problem.
+    if [[ -z "$DB_SSH" || -z "$DB_CONTAINER" ]]; then
+      skip "DB probes" "COMP_DB_SSH/COMP_DB_CONTAINER not set"
+    elif ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$DB_SSH" true 2>/dev/null; then
+      skip "DB probes" "SSH to '${DB_SSH}' unavailable"
+    else
+      # 1. TaskStatus enum values vs the whitelist used by tasks set-status /
+      #    bulk-set-status / tasks create. Drift = ON_ERROR_STOP at write time.
+      expected_status=(todo in_progress in_review done not_relevant failed)
+      if enum_rows="$(db_query "SELECT unnest(enum_range(NULL::\"TaskStatus\"))::text ORDER BY 1" 2>/dev/null)"; then
+        actual=$(printf '%s' "$enum_rows" | tr '\n' ' ' | sed 's/ $//')
+        missing=()
+        for v in "${expected_status[@]}"; do
+          printf '%s\n' "$enum_rows" | grep -qx "$v" || missing+=("$v")
+        done
+        count=$(printf '%s\n' "$enum_rows" | grep -c .)
+        if [[ ${#missing[@]} -eq 0 ]]; then
+          pass "Task.status enum OK (${count} values: ${actual})"
+        else
+          fail "Task.status enum missing whitelisted values: ${missing[*]} (actual: ${actual})"
+        fi
+      else
+        fail "Task.status enum not introspectable (TaskStatus type missing?)"
+      fi
+
+      # 2. _ControlToTask join table (A, B) — used by every link/seed path.
+      cols="$(db_query "SELECT string_agg(column_name, ',' ORDER BY column_name) FROM information_schema.columns WHERE table_name = '_ControlToTask'" 2>/dev/null || true)"
+      if [[ "$cols" == "A,B" ]]; then
+        pass "_ControlToTask (A, B) join table OK"
+      elif [[ -z "$cols" ]]; then
+        fail "_ControlToTask table missing"
+      else
+        fail "_ControlToTask columns drifted (expected 'A,B', got '${cols}')"
+      fi
+
+      # 3. FrameworkInstance.frameworkId — coverage/status/seed all key off this.
+      if db_query "SELECT 1 FROM information_schema.columns WHERE table_name='FrameworkInstance' AND column_name='frameworkId' LIMIT 1" 2>/dev/null | grep -qx 1; then
+        pass "FrameworkInstance.frameworkId column OK"
+      else
+        fail "FrameworkInstance.frameworkId column missing"
+      fi
+
+      # 4. Policy writeable columns — touched by policies update / archive.
+      policy_required=(name content status isArchived lastArchivedAt updatedAt organizationId)
+      policy_cols="$(db_query "SELECT column_name FROM information_schema.columns WHERE table_name='Policy'" 2>/dev/null || true)"
+      missing=()
+      for c in "${policy_required[@]}"; do
+        printf '%s\n' "$policy_cols" | grep -qx "$c" || missing+=("$c")
+      done
+      if [[ ${#missing[@]} -eq 0 ]]; then
+        pass "Policy columns OK (${#policy_required[@]} required cols present)"
+      else
+        fail "Policy missing columns: ${missing[*]}"
+      fi
+
+      # 5. Task writeable columns — touched by tasks create / set-status /
+      #    bulk-set-status / tgv seed-tasks.
+      task_required=(id title description status organizationId updatedAt)
+      task_cols="$(db_query "SELECT column_name FROM information_schema.columns WHERE table_name='Task'" 2>/dev/null || true)"
+      missing=()
+      for c in "${task_required[@]}"; do
+        printf '%s\n' "$task_cols" | grep -qx "$c" || missing+=("$c")
+      done
+      if [[ ${#missing[@]} -eq 0 ]]; then
+        pass "Task columns OK (${#task_required[@]} required cols present)"
+      else
+        fail "Task missing columns: ${missing[*]}"
+      fi
+
+      # 6. generate_prefixed_cuid() — used by tasks create / tgv seed-tasks.
+      if db_query "SELECT 1 FROM pg_proc WHERE proname='generate_prefixed_cuid' LIMIT 1" 2>/dev/null | grep -qx 1; then
+        pass "generate_prefixed_cuid() function OK"
+      else
+        fail "generate_prefixed_cuid() function missing (seed/create will fail)"
+      fi
+    fi
+
+    echo ""
+    if [[ $fails -eq 0 ]]; then
+      echo "All probes passed."
+      exit 0
+    else
+      echo "${fails} probe(s) failed." >&2
+      exit 1
+    fi
+    ;;
+
+  # ======================= CONTEXT (org Q&A pairs) =======================
+  context)
+    shift
+    [[ $# -lt 1 || "$1" == "--help" ]] && {
+      echo "Usage: comp context <list|get> ..." >&2; exit 1; }
+    sub="$1"; shift
+    case "$sub" in
+      list)
+        as_json=false
+        [[ "${1:-}" == "--json" ]] && as_json=true
+        result="$(api GET /context)"
+        if $as_json; then
+          echo "$result" | jq '.data'
+        else
+          # Truncate answer to 80 chars so the table stays one-line-per-row;
+          # JSON-blob answers (vendor list, signoff struct) get a sentinel hint.
+          echo "$result" | jq -r '
+            .data[] | [
+              .id,
+              (.question // "—"),
+              ((.answer // "") |
+                gsub("[\r\n\t]+"; " ") |
+                if length > 80 then .[:77] + "..." else . end)
+            ] | @tsv' \
+            | column -t -s $'\t'
+        fi
+        ;;
+      get)
+        [[ $# -lt 1 ]] && { echo "Usage: comp context get <id> [--json]" >&2; exit 1; }
+        id="$1"; shift
+        as_json=false
+        [[ "${1:-}" == "--json" ]] && as_json=true
+        result="$(api GET "/context/${id}")"
+        if $as_json; then
+          echo "$result" | jq '.'
+        else
+          echo "$result" | jq -r '
+            "Context: " + .id
+            + "\nUpdated: " + ((.updatedAt // .createdAt // "—") | .[:10])
+            + (if (.tags // []) | length > 0 then "\nTags: " + ((.tags // []) | join(", ")) else "" end)
+            + "\n\nQ: " + (.question // "—")
+            + "\n\nA: " + (.answer // "—")'
+        fi
+        ;;
+      *) echo "Unknown context subcommand: $sub" >&2; exit 1 ;;
+    esac
+    ;;
+
+  *) usage ;;
+esac
