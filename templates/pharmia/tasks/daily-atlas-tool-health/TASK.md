@@ -22,6 +22,18 @@ Run the DAILY ATLAS HEALTH CHECK now, autonomously, against the canary environme
 
 Do NOT stop at detection — investigate the ROOT CAUSE directly: pull the raw turn with `threads <id> --rca` / `--tools` / `--json`, identify the failing layer per atlas-rca (tool / model / render / persistence / coverage), and confirm the mechanism (e.g. an Outline 404, a hallucinated id/cite, an invalid mermaid type, a missing data source). GROUP findings that share one root cause. For each group propose a CONCRETE action item: owner skill/file + the fix + how to validate (an eval scenario, or a failing→green repro in `tooling/`). Cheaply validate a proposed fix when you can (e.g. run `mermaid.parse` from repo root). Render fixes must name a repro harness per atlas-render-regression; model/prompt fixes must route through model-config-gate.
 
-## Output
+## Remediation policy
 
-Write the full findings to `~/.cache/pharmia-health/atlas-$(date +%F).md` with a ROOT-CAUSE ANALYSIS + ACTION ITEMS section and a CAPABILITY UPGRADES subsection (say "all healthy" if nothing found), then call the PushNotification tool with a one-line summary of issues found (or "Atlas health: all green").
+- **Proactive — fix in-run, no approval (docs + tooling ONLY):** Outline / clinical-corpus docs (URL rot, stale refs), CLI scripts in `~/.local/bin`, paperclip task/skill SSOT, dashboard/config files. Fix at the source, verify (200 / re-fetch / re-run), list under **Remediated**. These are low-risk and reversible.
+- **Ask first — propose, do NOT ship (anything in the Pharmia repo):** `PharmaMate` apps/packages/tooling, agent prompts, model/routing config, evals, render menders. Back it with a failing→green repro or eval, list it under **Needs approval**, and stop. NEVER push a Pharmia branch or open a PR from this task.
+
+## Output — terse, one line per item (no prose paragraphs; omit empty sections)
+
+Write `~/.cache/pharmia-health/atlas-$(date +%F).md` in this exact shape:
+- **Header:** `# Atlas Health <date> — <GREEN | N issue(s)>`
+- **Three one-liners:** `Fleet:` provider mix · fallback% · flips (benign?). `Signals:` tools · render · citations · URLs — each `ok` or a count. `Capability:` `none`, or `tool×count: what was sought → coverage|routing`.
+- **`## Issues`** (omit if none) — one bullet each: `[tool|model|render|persist|coverage] <symptom> — RC <root cause>. → REMEDIATED <doc/cli> | ASK <pharmia file>`
+- **`## Remediated`** (docs/CLI/Outline fixed this run) — one bullet each: `<doc-id|cli|url>: <what> (verified <how>)`
+- **`## Needs approval`** (Pharmia repo — proposed, not shipped) — one bullet each: `<file>: <fix> — validate <repro/eval>`
+
+Then PushNotification, one line: `Atlas <date>: GREEN` — or `Atlas <date>: N issues, k remediated, j need approval — <worst one-liner>`.
