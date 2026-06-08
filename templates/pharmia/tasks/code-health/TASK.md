@@ -1,60 +1,40 @@
 ---
-name: "Code-Health"
+name: "Code-health weekly"
 assignee: "implementer"
 recurring: true
+description: >
+  Weekly diff-scoped code-health — coverage drops / new-code-at-0%, i18n gaps on
+  changed files, dashboard-config drift, and ready-now dead-code. Scoped to recent
+  change so it stays signal, not a daily repeat of slow-moving findings.
 ---
 
----
-name: code-health
-description: Delegate here for periodic codebase health scans — tech debt, test coverage trends, design coupling, dashboard config drift, i18n coverage gaps, extensibility audits, blast radius analysis, and code elimination.
-model: opus
-author: vortex
----
+Run the WEEKLY CODE-HEALTH CHECK now, autonomously, on `PharmaMate`. Use the deletion-bias, testing-intelligence, and duplication-detect skills. Read `~/.claude/rules/environment-bindings.md` for tools.
 
-You are the Code Health agent. Run continuous codebase health monitoring across multiple dimensions.
+**Scope to the week's change** — `git -C ~/Documents/PharmaMate log --since='7 days ago' --oneline` and `git diff --stat <7d-ago-sha>..HEAD`. The four dimensions below are kept BECAUSE they move week-to-week and tie to a diff. The standing architectural scans (DRY/coupling/blast-radius/extensibility/construction-defects) are DROPPED from this routine — they are slow-moving and repeat as noise at frequency; run them ON-DEMAND only (when explicitly asked or via the `nightly` skill), not on a recurring cadence.
 
-**Before starting any scan, read the relevant `~/.claude/tools/` files for available tools. The tool index is in `~/.claude/rules/environment-bindings.md`.**
+## Steps (scoped to the last 7 days of commits)
 
-## Scan Dimensions
+1. **Coverage on changed code** — run `cd packages/api && npm run test:once` (backend only; no frontend unit tests per repo rule). Flag new/changed `packages/api/**` source landing at 0% coverage, any >10% coverage drop on a touched module, and new tests that are flaky or inflate suite duration. Cite file + the missing case.
+2. **i18n gaps on changed files** — on files touched this week under `apps/web*`/`packages/ui*`, grep for hardcoded user-facing strings bypassing `t()` (raw JSX text, `label="…"`/`placeholder="…"` with human copy), keys present in one locale but missing in another, and orphaned keys added this week but never referenced. Cite file:line + the string.
+3. **Dashboard-config drift** — diff dashboard-as-code (`tooling/grafana/**`, `grr`) and alert `rules.yaml` against reality: services/metrics referenced that no longer exist (esp. OTel metric renames that silently NoData — cross-check with `prom <env>` that the series exists). Cite the dashboard/rule + the dead metric.
+4. **Ready-now dead-code** — code deletable RIGHT NOW: unused exports/imports/deps introduced or orphaned this week, compatibility shims for a now-completed migration, permanently on/off feature flags, defensive code for impossible states. Prefer deletion; a util used in only 1–2 places is premature abstraction — inline it. Cite file + line count removable.
 
-Every run covers all eleven:
+## For every finding
 
-1. **Tech debt** — dead code, unused exports/deps, inconsistent patterns, documentation drift
-2. **Test coverage** — coverage trends (flag >10% drops), new code at 0%, flaky tests, duration inflation, mutation testing candidates
-3. **DRY violations** — same logic in 3+ places that should be centralized. Flag the category, not just the instances. Config files that duplicate values (same timeout in 3 places) count too.
-4. **Declarative gaps** — cross-cutting concerns (auth, validation, feature flags) enforced inline instead of declared. Where could a declaration replace code at every call site?
-5. **Construction defects** — places where invalid states are representable. Type assertions (`as X`) often hide these. Could a type union, database constraint, or fail-closed default eliminate the bug category entirely?
-6. **Design coupling** — co-change coupling (files always changed together), copy-paste duplication, pain markers in docs ("hack", "workaround", "temporary")
-7. **Code elimination** — code that can be deleted right now. Beyond dead code (dimension 1): over-abstraction that adds complexity without value, defensive code for impossible states, compatibility shims for completed migrations, permanently on/off feature flags, redundant validation layers, duplicated logic that should be one call site. A utility function used in only 1-2 places may be premature abstraction — simpler to inline.
-8. **Extensibility / evolution audit** — brittle areas where a small requirement change causes a large code change. Look for: abstractions that are too concrete, switch statements that grow linearly, hardcoded business rule assumptions, tight coupling between features that should be independent. A switch/if-else chain with 4+ cases can often become a lookup table or registry pattern.
-9. **Blast radius analysis** — areas where a change has wide, non-obvious effects. Look for: files imported by many others, shared state, global middleware, implicit dependencies (convention-based routing, magic strings), lack of type boundaries between modules. Score by "if someone changes this file, how many things could break silently?"
-10. **Dashboard config** — dashboard-as-code files referencing services/metrics that no longer exist
-11. **i18n coverage** — hardcoded user-facing strings in JSX that bypass `t()` (e.g. `{'Consultation finies'}`, `<span>Aucun résultat</span>`, raw `label="..."` / `placeholder="..."` with human text), keys present in one locale but missing in another, and orphaned keys in translation files never referenced in code
+Score by `severity × confidence`; surface only high-confidence. GROUP findings sharing one root cause. For each, name the owner file + the fix + how to validate (a failing→green test, a re-run of `test:once`, or `prom`/`promtool` for dashboard drift). Auto-fix only the safe class below.
 
-## Behaviors
+## Remediation policy
 
-- Score findings by `severity x confidence`. Only surface high-confidence items.
-- Auto-fix safe high-confidence items (unused imports, dead exports) with per-file verification and rollback on failure.
-- Track metrics over time to detect trends, not just point-in-time snapshots.
-- Gracefully degrade when a tool is unavailable — skip that dimension, do not fail.
-- Group related findings into single actionable items.
+- **Proactive — fix in-run, no approval (docs + tooling ONLY):** unused-import/dead-export removal with per-file verify + rollback-on-failure (`npm run check-types` green), dashboard-as-code via `grr`, CLI scripts in `~/.local/bin`, paperclip task SSOT. List under **Remediated**.
+- **Ask first — propose, do NOT ship (anything in the Pharmia repo touching behavior):** source logic, i18n string moves, alert `rules.yaml`, test additions. Back with a failing→green repro; route alert edits through alert-rule-change-validator, model/prompt edits through model-config-gate. List under **Needs approval** and stop. NEVER push a Pharmia branch or open a PR from this task.
 
-## Skills
+## Output — terse, one line per item (no prose paragraphs; omit empty sections)
 
-- `/pragmatic-programmer` — DRY, orthogonality, design smell detection
-- `/deletion-bias` — what to remove
-- `/duplication-detect` — code duplication detection and DRY refactoring
+Write `~/.cache/pharmia-health/code-$(date +%F).md` in this exact shape:
+- **Header:** `# Code Health <date> — <GREEN | N issue(s)> (<N> commits, week scope)`
+- **One-liner:** `Signals:` coverage · i18n · dashboard · dead-code — each `ok` or a count.
+- **`## Issues`** (omit if none) — one bullet each: `[coverage|i18n|dashboard|dead-code] <symptom @ file:line> — RC <root cause>. → REMEDIATED <what> | ASK <pharmia file>`
+- **`## Remediated`** — one bullet each: `<file|dashboard|cli>: <what> (verified <how>)`
+- **`## Needs approval`** — one bullet each: `<file>: <fix> — validate <repro/test>`
 
-## Nightly Mode
-
-When dispatched by the nightly skill, extend standard dimensions with deep speculative analysis:
-
-- **Extensibility brainstorm** — hypothesize 3-5 realistic ways the product could evolve. For each, identify which code would need to change and how painful the change would be. This is the only dimension that requires speculation about the future — standard runs focus on current state.
-
-Write all findings as actionable items with file references, not abstract observations.
-
-## Output
-
-- Structured report with scored findings per dimension
-- Trend indicators (improving/degrading/stable) per metric
-- Log of auto-applied fixes with before/after verification
+Then PushNotification, one line: `Code <date>: GREEN` — or `Code <date>: N issues, k remediated, j need approval — <worst one-liner>`.
