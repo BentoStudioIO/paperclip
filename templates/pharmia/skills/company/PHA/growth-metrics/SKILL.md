@@ -1,7 +1,15 @@
 ---
 name: "growth-metrics"
 description: "Concrete pg canary queries for Pharmia conversion / activation / retention / user-growth + the MRR proxy. The HOW behind the Growth Brief CORE STATS and USER GROWTH sections."
-user-invocable: true
+slug: "growth-metrics"
+metadata:
+  paperclip:
+    slug: "growth-metrics"
+    skillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/growth-metrics"
+  paperclipSkillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/growth-metrics"
+  skillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/growth-metrics"
+  user-invocable: true
+key: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/growth-metrics"
 ---
 
 # growth-metrics

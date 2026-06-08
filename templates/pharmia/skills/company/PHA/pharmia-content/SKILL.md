@@ -1,7 +1,15 @@
 ---
 name: "pharmia-content"
 description: "FR-Québec content composition kit for the content agent: lifted MIT marketing frameworks (positioning, ICP/PVP, SB7, copywriting, stickiness, product-led-SEO) as STRUCTURE-only references, bound to Pharmia's voice contract and §0-§10 workflow."
-user-invocable: true
+slug: "pharmia-content"
+metadata:
+  paperclip:
+    slug: "pharmia-content"
+    skillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-content"
+  paperclipSkillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-content"
+  skillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-content"
+  user-invocable: true
+key: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-content"
 ---
 
 # pharmia-content

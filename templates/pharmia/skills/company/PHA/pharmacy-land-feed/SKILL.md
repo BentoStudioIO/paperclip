@@ -1,7 +1,15 @@
 ---
 name: "pharmacy-land-feed"
 description: "Runnable EXTERNAL feed spec for market-intel: RSS-Bridge (CssSelectorFeedExpander + FeedMerge) over QC pharmacy sources, plus bx (Brave) digest. Three priority streams: NEW LAWS, EVENTS, AI-IN-PHARMACY."
-user-invocable: true
+slug: "pharmacy-land-feed"
+metadata:
+  paperclip:
+    slug: "pharmacy-land-feed"
+    skillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmacy-land-feed"
+  paperclipSkillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmacy-land-feed"
+  skillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmacy-land-feed"
+  user-invocable: true
+key: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmacy-land-feed"
 ---
 
 # pharmacy-land-feed

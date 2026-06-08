@@ -1,7 +1,15 @@
 ---
 name: "lead-scouting"
 description: "OPQ ⨯ Twenty ⨯ online-signal ⨯ PLG-signup method for building the ranked who-to-DM list, plus the DM-list output format. Founder-led: the human sends; lead-scout ranks + writes opportunities to Twenty."
-user-invocable: true
+slug: "lead-scouting"
+metadata:
+  paperclip:
+    slug: "lead-scouting"
+    skillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/lead-scouting"
+  paperclipSkillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/lead-scouting"
+  skillKey: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/lead-scouting"
+  user-invocable: true
+key: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/lead-scouting"
 ---
 
 # lead-scouting
