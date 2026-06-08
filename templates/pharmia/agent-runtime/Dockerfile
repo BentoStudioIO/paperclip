@@ -31,7 +31,11 @@ WORKDIR /home/agent
 # Injected at runtime by Daytona/Paperclip (NOT baked):
 #   GITHUB_APP_* (or a git token), ANTHROPIC_API_KEY,
 #   LOKI_{DEV,QA,CANARY}_TOKEN, PG_{DEV,QA}_* (rw) + PG_CANARY_* (READ-ONLY role),
+#   AUTUMN_SECRET_KEY (LIVE am_sk_live — billing, for real MRR via `autumn`) + AUTUMN_URL,
 #   ~/.config/<tool>/ for ol, langfuse, twenty, comp (read-write), dokploy (bento dev/qa only).
+# `autumn` reads AUTUMN_SECRET_KEY from env (precedence over ~/.config/autumn/config). NOTE: the
+# live key is billing READ-WRITE (customer:create/delete) — agents use read commands only (customers,
+# customer <id>, products) to compute MRR/active-subs/churn for the growth dept's market-intel.
 # Workflow: clone PharmaMate → `npm install` (arms the .husky CONFIRM hook) → per-issue
 # worktree → push dev/qa freely; main/canary blocked by the hook (agents never set CONFIRM_DEPLOY).
 CMD ["bash"]
