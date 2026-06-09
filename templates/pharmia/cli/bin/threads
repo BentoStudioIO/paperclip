@@ -38,6 +38,12 @@ USAGE
                                           # Answers "Gemini or Kimi right now?"
                                           # in one command. `threads modelmix`
                                           # for full help.
+  threads chains <env> [--since DUR]     # satisfaction-review surface: dumps each
+                                          # thread's user QUESTION CHAIN (verbatim,
+                                          # in order) + folds in explicit dislikes,
+                                          # so a routine/agent READS the chains and
+                                          # judges which answers missed. Not a
+                                          # classifier. `threads chains` for help.
 
 OUTPUT MODES (pick one, default = full RCA-grade transcript)
   --rca                                  RCA digest: per-tool YIELD (ok/empty/error
@@ -170,6 +176,167 @@ for k,v in served.most_common():
 print("fallback fired: %d (%.0f%%)   [primaryTimedOut=%d errored=%d guardTripped=%d]" % (fb,100*fb/n,tmo,err,guard))
 if fb_reasons: print("  fallback reasons:", dict(fb_reasons))
 '
+  exit 0
+fi
+
+if [[ "${1:-}" == "chains" || "${1:-}" == "feedback" ]]; then
+  shift
+  if [[ $# -eq 0 || ( "$1" != "dev" && "$1" != "qa" && "$1" != "canary" ) ]]; then
+    cat >&2 <<'EOF'
+threads chains <env> [--since DUR] [--min-turns N] [--limit N] [--json]
+
+REVIEW SURFACE for satisfaction triage — NOT a classifier. Dumps the user
+QUESTION CHAIN (every user turn, verbatim, in order) for each Atlas thread
+active in the window, so a human or the daily-health agent can READ the chains
+and judge which answers likely disappointed. The agent does the judging — a
+follow-up that re-asks, demands a source, pushes back ("une méta analyse ??"),
+or pivots away unsatisfied is the tell, and an LLM reading the chain catches
+nuance (sarcasm, frustration, a silent topic-abandon) no regex can.
+
+Defaults to multi-turn chains (--min-turns 2) because a single-question thread
+has no follow-up to reveal (dis)satisfaction. Explicit `atlas_message_reaction`
+dislikes (ground truth) are folded in and marked [DISLIKE]. Newest first.
+Drill into any suspicious chain with `threads <url> --rca`.
+
+ENV (required)     dev | qa | canary
+  --since <dur>    lookback window (default 24h). e.g. 24h, 3d, 7d.
+  --min-turns <n>  min user turns to show a chain (default 2; use 1 for all).
+  --limit <n>      max chains shown (default 60).
+  --json           structured chains (for piping / an agent to consume).
+
+EXAMPLES
+  threads chains canary                       # last 24h of multi-turn chains
+  threads chains canary --since 7d --json
+  threads chains canary --min-turns 1         # every question, incl. one-shots
+EOF
+    exit 1
+  fi
+  ENV_FB="$1"; shift
+  FB_SINCE="24h"; FB_LIMIT=60; FB_MINTURNS=2; FB_JSON=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --since) shift; FB_SINCE="${1:-24h}"; shift ;;
+      --limit) shift; FB_LIMIT="${1:-60}"; shift ;;
+      --min-turns) shift; FB_MINTURNS="${1:-2}"; shift ;;
+      --json) FB_JSON=1; shift ;;
+      --help|-h) "$0" chains >&2; exit 0 ;;
+      *) echo "threads chains: unexpected flag '$1'" >&2; exit 1 ;;
+    esac
+  done
+
+  # Resolve --since (24h / 3d / 7d) → absolute UTC ISO floor.
+  FB_FROM_ISO=$(FB_SINCE_ENV="$FB_SINCE" python3 - <<'TPY'
+import os, re
+from datetime import datetime, timedelta, timezone
+s=(os.environ.get('FB_SINCE_ENV') or '24h').strip().lower()
+m=re.fullmatch(r'(\d+)([smhd])', s)
+if not m:
+    raise SystemExit(f"threads chains: cannot parse --since '{s}' (try 24h, 3d, 7d)")
+n,u=int(m.group(1)),m.group(2)
+delta={'s':timedelta(seconds=n),'m':timedelta(minutes=n),'h':timedelta(hours=n),'d':timedelta(days=n)}[u]
+print((datetime.now(timezone.utc)-delta).isoformat())
+TPY
+)
+  [[ -z "$FB_FROM_ISO" ]] && exit 1
+
+  # (1) Explicit dislikes — app DB, ground truth. Tab-delimited; strip SET echoes.
+  REACT_F=$(mktemp)
+  pg "$ENV_FB" app "copy (
+    select \"threadId\" || E'\t'
+        || coalesce(array_to_string(\"feedbackTags\",','),'') || E'\t'
+        || coalesce(replace(replace(\"feedbackText\",E'\n',' '),E'\t',' '),'')
+    from atlas_message_reaction
+    where reaction='dislike' and \"createdAt\" >= '${FB_FROM_ISO}'
+    order by \"createdAt\" desc
+  ) to stdout;" 2>/dev/null | grep -v '^SET$' > "$REACT_F" || true
+
+  # (2) Question chains — mastra DB, USER turns only. Text is extracted SERVER
+  # SIDE from the content JSON (jsonb parts[].text) so the payload is just the
+  # typed question, no JSON wrapper and no python-parse fragility.
+  USER_F=$(mktemp)
+  pg "$ENV_FB" mastra "copy (
+    select thread_id || E'\t'
+        || to_char(\"createdAtZ\" at time zone 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') || E'\t'
+        || replace(replace(coalesce(
+             (select string_agg(p->>'text',' ' order by ord)
+                from jsonb_array_elements(content::jsonb -> 'parts')
+                       with ordinality as t(p,ord)
+               where p->>'type'='text'), content::text), E'\n',' '), E'\t',' ')
+    from mastra_messages
+    where role='user' and \"createdAtZ\" >= '${FB_FROM_ISO}'
+    order by thread_id, \"createdAtZ\"
+  ) to stdout;" 2>/dev/null | grep -v '^SET$' > "$USER_F" || true
+
+  trap 'rm -f "$REACT_F" "$USER_F"' EXIT
+  FB_ENV="$ENV_FB" FB_SINCE_OUT="$FB_SINCE" FB_LIMIT_ENV="$FB_LIMIT" \
+  FB_MINTURNS_ENV="$FB_MINTURNS" FB_JSON_ENV="$FB_JSON" \
+  python3 - "$REACT_F" "$USER_F" <<'FBPY'
+import sys, os, json, urllib.parse
+
+env=os.environ['FB_ENV']; limit=int(os.environ.get('FB_LIMIT_ENV') or '60')
+min_turns=int(os.environ.get('FB_MINTURNS_ENV') or '2')
+as_json=os.environ.get('FB_JSON_ENV')=='1'; since=os.environ.get('FB_SINCE_OUT','24h')
+host={'dev':'admin.dev.pharmia.ca','qa':'admin.qa.pharmia.ca','canary':'admin.canary.pharmia.ca'}[env]
+def url(tid): return f"https://{host}/atlas?thread="+urllib.parse.quote(tid, safe='')
+def clip(s,n=240): s=s.strip(); return s if len(s)<=n else s[:n-1]+'…'
+
+# ---- question chains: ordered user turns per thread ----
+threads={}  # tid -> [(ts, text), ...]
+with open(sys.argv[2]) as f:
+    for ln in f:
+        ln=ln.rstrip('\n')
+        if not ln: continue
+        cols=ln.split('\\t',2)   # COPY text-format escapes embedded tabs as \t
+        if len(cols)<3: continue
+        tid,ts,txt=cols
+        if not txt.strip(): continue
+        threads.setdefault(tid,[]).append((ts, txt.strip()))
+
+# ---- explicit dislikes (ground truth) keyed by thread ----
+dislikes={}  # tid -> [ "tag(s): text", ... ]
+with open(sys.argv[1]) as f:
+    for ln in f:
+        ln=ln.rstrip('\n')
+        if not ln: continue
+        c=ln.split('\\t',2)
+        if not c: continue
+        tid=c[0]; tags=c[1] if len(c)>1 else ''; text=c[2] if len(c)>2 else ''
+        label=(tags or 'dislike')+((' — '+text) if text else '')
+        dislikes.setdefault(tid,[]).append(label)
+
+# keep chains meeting the turn threshold, OR any thread that has a dislike
+rows=[]
+for tid,turns in threads.items():
+    if len(turns)>=min_turns or tid in dislikes:
+        last_ts=max(t for t,_ in turns)
+        rows.append((tid,last_ts,turns))
+rows.sort(key=lambda r: r[1], reverse=True)
+rows=rows[:limit]
+
+if as_json:
+    out=[]
+    for tid,last_ts,turns in rows:
+        out.append({'threadId':tid,'url':url(tid),'lastTs':last_ts,
+                    'turnCount':len(turns),
+                    'questions':[{'ts':t,'text':x} for t,x in turns],
+                    'dislikes':dislikes.get(tid,[])})
+    print(json.dumps(out, ensure_ascii=False, indent=2)); sys.exit(0)
+
+n_multi=sum(1 for _,_,t in rows if len(t)>=2)
+print(f"Atlas question chains — {env} (since {since}, min-turns {min_turns}): {len(rows)} shown  [{n_multi} multi-turn · {len(dislikes)} with explicit dislike]")
+print("Read each chain — a follow-up that re-asks, demands a source, or pushes back ⇒ the prior answer likely missed. Drill: threads <url> --rca\n")
+if not rows:
+    print("  (no chains in window)"); sys.exit(0)
+for tid,last_ts,turns in rows:
+    mark=" [DISLIKE]" if tid in dislikes else ""
+    print(f"● {last_ts} · {len(turns)} turn(s){mark}")
+    print(f"  {url(tid)}")
+    for n,(ts,txt) in enumerate(turns,1):
+        print(f"   {n}. {clip(txt)}")
+    for d in dislikes.get(tid,[]):
+        print(f"   ⚑ dislike: {clip(d)}")
+    print()
+FBPY
   exit 0
 fi
 
