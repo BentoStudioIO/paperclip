@@ -1,0 +1,78 @@
+# Coder (OSS) control plane — self-hosted on the Bento "agents" VPS.
+#
+# Multi-tenant browser IDE replacing the old shared code-server + oauth2-proxy at
+# https://code.bentostudio.io. Auth = PocketID OIDC. Workspaces are per-user Docker
+# containers (each with its own home volume → true per-person isolation), provisioned
+# by Coder via the mounted host docker.sock.
+#
+# Deploy (NOT via Dokploy — this box has no Dokploy; isolated compose project "coder"):
+#   docker compose -p coder --env-file /etc/coder/coder.env up -d
+#
+# Network: Coder's HTTP listener is published to 127.0.0.1:7080 ONLY. Public TLS is
+# terminated by the host Caddy (code.bentostudio.io → 127.0.0.1:7080). Postgres is
+# internal to the compose network — never published.
+#
+# Secrets: ALL secret values live in the root-owned chmod-600 env file referenced by
+# --env-file (/etc/coder/coder.env on the box). This compose file contains ZERO secrets.
+# See coder.env.example for the placeholder template.
+
+services:
+  coder:
+    image: ghcr.io/coder/coder:latest
+    container_name: coder
+    restart: unless-stopped
+    # Publish the control-plane HTTP listener to loopback only; Caddy fronts it.
+    ports:
+      - "127.0.0.1:7080:7080"
+    environment:
+      CODER_HTTP_ADDRESS: "0.0.0.0:7080"
+      CODER_ACCESS_URL: "${CODER_ACCESS_URL}"
+      CODER_PG_CONNECTION_URL: "postgresql://${CODER_PG_USER}:${CODER_PG_PASSWORD}@coder-db:5432/${CODER_PG_DB}?sslmode=disable"
+      # --- PocketID OIDC ---
+      CODER_OIDC_ISSUER_URL: "${CODER_OIDC_ISSUER_URL}"
+      CODER_OIDC_CLIENT_ID: "${CODER_OIDC_CLIENT_ID}"
+      CODER_OIDC_CLIENT_SECRET: "${CODER_OIDC_CLIENT_SECRET}"
+      CODER_OIDC_SCOPES: "openid,profile,email"
+      CODER_OIDC_SIGN_IN_TEXT: "Sign in with PocketID"
+      # CODER_OIDC_EMAIL_DOMAIN intentionally UNSET → all email domains allowed.
+      # Group/role sync is a Premium feature — NOT configured; admins assigned manually.
+      # Reduce footprint on this small box.
+      CODER_TELEMETRY_ENABLE: "false"
+      CODER_UPDATE_CHECK: "false"
+    # Provision workspace containers on THIS host via the docker socket.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Host docker group gid so the coder process can talk to the socket.
+    # gid 985 = `docker` group on the agents VPS (getent group docker). Override via env.
+    group_add:
+      - "${DOCKER_GROUP_ID:-985}"
+    depends_on:
+      coder-db:
+        condition: service_healthy
+    networks:
+      - coder
+
+  coder-db:
+    image: postgres:16
+    container_name: coder-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${CODER_PG_USER}"
+      POSTGRES_PASSWORD: "${CODER_PG_PASSWORD}"
+      POSTGRES_DB: "${CODER_PG_DB}"
+    volumes:
+      - coder_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CODER_PG_USER} -d ${CODER_PG_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - coder
+
+volumes:
+  coder_pg_data:
+
+networks:
+  coder:
+    name: coder
