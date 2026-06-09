@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"   # .../templates
 PHARMIA_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"                       # .../templates/pharmia
 REPO_DIR="$(cd "$PHARMIA_DIR/../.." && pwd)"                      # paperclip repo root
 : "${CLI_INSTALL_DIR:=/usr/local/bin}"
-: "${NODE_MAJOR:=22}"
+: "${NODE_MAJOR:=24}"
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 export DEBIAN_FRONTEND=noninteractive
 
