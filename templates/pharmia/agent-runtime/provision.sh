@@ -48,7 +48,7 @@ fi
 # 2) Node (install only if absent — the Docker base image already ships it) ----------------
 if ! command -v node >/dev/null 2>&1; then
   say "node: installing NodeSource ${NODE_MAJOR}.x (system-wide)"
-  curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | $SUDO -E bash -
+  curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | $SUDO bash -
   $SUDO apt-get install -y nodejs
 fi
 say "node $(node -v) / npm $(npm -v)"
