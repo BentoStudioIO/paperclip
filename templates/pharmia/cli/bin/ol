@@ -631,19 +631,29 @@ case "$1" in
         fi
 
         offset=0
-        batch=100
+        # documents.list returns full .text per doc, so large pages (100 = MBs) 502 the
+        # gateway and the loop silently truncates to empty. Page small + retry each page,
+        # exactly like `ol linkcheck` — one transient 502 must not yield an empty list.
+        batch=25
         # Collect pages into a temp file (avoids ARG_MAX on large collections).
         tmp_pages=$(mktemp)
         trap 'rm -f "$tmp_pages"' EXIT
         echo '[]' > "$tmp_pages"
         while true; do
           if [[ -n "$collection" ]]; then
-            page=$(api documents.list -d "$(jq -nc --arg c "$collection" --argjson o "$offset" --argjson l "$batch" '{collectionId:$c, offset:$o, limit:$l}')")
+            payload=$(jq -nc --arg c "$collection" --argjson o "$offset" --argjson l "$batch" '{collectionId:$c, offset:$o, limit:$l}')
           else
-            page=$(api documents.list -d "$(jq -nc --argjson o "$offset" --argjson l "$batch" '{offset:$o, limit:$l}')")
+            payload=$(jq -nc --argjson o "$offset" --argjson l "$batch" '{offset:$o, limit:$l}')
           fi
-          count=$(echo "$page" | jq '.data | length')
-          echo "$page" | jq '.data' > "${tmp_pages}.new"
+          page=""; ok=false
+          for attempt in 1 2 3 4 5 6; do
+            page=$(api_nofail documents.list -d "$payload" 2>/dev/null || true)
+            if printf '%s' "$page" | jq -e '.data' >/dev/null 2>&1; then ok=true; break; fi
+            sleep 2
+          done
+          $ok || { echo "[ol doc list] documents.list failed at offset=$offset after retries" >&2; exit 4; }
+          count=$(printf '%s' "$page" | jq '.data | length')
+          printf '%s' "$page" | jq '.data' > "${tmp_pages}.new"
           jq -c --slurpfile p "${tmp_pages}.new" '. + $p[0]' "$tmp_pages" > "${tmp_pages}.merged"
           mv "${tmp_pages}.merged" "$tmp_pages"
           rm -f "${tmp_pages}.new"
