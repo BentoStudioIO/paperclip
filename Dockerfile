@@ -61,6 +61,18 @@ RUN pnpm --filter @paperclipai/plugin-sdk build
 RUN pnpm --filter @paperclipai/plugin-llm-wiki build
 RUN pnpm --filter @paperclipai/plugin-workspace-diff build
 RUN pnpm --filter @paperclipai/plugin-chat build
+# Daytona sandbox-provider plugin: excluded from the pnpm workspace (see
+# pnpm-workspace.yaml "!packages/plugins/sandbox-providers/**") so it is NOT
+# installed/built by the frozen workspace install above. Install its standalone
+# third-party deps (@daytonaio/sdk) into its own node_modules — the postinstall
+# (link-plugin-dev-sdk.mjs) symlinks the workspace @paperclipai/plugin-sdk built
+# just above — then compile its dist/. Baking dist + node_modules into the image
+# makes activation survive container restarts/redeploys (previously the dist was
+# hand-built inside the running container and wiped on recreate).
+RUN cd packages/plugins/sandbox-providers/daytona \
+  && pnpm install --ignore-workspace \
+  && pnpm run build \
+  && test -f dist/manifest.js || (echo "ERROR: daytona plugin manifest build output missing" && exit 1)
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 

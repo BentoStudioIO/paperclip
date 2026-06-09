@@ -22,14 +22,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libgtk-3-0 libdbus-glib-1-2 libxt6 libasound2 libx11-xcb1 libxcomposite1 \
       libxcursor1 libxdamage1 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 \
       libxtst6 libegl1-mesa libgl1-mesa-dri libgbm1 xvfb \
+      libx11-6 libxext6 libxinerama1 \
       fonts-liberation fonts-noto-color-emoji fontconfig \
     && rm -rf /var/lib/apt/lists/*
+# NOTE: libx11-6 (libX11.so.6) + libxext6 + libxinerama1 are required by the Daytona
+# daemon's computer-use plugin. Without libX11.so.6 the toolbox server fails to bind on
+# :2280, so the runner's daemon-wait times out and NO sandbox can start from this snapshot
+# ("timeout waiting for daemon to start"). The other X11 libs above were for Camoufox/Chromium.
 
 # --- Static research binaries (pinned; URLs validated 2026-06-08) ------------------------
 ARG GH_VERSION=2.93.0
 ARG GITLEAKS_VERSION=8.30.1
 ARG OHA_VERSION=1.14.0
 ARG BX_VERSION=1.5.0
+ARG LOKI_VERSION=3.7.2
 RUN set -eux; \
     curl -fSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
       | tar -xz -C /usr/local/bin --strip-components=2 "gh_${GH_VERSION}_linux_amd64/bin/gh"; \
@@ -38,8 +44,10 @@ RUN set -eux; \
     curl -fSL -o /usr/local/bin/oha "https://github.com/hatoo/oha/releases/download/v${OHA_VERSION}/oha-linux-amd64"; \
     curl -fSL -o /usr/local/bin/bx "https://github.com/brave/brave-search-cli/releases/download/v${BX_VERSION}/bx-${BX_VERSION}-linux-amd64"; \
     curl -fSL -o /usr/local/bin/yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"; \
-    chmod +x /usr/local/bin/gh /usr/local/bin/gitleaks /usr/local/bin/oha /usr/local/bin/bx /usr/local/bin/yt-dlp; \
-    gh --version; gitleaks version; oha --version
+    curl -fSL -o /tmp/logcli.zip "https://github.com/grafana/loki/releases/download/v${LOKI_VERSION}/logcli-linux-amd64.zip"; \
+    unzip -q /tmp/logcli.zip -d /tmp && mv /tmp/logcli-linux-amd64 /usr/local/bin/logcli && rm -f /tmp/logcli.zip; \
+    chmod +x /usr/local/bin/gh /usr/local/bin/gitleaks /usr/local/bin/oha /usr/local/bin/bx /usr/local/bin/yt-dlp /usr/local/bin/logcli; \
+    gh --version; gitleaks version; oha --version; logcli --version
 
 # curl_cffi — TLS-fingerprint-forging HTTP client (bypass WAF). bookworm is PEP-668-managed.
 RUN pip3 install --no-cache-dir --break-system-packages curl_cffi==0.13.0
