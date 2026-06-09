@@ -157,6 +157,23 @@ routines:
         label: "Weekly Monday afternoon"
         timezone: "UTC"
 
+  # ── Dependency & service release watch (WEBHOOK) ──────────────────────────
+  # assignee: code-health
+  # purpose: judge ONE GitHub release per fire (worthwhile vs premature). The n8n
+  #          "Dep & Service Release Watch" workflow polls releases.atom feeds
+  #          (derived from package.json + service map), dedups, and POSTs each new
+  #          release here. No cron in paperclip — paperclip only receives + judges.
+  # prompt SSOT: templates/pharmia/tasks/dep-release-watch/TASK.md
+  # DISABLED until the n8n watcher is deployed + the webhook secret is wired.
+  dep-release-watch:
+    status: "paused"
+    triggers:
+      -
+        kind: "webhook"
+        label: "n8n release-watcher"
+        signingMode: "bearer"
+        enabled: false
+
   # ── Tier-A host detectors (SCHEDULE) ──────────────────────────────────────
   # Tier-A host-detector
   # assignee: ai-product-observer
