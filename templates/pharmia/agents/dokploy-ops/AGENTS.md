@@ -1,5 +1,5 @@
 ---
-name: "Dokploy-Ops"
+name: "Dokploy Ops"
 title: "Dokploy Operations"
 reportsTo: "engineering-lead"
 skills:

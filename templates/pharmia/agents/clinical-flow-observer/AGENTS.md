@@ -1,5 +1,5 @@
 ---
-name: "Clinical-Flow-Observer"
+name: "Clinical Flow Observer"
 title: "Clinical Flow Observer"
 reportsTo: "engineering-lead"
 skills:

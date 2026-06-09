@@ -1,5 +1,5 @@
 ---
-name: "Security-Agent"
+name: "Security Agent"
 title: "Security Agent"
 reportsTo: "engineering-lead"
 skills:

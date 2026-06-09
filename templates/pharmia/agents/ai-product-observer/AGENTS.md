@@ -1,5 +1,5 @@
 ---
-name: "Ai-Product-Observer"
+name: "AI Product Observer"
 title: "AI Product Observer"
 reportsTo: "engineering-lead"
 skills:

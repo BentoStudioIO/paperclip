@@ -1,5 +1,5 @@
 ---
-name: "Bug-Hunter"
+name: "Bug Hunter"
 title: "Bug Hunter"
 reportsTo: "engineering-lead"
 skills:

@@ -1,5 +1,5 @@
 ---
-name: "Code-Health"
+name: "Code Health"
 title: "Code Health"
 reportsTo: "engineering-lead"
 skills:

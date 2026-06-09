@@ -1,5 +1,5 @@
 ---
-name: "Platform-Observer"
+name: "Platform Observer"
 title: "Platform Observer"
 reportsTo: "engineering-lead"
 skills:
