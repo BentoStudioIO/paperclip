@@ -79,9 +79,13 @@ dl "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux" "$tm
 # logcli (zip)
 dl "https://github.com/grafana/loki/releases/download/v${LOKI_VERSION}/logcli-linux-amd64.zip" "$tmp/logcli.zip"
 unzip -qo "$tmp/logcli.zip" -d "$tmp"; $SUDO install -m755 "$tmp/logcli-linux-amd64" "$CLI_INSTALL_DIR/logcli"
-# ovhcloud (official OVH CLI) — latest release asset
-OVH_URL="$(curl -fsSL https://api.github.com/repos/ovh/ovhcloud-cli/releases/latest | jq -r '.assets[]|select(.name|test("linux.*(amd64|x86_64)$"))|.browser_download_url' | head -1)"
-if [ -n "${OVH_URL:-}" ] && [ "$OVH_URL" != "null" ]; then dl "$OVH_URL" "$tmp/ovhcloud"; $SUDO install -m755 "$tmp/ovhcloud" "$CLI_INSTALL_DIR/ovhcloud"; else echo "WARN: could not resolve ovhcloud release URL — skipping"; fi
+# ovhcloud (official OVH CLI) — latest release; asset is a tarball ovhcloud-cli_Linux_x86_64.tar.gz
+OVH_URL="$(curl -fsSL https://api.github.com/repos/ovh/ovhcloud-cli/releases/latest | jq -r '.assets[]|select(.name|test("Linux_x86_64\\.tar\\.gz$"))|.browser_download_url' | head -1)"
+if [ -n "${OVH_URL:-}" ] && [ "$OVH_URL" != "null" ]; then
+  dl "$OVH_URL" "$tmp/ovhcloud.tgz"; tar -xzf "$tmp/ovhcloud.tgz" -C "$tmp"
+  ovhbin="$(find "$tmp" -maxdepth 3 -type f \( -name 'ovhcloud-cli' -o -name 'ovhcloud' \) | head -1)"
+  if [ -n "$ovhbin" ]; then $SUDO install -m755 "$ovhbin" "$CLI_INSTALL_DIR/ovhcloud"; else echo "WARN: ovhcloud binary not found in tarball"; fi
+else echo "WARN: could not resolve ovhcloud release URL — skipping"; fi
 
 # 4) curl_cffi (TLS-fingerprint HTTP client; bookworm/noble are PEP-668 managed) ----------
 say "pip: curl_cffi"
