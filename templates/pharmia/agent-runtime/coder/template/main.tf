@@ -19,12 +19,14 @@
 # DEFAULTS; users can add more.
 #
 # DEV ERGONOMICS (all official pinned registry modules — no hand-rolled scripts):
-#   • git-clone → auto-clone git_repo on first build via the GitHub external-auth
-#     DEVICE FLOW (one-time auth link; NO static token). Its post_clone_script
-#     writes apps/web/.env (VITE_API_URL = dev_api_url) so the Vite frontend
-#     talks to the shared DEV API with no local stack.
-#   • git-config → per-user git identity. github-upload-public-key → per-workspace
-#     SSH key whose PUBLIC half is uploaded to the dev's GitHub (push without PAT).
+#   • git-clone → clones git_repo ONLY when the dev sets the param (default is
+#     empty → nothing is precloned). When set to a git.bentostudio.io repo it
+#     authenticates via the Forgejo external-auth (provider id "forgejo", OAuth2
+#     flow; NO static token). Its post_clone_script writes apps/web/.env
+#     (VITE_API_URL = dev_api_url) so the Vite frontend talks to the shared DEV
+#     API with no local stack.
+#   • git-config → per-user git identity. Git push over HTTPS works via the
+#     Forgejo external-auth OAuth token (no SSH key upload needed).
 #   • dotfiles + personalize → each dev applies their OWN dotfiles/setup on start.
 #   • coder-login → auto-auth the `coder` CLI inside the workspace.
 #   • coder_app "vite" → in-browser preview of the :5173 dev server (path-based).
@@ -48,6 +50,15 @@ provider "docker" {}
 
 data "coder_workspace" "me" {}
 data "coder_workspace_owner" "me" {}
+
+# Forgejo external-auth (provider id "forgejo", configured on the control plane as
+# CODER_EXTERNAL_AUTH_0_*). Surfaces a one-time OAuth2 auth link in the workspace so
+# git over HTTPS to git.bentostudio.io is authenticated — no static token, no SSH key.
+# Optional (count = 0) when no repo is set, so an empty workspace doesn't force auth.
+data "coder_external_auth" "forgejo" {
+  count = trimspace(data.coder_parameter.git_repo.value) != "" ? 1 : 0
+  id    = "forgejo"
+}
 
 # Workspace base image. Default: minimal node:24 (no-creds sandbox). Swap to the published
 # Pharmia agent-runtime image (node 24 + Bento wrapper CLIs) once it's on Forgejo, e.g.
@@ -86,21 +97,22 @@ data "coder_parameter" "memory" {
   }
 }
 
-# Repo auto-cloned into ~/ on first build via the official git-clone module.
-# Default is the Pharmia monorepo (PRIVATE). Auth is the GitHub external-auth
-# DEVICE FLOW configured on this control plane (provider id "github") — the dev
-# clicks an auth link once; NO static token is baked anywhere. The module is
-# idempotent (skips if the repo dir already exists).
+# Repo to clone into ~/ on first build via the official git-clone module.
+# Default is EMPTY → nothing is precloned; devs clone from Forgejo manually.
+# When a dev sets this to a git.bentostudio.io repo, auth is the Forgejo
+# external-auth configured on this control plane (provider id "forgejo", OAuth2)
+# — the dev clicks an auth link once; NO static token is baked anywhere. The
+# module is idempotent (skips if the repo dir already exists).
 data "coder_parameter" "git_repo" {
   name         = "git_repo"
-  display_name = "Git repository (auto-clone)"
-  description  = "Repo cloned into ~/ on first build via GitHub external-auth (device flow). Default is the Pharmia monorepo. The first build prompts a one-time GitHub auth link for private repos — no token is stored in the template. Set to any other GitHub/GitLab repo URL to clone that instead."
+  display_name = "Git repository (auto-clone, optional)"
+  description  = "Optional. Leave empty to preclone nothing. Set to a git.bentostudio.io repo URL to auto-clone it into ~/ on first build via the Forgejo external-auth (OAuth2) — the first build prompts a one-time Forgejo auth link for private repos; no token is stored in the template."
   type         = "string"
-  default      = "https://github.com/BentoStudioIO/PharmaMate"
+  default      = ""
   mutable      = true
   validation {
-    regex = "^https?://.+"
-    error = "Must be an http(s) git repo URL."
+    regex = "^(https?://.+)?$"
+    error = "Must be empty or an http(s) git repo URL."
   }
 }
 
@@ -130,8 +142,8 @@ resource "coder_agent" "main" {
 
   # Startup script: seed code-server settings.json (idempotent). The repo CLONE
   # and the apps/web/.env wiring are handled by the official git-clone module +
-  # its post_clone_script below (which integrates with the GitHub external-auth
-  # device flow — NO static token), not here.
+  # its post_clone_script below (which integrates with the Forgejo external-auth
+  # OAuth2 flow — NO static token), and only when git_repo is set, not here.
   startup_script = <<-EOT
     set -u
     mkdir -p /home/coder/.local/share/code-server/User
@@ -252,15 +264,10 @@ module "git-config" {
   agent_id = coder_agent.main.id
 }
 
-# github-upload-public-key — generates a per-workspace SSH key and uploads the
-# PUBLIC half to the dev's GitHub account (via the "github" external-auth), so
-# the dev can git push from the workspace. No PAT, no static token.
-module "github-upload-public-key" {
-  source           = "registry.coder.com/coder/github-upload-public-key/coder"
-  version          = "1.0.32"
-  agent_id         = coder_agent.main.id
-  external_auth_id = "github"
-}
+# NOTE: the github-upload-public-key module was removed — it is GitHub-only.
+# With the Forgejo external-auth (provider id "forgejo"), git push over HTTPS
+# works via the OAuth token Coder injects into the git credential helper, so no
+# per-workspace SSH key needs to be uploaded anywhere.
 
 # dotfiles — each dev auto-applies their OWN dotfiles repo on start (shell/nvm
 # config per-user, nothing baked into the image). Optional per-workspace param.
@@ -278,10 +285,14 @@ module "personalize" {
   agent_id = coder_agent.main.id
 }
 
-# git-clone — clone the chosen repo on first build via the GitHub external-auth
-# device flow (NO static token). Idempotent. The post_clone_script wires
-# apps/web/.env → shared dev API so frontend tasks work without a local stack.
+# git-clone — clones the chosen repo on first build ONLY when git_repo is set
+# (count = 0 when empty → nothing is precloned). For git.bentostudio.io repos the
+# clone authenticates via the Forgejo external-auth (provider id "forgejo",
+# OAuth2; NO static token), matched by its CODER_EXTERNAL_AUTH_0_REGEX. Idempotent.
+# The post_clone_script wires apps/web/.env → shared dev API so frontend tasks
+# work without a local stack.
 module "git-clone" {
+  count    = local.repo_url != "" ? 1 : 0
   source   = "registry.coder.com/coder/git-clone/coder"
   version  = "2.0.1"
   agent_id = coder_agent.main.id
