@@ -144,7 +144,7 @@ EOF
     esac
   done
   command -v loki >/dev/null 2>&1 || { echo "loki CLI not found — required for modelmix." >&2; exit 1; }
-  loki "$ENV_MM" search '[Atlas] stream-result' --since "$MM_SINCE" --limit 5000 2>/dev/null \
+  loki "$ENV_MM" search '[Atlas] stream-result' --service pharmia-api --since "$MM_SINCE" --limit 5000 2>/dev/null \
     | MM_SINCE="$MM_SINCE" python3 -c '
 import sys, os, json
 from collections import Counter
