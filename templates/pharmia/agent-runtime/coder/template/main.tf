@@ -60,16 +60,18 @@ data "coder_external_auth" "forgejo" {
   id    = "forgejo"
 }
 
-# Workspace base image. Default: minimal node:24 (no-creds sandbox). Swap to the published
-# Pharmia agent-runtime image (node 24 + Bento wrapper CLIs) once it's on Forgejo, e.g.
-#   default = "git.bentostudio.io/bento/pharmia-agent-runtime:latest"
-# The agent-runtime image already bakes the toolkit via agent-runtime/provision.sh.
+# Workspace base image. Default: the published Pharmia agent-runtime image — a zero-creds
+# full Bento engineering environment (node 24 + bun/uv + Bento wrapper CLIs + gh/gitleaks/
+# oha/bx/logcli/ovhcloud/curl_cffi + claude-code + codex + the team engineering agents/skills
+# baked into /opt/bento/claude-config). PINNED to a version (not :latest) for reproducible
+# workspaces — bump the default when publishing a new image version. The agent-runtime image
+# bakes the toolkit via agent-runtime/provision.sh and the agents/skills via build.sh.
 data "coder_parameter" "workspace_image" {
   name         = "workspace_image"
   display_name = "Workspace image"
-  description  = "Container image for the workspace. Must include git + a non-root sudo user 'coder' (or build from the provided Dockerfile)."
+  description  = "Container image for the workspace. Must include git + a non-root sudo user 'coder' (or build from the provided Dockerfile). Default is the pinned Pharmia agent-runtime image."
   type         = "string"
-  default      = "codercom/enterprise-node:ubuntu"
+  default      = "git.bentostudio.io/bentostudio/pharmia-agent-runtime:1.0.0"
   mutable      = true
 }
 
@@ -140,12 +142,28 @@ resource "coder_agent" "main" {
   os   = "linux"
   dir  = "/home/coder"
 
-  # Startup script: seed code-server settings.json (idempotent). The repo CLONE
-  # and the apps/web/.env wiring are handled by the official git-clone module +
-  # its post_clone_script below (which integrates with the Forgejo external-auth
-  # OAuth2 flow — NO static token), and only when git_repo is set, not here.
+  # Startup script: (1) sync the baked TEAM engineering agents/skills/rules into $HOME/.claude,
+  # and (2) seed code-server settings.json. Both idempotent. The repo CLONE and apps/web/.env
+  # wiring are handled by the official git-clone module + its post_clone_script below (Forgejo
+  # external-auth OAuth2 flow — NO static token), only when git_repo is set, not here.
+  #
+  # .claude SYNC — solves the home-volume-shadowing problem: the image bakes the team
+  # agents/skills/rules into /opt/bento/claude-config (a NON-home path so Coder's per-user
+  # home volume can't shadow it). On every start we copy them into $HOME/.claude with `cp -rn`
+  # (no-clobber) so each workspace gets the engineering agents WITHOUT ever overwriting a
+  # dev's own edits. New baked agents/skills appear on next start; dev-modified files are kept.
   startup_script = <<-EOT
     set -u
+    if [ -d /opt/bento/claude-config ]; then
+      mkdir -p "$HOME/.claude"
+      for sub in agents skills rules; do
+        if [ -d "/opt/bento/claude-config/$sub" ]; then
+          mkdir -p "$HOME/.claude/$sub"
+          cp -rn /opt/bento/claude-config/$sub/. "$HOME/.claude/$sub/" 2>/dev/null || true
+        fi
+      done
+      echo "[startup] synced team agents/skills/rules → $HOME/.claude (no-clobber)"
+    fi
     mkdir -p /home/coder/.local/share/code-server/User
     if [ ! -f /home/coder/.local/share/code-server/User/settings.json ]; then
       cat > /home/coder/.local/share/code-server/User/settings.json <<'SETTINGS'

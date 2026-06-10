@@ -71,10 +71,14 @@ coder create my-ws --template pharmia-dev-sandbox \
   --parameter workspace_image=codercom/enterprise-node:ubuntu --yes
 ```
 
-- **Image:** defaults to a minimal `codercom/enterprise-node:ubuntu` (no-creds sandbox). Swap to
-  the Pharmia agent-runtime image (node 24 + Bento wrapper CLIs) once it's published to Forgejo, by
-  setting `workspace_image=git.bentostudio.io/bento/pharmia-agent-runtime:latest` (or changing the
-  template default). The agent-runtime image bakes the toolkit via `../provision.sh`.
+- **Image:** defaults to the pinned Pharmia agent-runtime image
+  `git.bentostudio.io/bentostudio/pharmia-agent-runtime:1.0.0` — a zero-creds full Bento
+  engineering environment (node 24 + bun/uv + Bento wrapper CLIs + gh/gitleaks/oha/bx/logcli/
+  ovhcloud/curl_cffi + claude-code + codex + the **team engineering agents/skills** baked into
+  `/opt/bento/claude-config`). Pinned (not `:latest`) for reproducible workspaces — bump the
+  default when publishing a new version. On start the template syncs the baked agents/skills/rules
+  into `$HOME/.claude` with `cp -rn` (no-clobber), solving the home-volume-shadowing problem.
+  The image bakes the toolkit via `../provision.sh` and renders the agents/skills via `../build.sh`.
 - **IDE:** Coder's official `coder/code-server` registry module. Seeds the default `settings.json`
   and pre-installs OpenVSX extensions (`anthropic.claude-code`, `ms-python.python`,
   `ms-python.debugpy`, `tomoki1207.pdf`) — all template defaults users can override.
