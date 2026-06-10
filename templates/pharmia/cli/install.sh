@@ -11,6 +11,22 @@ set -eu
 
 HERE="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)"
 SRC="$HERE/bin"
+
+# If invoked from a LINKED git worktree, link to the PRIMARY worktree's bin instead
+# — the canonical symlinks must never point into a throwaway worktree (deleting it
+# would dangle every CLI). A linked worktree's git-dir is <main>/.git/worktrees/<name>,
+# so the main worktree root is everything before "/.git/worktrees/". No-op in Daytona
+# / outside a repo. Belt-and-suspenders to the post-checkout/post-merge hook guards.
+if command -v git >/dev/null 2>&1; then
+  _gd="$(git -C "$HERE" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  case "$_gd" in
+    */.git/worktrees/*)
+      _main="${_gd%/.git/worktrees/*}"
+      [ -d "$_main/templates/pharmia/cli/bin" ] && SRC="$_main/templates/pharmia/cli/bin"
+      ;;
+  esac
+fi
+
 TARGET="${CLI_INSTALL_DIR:-$HOME/.local/bin}"
 BK="$TARGET/.cli-backup"
 mkdir -p "$TARGET"
