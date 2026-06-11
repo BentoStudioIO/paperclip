@@ -21,13 +21,26 @@ REGISTRY="git.bentostudio.io/bentostudio/pharmia-agent-runtime"
 VERSION="${1:-$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "0.0.0-dev")}"
 STAGE="$SCRIPT_DIR/.claude-config-staging"
 
-echo "==> rendering team agents/skills/rules from SSOT into $STAGE"
+echo "==> rendering team agents/skills/rules from SSOT into $STAGE (all harness formats)"
 rm -rf "$STAGE"
-mkdir -p "$STAGE/agents" "$STAGE/skills" "$STAGE/rules"
-CLAUDE_AGENTS_DIR="$STAGE/agents" node "$REPO_ROOT/scripts/sync-claude-agents.mjs"
-CLAUDE_SKILLS_DIR="$STAGE/skills" node "$REPO_ROOT/scripts/sync-claude-skills.mjs"
+mkdir -p "$STAGE/agents" "$STAGE/skills" "$STAGE/rules" "$STAGE/codex" "$STAGE/opencode" "$STAGE/agents-std"
+# Render under a THROWAWAY HOME (NOT CLAUDE_AGENTS_DIR) so the sync scripts run their
+# rulesync fanout — CLAUDE_AGENTS_DIR is the exact flag that SKIPS rulesync. One pass
+# emits every harness format: ~/.claude, ~/.codex, ~/.config/opencode, ~/.agents.
+RENDER_HOME="$SCRIPT_DIR/.render-home"
+rm -rf "$RENDER_HOME"; mkdir -p "$RENDER_HOME"
+HOME="$RENDER_HOME" node "$REPO_ROOT/scripts/sync-claude-agents.mjs"
+HOME="$RENDER_HOME" node "$REPO_ROOT/scripts/sync-claude-skills.mjs"
+# Collect each produced tree into the staging dir the Dockerfile bakes. The .claude
+# layout (agents/skills/rules) is kept IDENTICAL so the startup .claude sync is unchanged.
+cp -r "$RENDER_HOME/.claude/agents/." "$STAGE/agents/" 2>/dev/null || true
+cp -r "$RENDER_HOME/.claude/skills/." "$STAGE/skills/" 2>/dev/null || true
 cp -f "$PHARMIA_DIR/rules/"*.md "$STAGE/rules/" 2>/dev/null || true
-echo "==> staged: $(ls "$STAGE/agents" | wc -l) agents, $(ls "$STAGE/skills" | wc -l) skills, $(ls "$STAGE/rules" | wc -l) rules"
+cp -r "$RENDER_HOME/.codex/." "$STAGE/codex/" 2>/dev/null || true             # -> ~/.codex
+cp -r "$RENDER_HOME/.config/opencode/." "$STAGE/opencode/" 2>/dev/null || true # -> ~/.config/opencode
+cp -r "$RENDER_HOME/.agents/." "$STAGE/agents-std/" 2>/dev/null || true        # -> ~/.agents (agentskills.io)
+rm -rf "$RENDER_HOME"
+echo "==> staged: $(ls "$STAGE/agents" 2>/dev/null | wc -l) claude-agents, $(ls "$STAGE/skills" 2>/dev/null | wc -l) skills, $(ls "$STAGE/codex/agents" 2>/dev/null | wc -l) codex-agents, $(ls "$STAGE/opencode/agents" 2>/dev/null | wc -l) opencode-agents, $(ls "$STAGE/agents-std/skills" 2>/dev/null | wc -l) agentskills"
 
 echo "==> building $REGISTRY:$VERSION (+ :latest) for linux/amd64"
 docker build --platform linux/amd64 \

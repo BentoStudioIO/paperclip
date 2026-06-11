@@ -63,22 +63,27 @@ Each workspace = a Docker container `coder-<owner>-<workspace>` with its own `do
 ```bash
 # push the template (as an owner, from template/)
 coder login https://code.bentostudio.io
-coder templates push pharmia-dev-sandbox -d . --yes
+coder templates push bento-workspace -d . --yes
 
 # create a workspace
-coder create my-ws --template pharmia-dev-sandbox \
+coder create my-ws --template bento-workspace \
   --parameter cpu=2 --parameter memory=2 \
   --parameter workspace_image=codercom/enterprise-node:ubuntu --yes
 ```
 
 - **Image:** defaults to the pinned Pharmia agent-runtime image
-  `git.bentostudio.io/bentostudio/pharmia-agent-runtime:1.1.0` — a zero-creds full Bento
+  `git.bentostudio.io/bentostudio/pharmia-agent-runtime:1.2.0` — a zero-creds full Bento
   engineering environment (node 24 + bun/uv + Bento wrapper CLIs + gh/gitleaks/oha/bx/logcli/
   ovhcloud/curl_cffi + the **team engineering agents/skills** baked into
   `/opt/bento/claude-config`). Pinned (not `:latest`) for reproducible workspaces — bump the
   default when publishing a new version. On start the template syncs the baked agents/skills/rules
   into `$HOME/.claude` with `cp -rn` (no-clobber), solving the home-volume-shadowing problem.
   The image bakes the toolkit via `../provision.sh` and renders the agents/skills via `../build.sh`.
+- **Multi-harness agents/skills (since 1.2.0):** `build.sh` runs rulesync once to emit EVERY
+  harness format, baked at `/opt/bento/claude-config/{agents,skills,rules,codex,opencode,agents-std}`
+  and synced on start to `$HOME/.claude`, `$HOME/.codex`, `$HOME/.config/opencode`, `$HOME/.agents`
+  (agentskills.io). So `claude` + `opencode` see all 19 agents + 77 skills; `codex` sees the agents
+  (rulesync emits no codex-format skills). All no-clobber — dev edits are never overwritten.
 - **AI agents (ALL pre-baked in the image, ALL un-credentialed — each dev brings their own auth):**
   `claude`, `codex`, `opencode`, `gemini`, `amp`, `goose`, `cursor-agent`. Registry modules wire
   the dashboard tiles: `claude-code` + `codex` (CLI launchers, `install_* = false` → no per-start

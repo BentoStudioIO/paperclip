@@ -1,4 +1,5 @@
-# Pharmia dev-sandbox workspace template (Coder + Docker provider).
+# Bento workspace template (Coder + Docker provider) — the generic Bento dev workspace.
+# (Coder template slug: bento-workspace. Generic: one shared template, per-user workspaces.)
 #
 # ISOLATION MODEL — true per-person isolation:
 #   • One Docker CONTAINER per user/workspace, named coder-<owner>-<workspace>.
@@ -46,7 +47,7 @@
 # ~1h after last activity and free RAM on this 8GB box. The home volume persists.
 # (--inactivity-ttl / --failure-ttl / dormancy are Enterprise-only, off on OSS.)
 #
-# Push:  coder templates push pharmia-dev-sandbox -d . --yes
+# Push:  coder templates push bento-workspace -d . --yes
 # (run from this dir, authenticated as a Coder owner: `coder login https://code.bentostudio.io`)
 
 terraform {
@@ -91,7 +92,7 @@ data "coder_parameter" "workspace_image" {
   display_name = "Workspace image"
   description  = "Container image for the workspace. Must include git + a non-root sudo user 'coder' (or build from the provided Dockerfile). Default is the pinned Pharmia agent-runtime image."
   type         = "string"
-  default      = "git.bentostudio.io/bentostudio/pharmia-agent-runtime:1.1.0"
+  default      = "git.bentostudio.io/bentostudio/pharmia-agent-runtime:1.2.0"
   mutable      = true
 }
 
@@ -219,6 +220,20 @@ resource "coder_env" "openai_api_key" {
   value    = var.openai_api_key
 }
 
+variable "groq_api_key" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "Groq API key (FREE tier) injected into all workspaces — opencode auto-detects the groq provider. Empty disables injection."
+}
+
+resource "coder_env" "groq_api_key" {
+  count    = var.groq_api_key != "" ? data.coder_workspace.me.start_count : 0
+  agent_id = coder_agent.main.id
+  name     = "GROQ_API_KEY"
+  value    = var.groq_api_key
+}
+
 resource "coder_agent" "main" {
   arch = "amd64"
   os   = "linux"
@@ -246,6 +261,18 @@ resource "coder_agent" "main" {
       done
       echo "[startup] synced team agents/skills/rules → $HOME/.claude (no-clobber)"
     fi
+    # codex + opencode + agentskills.io std formats (rulesync fanout, baked at /opt/bento).
+    # Same no-clobber pattern as .claude → a dev's own edits are never overwritten.
+    if [ -d /opt/bento/claude-config/codex ]; then
+      mkdir -p "$HOME/.codex"; cp -rn /opt/bento/claude-config/codex/. "$HOME/.codex/" 2>/dev/null || true
+    fi
+    if [ -d /opt/bento/claude-config/opencode ]; then
+      mkdir -p "$HOME/.config/opencode"; cp -rn /opt/bento/claude-config/opencode/. "$HOME/.config/opencode/" 2>/dev/null || true
+    fi
+    if [ -d /opt/bento/claude-config/agents-std ]; then
+      mkdir -p "$HOME/.agents"; cp -rn /opt/bento/claude-config/agents-std/. "$HOME/.agents/" 2>/dev/null || true
+    fi
+    echo "[startup] synced codex/opencode/agentskills formats → $HOME (no-clobber)"
     mkdir -p /home/coder/.local/share/code-server/User
     if [ ! -f /home/coder/.local/share/code-server/User/settings.json ]; then
       cat > /home/coder/.local/share/code-server/User/settings.json <<'SETTINGS'
