@@ -475,7 +475,7 @@ module "opencode" {
   workdir          = "/home/coder"
   install_opencode = false
   subdomain        = false
-  cli_app          = true
+  cli_app          = false # web chat tile only — a separate "OpenCode CLI" tile is redundant
   order            = 10
 }
 
