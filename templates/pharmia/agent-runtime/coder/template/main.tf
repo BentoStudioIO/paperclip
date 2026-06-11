@@ -180,33 +180,43 @@ locals {
 }
 
 # ── Platform AI credential (admin-gated) ──────────────────────────────────────
-# ANTHROPIC_API_KEY shared from the Paperclip platform (same key pharmia-dev uses).
-# Supplied at template-push time as a SENSITIVE template variable so it never
-# touches git — the box keeps it at /etc/coder/anthropic-api-key (root, 600):
-#   coder templates push ... --variable anthropic_api_key="$(cat /etc/coder/anthropic-api-key)"
-# Injected ONLY into workspaces owned by ai_key_owners — intern/dev workspaces
-# stay ZERO-CREDS BY CONSTRUCTION (count = 0 unless the owner matches).
-# claude-code, opencode, and goose all read ANTHROPIC_API_KEY from session env,
-# so one injection authenticates all three for admin workspaces.
-# NOTE: template variables are per-push — a later push WITHOUT --variable
-# silently disables injection (fail-closed by design; re-supply each push).
+# Platform AI-provider keys shared from Paperclip (same keys pharmia-dev uses).
+# Supplied at template-push time as SENSITIVE template variables so they never
+# touch git — the box keeps them at /etc/coder/{anthropic,openai}-api-key (root 600):
+#   coder templates push ... \
+#     --variable anthropic_api_key="$(cat /etc/coder/anthropic-api-key)" \
+#     --variable openai_api_key="$(cat /etc/coder/openai-api-key)"
+# CTO DECISION 2026-06-11: injected into EVERY workspace (not admin-gated) — anyone
+# can use the providers. ANTHROPIC_API_KEY authenticates claude-code/opencode/goose;
+# OPENAI_API_KEY authenticates codex. Each reads its key from session env.
+# NOTE: template variables are per-push — a later push WITHOUT --variable silently
+# disables injection (fail-closed; re-supply both on every push).
 variable "anthropic_api_key" {
   type        = string
   default     = ""
   sensitive   = true
-  description = "Anthropic API key injected into admin-owned workspaces only. Empty disables injection."
+  description = "Anthropic API key injected into all workspaces. Empty disables injection."
 }
 
-locals {
-  # Coder usernames whose workspaces receive the platform Anthropic key.
-  ai_key_owners = toset(["amine", "momo", "bentoadmin"])
+variable "openai_api_key" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "OpenAI API key (codex) injected into all workspaces. Empty disables injection."
 }
 
 resource "coder_env" "anthropic_api_key" {
-  count    = var.anthropic_api_key != "" && contains(local.ai_key_owners, local.username) ? 1 : 0
+  count    = var.anthropic_api_key != "" ? data.coder_workspace.me.start_count : 0
   agent_id = coder_agent.main.id
   name     = "ANTHROPIC_API_KEY"
   value    = var.anthropic_api_key
+}
+
+resource "coder_env" "openai_api_key" {
+  count    = var.openai_api_key != "" ? data.coder_workspace.me.start_count : 0
+  agent_id = coder_agent.main.id
+  name     = "OPENAI_API_KEY"
+  value    = var.openai_api_key
 }
 
 resource "coder_agent" "main" {
@@ -241,6 +251,13 @@ resource "coder_agent" "main" {
       cat > /home/coder/.local/share/code-server/User/settings.json <<'SETTINGS'
 ${file("${path.module}/code-server-settings.json")}
 SETTINGS
+    fi
+    # Codex auth: unlike claude (reads ANTHROPIC_API_KEY from env directly), the codex
+    # CLI needs auth.json written once. When OPENAI_API_KEY is injected and codex isn't
+    # already logged in, write it. Idempotent + zero-touch for every workspace.
+    if [ -n "$${OPENAI_API_KEY:-}" ] && ! codex login status >/dev/null 2>&1; then
+      printenv OPENAI_API_KEY | codex login --with-api-key >/dev/null 2>&1 \
+        && echo "[startup] codex authenticated via OPENAI_API_KEY" || true
     fi
   EOT
 
