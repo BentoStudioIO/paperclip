@@ -571,7 +571,7 @@ module "git-clone" {
 resource "coder_app" "vite" {
   agent_id     = coder_agent.main.id
   slug         = "vite"
-  display_name = "Vite dev server"
+  display_name = "Vite preview (run: npm run dev)" # 502 until a dev server listens on :5173 — that is the expected idle state
   icon         = "/icon/code.svg"
   url          = "http://localhost:5173"
   subdomain    = false
