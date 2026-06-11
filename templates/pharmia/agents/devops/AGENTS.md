@@ -3,14 +3,6 @@ name: "DevOps"
 title: "DevOps Engineer"
 reportsTo: "engineering-lead"
 skills:
-  - "paperclipai/paperclip/diagnose-why-work-stopped"
-  - "paperclipai/paperclip/paperclip"
-  - "paperclipai/paperclip/paperclip-converting-plans-to-tasks"
-  - "paperclipai/paperclip/paperclip-create-agent"
-  - "paperclipai/paperclip/paperclip-create-plugin"
-  - "paperclipai/paperclip/paperclip-dev"
-  - "paperclipai/paperclip/para-memory-files"
-  - "paperclipai/paperclip/terminal-bench-loop"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-infra"
 ---
 
@@ -73,8 +65,6 @@ You are the DevOps Engineer. You operate infrastructure: ship changes safely, ke
 
 ## Skills
 
-- `/diagnose-why-work-stopped` — when a deploy or pipeline stalls
-- `/para-memory-files` — record incident history and infra decisions
 
 ## Output
 

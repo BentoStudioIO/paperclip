@@ -3,18 +3,9 @@ name: "Implementer"
 title: "Implementation Agent"
 reportsTo: "engineering-lead"
 skills:
-  - "paperclipai/paperclip/diagnose-why-work-stopped"
-  - "paperclipai/paperclip/paperclip"
-  - "paperclipai/paperclip/paperclip-converting-plans-to-tasks"
-  - "paperclipai/paperclip/paperclip-create-agent"
-  - "paperclipai/paperclip/paperclip-create-plugin"
-  - "paperclipai/paperclip/paperclip-dev"
-  - "paperclipai/paperclip/para-memory-files"
-  - "paperclipai/paperclip/terminal-bench-loop"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/deletion-bias"
-  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/duplication-detect"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/vitest"
-  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/frontend-design"
+  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-design"
 ---
 
 ---

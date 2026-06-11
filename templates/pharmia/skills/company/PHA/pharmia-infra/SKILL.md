@@ -38,7 +38,7 @@ dokploy devops compose.deploy '{"composeId":"..."}'
 - **devops** (158.69.219.78) — Observability, monitoring, CI. SSH: `ssh devops`
 - **prod** (167.114.2.32) — Pharmia production (canary). SSH: `ssh prod`
 - **orange** (51.222.136.243) — Orange client
-- **posthog** (51.79.65.175) — PostHog analytics. SSH: `ssh posthog`
+- **agents** (149.56.13.177) — shared agent/dev box: Coder OSS control plane (code.bentostudio.io, per-user/shared workspaces, PocketID OIDC) + capped `bento-agents` user. SSH: `ssh agents` (admins only). NOT a prod-traffic box.
 
 ### Bento Instance — Dev/Staging + Internal Tools
 
@@ -47,7 +47,7 @@ dokploy devops compose.deploy '{"composeId":"..."}'
 
 ### DevOps Instance — Observability & Shared Infra
 
-- Langfuse (langfuse.bentostudio.io), Beszel (beszel.bentostudio.io), Gatus (gatus.bentostudio.io), MinIO (minio.bentostudio.io), Infisical (infisical.bentostudio.io), Kener (status.bentostudio.io), Forgejo (git.bentostudio.io), Uptime Kuma (internal only), Comp AI (not yet deployed)
+- Langfuse (langfuse.bentostudio.io), Beszel (beszel.bentostudio.io), Gatus (gatus.bentostudio.io), MinIO (minio.bentostudio.io), Infisical (infisical.bentostudio.io), Kener (status.bentostudio.io), Forgejo (git.bentostudio.io), Uptime Kuma (internal only), Comp AI (LIVE — GRC platform, `comp` CLI), Coder (code.bentostudio.io — browser IDE, bento-workspace template)
 
 ### Pharmia Prod Instance
 

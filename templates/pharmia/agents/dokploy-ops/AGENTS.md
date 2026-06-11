@@ -3,14 +3,6 @@ name: "Dokploy Ops"
 title: "Dokploy Operations"
 reportsTo: "engineering-lead"
 skills:
-  - "paperclipai/paperclip/diagnose-why-work-stopped"
-  - "paperclipai/paperclip/paperclip"
-  - "paperclipai/paperclip/paperclip-converting-plans-to-tasks"
-  - "paperclipai/paperclip/paperclip-create-agent"
-  - "paperclipai/paperclip/paperclip-create-plugin"
-  - "paperclipai/paperclip/paperclip-dev"
-  - "paperclipai/paperclip/para-memory-files"
-  - "paperclipai/paperclip/terminal-bench-loop"
 ---
 
 ---
@@ -46,7 +38,6 @@ dokploy devops compose.deploy '{"composeId":"..."}'
 - **devops** (158.69.219.78) — Observability, monitoring, CI. SSH: `ssh devops`
 - **prod** (167.114.2.32) — Pharmia production (canary). SSH: `ssh prod`
 - **orange** (51.222.136.243) — Orange client
-- **posthog** (51.79.65.175) — PostHog analytics. SSH: `ssh posthog`
 
 ### Bento Instance — Dev/Staging + Internal Tools
 

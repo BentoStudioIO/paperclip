@@ -7,7 +7,6 @@ skills:
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-cli"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/model-config-gate"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/atlas-render-regression"
-  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/provider-pricing-zdr-catalog"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/json-render-core"
 ---
 

@@ -3,14 +3,6 @@ name: "E2E"
 title: "E2E / QA Engineer"
 reportsTo: "engineering-lead"
 skills:
-  - "paperclipai/paperclip/diagnose-why-work-stopped"
-  - "paperclipai/paperclip/paperclip"
-  - "paperclipai/paperclip/paperclip-converting-plans-to-tasks"
-  - "paperclipai/paperclip/paperclip-create-agent"
-  - "paperclipai/paperclip/paperclip-create-plugin"
-  - "paperclipai/paperclip/paperclip-dev"
-  - "paperclipai/paperclip/para-memory-files"
-  - "paperclipai/paperclip/terminal-bench-loop"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/testing-intelligence"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/vitest"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-app"
@@ -71,7 +63,6 @@ Your task prompt specifies a mode. **If none is given, default to `regression`.*
 ## Skills
 
 - `/testing-intelligence` — prioritize what to cover and judge test quality
-- `/diagnose-why-work-stopped` — when a suite stalls or hangs
 
 ## Output
 

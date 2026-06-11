@@ -3,18 +3,8 @@ name: "Reviewer"
 title: "Review Agent"
 reportsTo: "engineering-lead"
 skills:
-  - "paperclipai/paperclip/diagnose-why-work-stopped"
-  - "paperclipai/paperclip/paperclip"
-  - "paperclipai/paperclip/paperclip-converting-plans-to-tasks"
-  - "paperclipai/paperclip/paperclip-create-agent"
-  - "paperclipai/paperclip/paperclip-create-plugin"
-  - "paperclipai/paperclip/paperclip-dev"
-  - "paperclipai/paperclip/para-memory-files"
-  - "paperclipai/paperclip/terminal-bench-loop"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/review-protocol"
-  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/code-review-excellence"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/receiving-code-review"
-  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/critique"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/verification-before-completion"
 ---
 

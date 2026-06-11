@@ -71,7 +71,7 @@ to exclude one. These encode the company's baseline operating rules:
 
 Function-specific skills layer on top. A planner gets `spec-miner` and
 `pragmatic-programmer`. A reviewer gets `review-protocol` and
-`code-review-excellence`. An implementer gets `testing-intelligence` and
+`receiving-code-review`. An implementer gets `testing-intelligence` and
 `vitest`. Keep the binding list tight — every skill is context tokens at
 runtime.
 
