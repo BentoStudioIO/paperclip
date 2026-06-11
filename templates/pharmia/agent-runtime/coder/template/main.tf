@@ -56,7 +56,17 @@ terraform {
   }
 }
 
-provider "docker" {}
+# registry_auth lets the terraform docker provider PULL the private workspace image:
+# pulls happen client-side (the provisioner inside the coder container), so the box
+# root's `docker login` does NOT apply. The control-plane compose mounts the root
+# docker config read-only at /docker-auth/config.json (see ../docker-compose.yml).
+# Without this, new image versions fail with "error from registry: unauthorized".
+provider "docker" {
+  registry_auth {
+    address     = "git.bentostudio.io"
+    config_file = "/docker-auth/config.json"
+  }
+}
 
 data "coder_workspace" "me" {}
 data "coder_workspace_owner" "me" {}
@@ -388,6 +398,27 @@ module "goose" {
   goose_provider = "anthropic"
   goose_model    = "claude-sonnet-4-6"
   order          = 11
+}
+
+# Dashboard launcher tiles for claude-code + codex: their v5-style modules install/
+# wire the CLI only and create NO coder_app, so without these the agents are invisible
+# in the UI (terminal-only). Each opens a web terminal running the agent.
+resource "coder_app" "claude_code" {
+  agent_id     = coder_agent.main.id
+  slug         = "claude-code"
+  display_name = "Claude Code"
+  icon         = "/icon/claude.svg"
+  command      = "claude"
+  order        = 8
+}
+
+resource "coder_app" "codex" {
+  agent_id     = coder_agent.main.id
+  slug         = "codex"
+  display_name = "Codex"
+  icon         = "/icon/openai.svg"
+  command      = "codex"
+  order        = 9
 }
 
 # gemini-cli, amp, cursor-agent — baked in the image, NO registry module on purpose:

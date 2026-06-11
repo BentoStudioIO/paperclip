@@ -42,6 +42,14 @@ services:
     # Provision workspace containers on THIS host via the docker socket.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # Read-only registry credential so the terraform docker provider (the provisioner
+      # runs INSIDE this container, as uid 1000) can pull the private workspace image
+      # from git.bentostudio.io — pulls are client-side, host `docker login` does not
+      # apply. Referenced by template/main.tf: provider "docker" registry_auth.
+      # Create/rotate on the box (root's config.json itself is 600 → unreadable by the
+      # container user, so we keep a uid-1000-owned copy inside root-700 /etc/coder):
+      #   install -m 400 -o 1000 -g 1000 /root/.docker/config.json /etc/coder/registry-docker-config.json
+      - /etc/coder/registry-docker-config.json:/docker-auth/config.json:ro
     # Host docker group gid so the coder process can talk to the socket.
     # gid 985 = `docker` group on the agents VPS (getent group docker). Override via env.
     group_add:
