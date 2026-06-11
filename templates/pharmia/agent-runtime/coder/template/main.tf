@@ -302,6 +302,10 @@ resource "coder_agent" "main" {
         fi
       done
       echo "[startup] synced team agents/skills/rules → $HOME/.claude (no-clobber)"
+      # environment-bindings.md is the PAPERCLIP-SANDBOX edition of the toolkit doc (assumes
+      # injected scoped creds) — in zero-creds workspaces it made Claude over-claim access.
+      # Removed every start (re-copied by the no-clobber sync above, so rm must follow it).
+      rm -f "$HOME/.claude/rules/environment-bindings.md"
     fi
     # codex + opencode + agentskills.io std formats (rulesync fanout, baked at /opt/bento).
     # Same no-clobber pattern as .claude → a dev's own edits are never overwritten.
@@ -338,12 +342,6 @@ Per-identity ops credentials are granted out-of-band only — if the dev needs o
 tell them to ask the CTO instead of trying the CLI.
 RULE
       echo "[startup] wrote workspace-context rule"
-    fi
-    mkdir -p /home/coder/.local/share/code-server/User
-    if [ ! -f /home/coder/.local/share/code-server/User/settings.json ]; then
-      cat > /home/coder/.local/share/code-server/User/settings.json <<'SETTINGS'
-${file("${path.module}/code-server-settings.json")}
-SETTINGS
     fi
     # Codex auth: unlike claude (reads ANTHROPIC_API_KEY from env directly), the codex
     # CLI needs auth.json written once. When OPENAI_API_KEY is injected and codex isn't
@@ -394,15 +392,46 @@ module "code-server" {
   order    = 1
   share    = "authenticated" # shared devbox: any logged-in user may open
   extensions = [
+    # baseline (mirrors the CTO's Cursor)
     "anthropic.claude-code",
     "ms-python.python",
     "ms-python.debugpy",
     "tomoki1207.pdf",
+    # team dev set (all verified on OpenVSX) — theme/icons + TS/React/Tailwind/Docker loop
+    "github.github-vscode-theme",
+    "pkief.material-icon-theme",
+    "esbenp.prettier-vscode",
+    "dbaeumer.vscode-eslint",
+    "bradlc.vscode-tailwindcss",
+    "eamodio.gitlens",
+    "usernamehw.errorlens",
+    "redhat.vscode-yaml",
+    "ms-azuretools.vscode-docker",
+    "mikestead.dotenv",
   ]
+  # Single source of the seeded editor defaults (the module writes User/settings.json
+  # once if absent — dev edits are never overwritten). Theme/icons match the team set.
   settings = {
-    "window.commandCenter"   = true
-    "explorer.confirmDelete" = false
-    "files.autoSave"         = "afterDelay"
+    "window.commandCenter"                       = true
+    "explorer.confirmDelete"                     = false
+    "files.autoSave"                             = "afterDelay"
+    "workbench.colorTheme"                       = "GitHub Dark Default"
+    "workbench.iconTheme"                        = "material-icon-theme"
+    "workbench.startupEditor"                    = "none"
+    "editor.fontSize"                            = 14
+    "editor.tabSize"                             = 2
+    "editor.formatOnSave"                        = true
+    "editor.defaultFormatter"                    = "esbenp.prettier-vscode"
+    "editor.codeActionsOnSave"                   = { "source.fixAll.eslint" = "explicit" }
+    "editor.minimap.enabled"                     = false
+    "editor.stickyScroll.enabled"                = true
+    "editor.bracketPairColorization.enabled"     = true
+    "files.trimTrailingWhitespace"               = true
+    "typescript.updateImportsOnFileMove.enabled" = "always"
+    "git.autofetch"                              = true
+    "git.confirmSync"                            = false
+    "terminal.integrated.defaultProfile.linux"   = "bash"
+    "telemetry.telemetryLevel"                   = "off"
   }
 }
 

@@ -36,6 +36,10 @@ HOME="$RENDER_HOME" node "$REPO_ROOT/scripts/sync-claude-skills.mjs"
 cp -r "$RENDER_HOME/.claude/agents/." "$STAGE/agents/" 2>/dev/null || true
 cp -r "$RENDER_HOME/.claude/skills/." "$STAGE/skills/" 2>/dev/null || true
 cp -f "$PHARMIA_DIR/rules/"*.md "$STAGE/rules/" 2>/dev/null || true
+# environment-bindings.md is written for the CREDS-INJECTED paperclip sandbox; in zero-creds
+# Coder workspaces it makes Claude over-claim toolkit access. Excluded from the image —
+# runtimes that inject scoped creds (Daytona/paperclip) should supply it themselves.
+rm -f "$STAGE/rules/environment-bindings.md"
 cp -r "$RENDER_HOME/.codex/." "$STAGE/codex/" 2>/dev/null || true             # -> ~/.codex
 cp -r "$RENDER_HOME/.config/opencode/." "$STAGE/opencode/" 2>/dev/null || true # -> ~/.config/opencode
 cp -r "$RENDER_HOME/.agents/." "$STAGE/agents-std/" 2>/dev/null || true        # -> ~/.agents (agentskills.io)

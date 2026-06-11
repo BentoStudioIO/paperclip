@@ -16,7 +16,6 @@ via **PocketID OIDC**. Replaced the old shared `code-server` + `oauth2-proxy` st
 - `coder.env.example` — PLACEHOLDER env template. Real file = `/etc/coder/coder.env` on the box (root, 600).
 - `template/main.tf` — per-user workspace template (Docker provider): one container + one
   dedicated home volume per user → **true per-person isolation**. NO prod creds baked.
-- `template/code-server-settings.json` — seeded default editor settings (overridable per-workspace).
 
 ## Deploy / operate (on the box)
 
@@ -91,9 +90,11 @@ coder create my-ws --template bento-workspace \
   `opencode_web_chat` / `goose_web_chat` params — each enabled chat costs ~200-300 MB RSS).
   gemini/amp/cursor-agent have NO module on purpose: their modules hard-inherit
   `agentapi_subdomain = true` (dead link without a wildcard) — terminal-only.
-- **Editors (deduped 2026-06-11):** `code-server` is THE browser VS Code (OpenVSX; seeds
-  `settings.json` + extensions `anthropic.claude-code`, `ms-python.python`, `ms-python.debugpy`,
-  `tomoki1207.pdf`) — the `vscode-web` module was removed as a near-duplicate (re-add only for
+- **Editors (deduped 2026-06-11):** `code-server` is THE browser VS Code (OpenVSX). Pre-configured
+  via the module's `settings` input (single writer; written once if absent so dev edits survive):
+  GitHub Dark Default theme + material icons + prettier-on-save + eslint fixAll + sane TS/git
+  defaults. Extensions preinstalled: claude-code, python+debugpy, pdf, github-theme,
+  material-icon-theme, prettier, eslint, tailwindcss, gitlens, errorlens, yaml, docker, dotenv — the `vscode-web` module was removed as a near-duplicate (re-add only for
   MS-marketplace-only extensions like pylance). VS Code Desktop = Coder's BUILT-IN display app
   (the `vscode-desktop` module duplicated it and was removed). Desktop hand-offs: `cursor` /
   `windsurf` / `zed` / `jetbrains-gateway` (IDE backend downloads on first connect, ~1 GB into
