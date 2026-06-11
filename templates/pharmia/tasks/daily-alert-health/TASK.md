@@ -3,35 +3,37 @@ name: "Daily alert-health"
 assignee: "platform-observer"
 recurring: true
 description: >
-  Grafana/Prometheus fired-vs-expected + poller-cursor drops / NoData, with grouped
-  root-cause analysis + concrete rules.yaml action items routed through the
-  alert-rule-change-validator skill.
+  Grafana/Prometheus fired-vs-expected, silent-failure signals (poller-cursor /
+  NoData), and structural coverage gaps — grouped root-cause + concrete action
+  items routed through the alert-rule-change-validator skill.
 ---
 
 Run the DAILY ALERT HEALTH CHECK now, autonomously. Use the alert-rule-change-validator skill and the pharmia-grafana-alerting knowledge.
 
 ## Steps (last 24h on canary)
 
-1. Verify Grafana/Prometheus alerts fired vs expected (use `prom` for alerts + rule eval, `loki canary errors --since 24h` for spikes).
-2. Check for poller-cursor drops and NoData on pharmia-api alerts — remember pharmia-api is OTel-push so it has NO `up` series, and OTel metric renames silently NoData alerts.
-3. Flag any alert rule that is firing-but-shouldn't or silent-but-should. Be concise and cite the rule/metric.
+1. **Fired-vs-expected.** Verify every Grafana/Prometheus state change (`prom` for alerts + rule eval, `loki canary errors --since 24h` for spikes). Classify each: firing-as-expected · firing-but-shouldn't · silent-but-should.
+2. **Silent-failure signals.** Confirm the signals that fail quietly are healthy — verify at the SOURCE, never from absence of an error: poller-cursor actually advancing (read the cursor/row, not the lack of a log), and each NoData alert backed by a live series. pharmia-api is OTel-push (no `up` series); an OTel metric rename silently turns an alert to NoData.
+3. **Coverage (structural).** Beyond what fired, ask what *can't* fire: a critical or customer-facing path with no signal ops can alert on (no metric, no log, no rule), an alert whose backing query/series is dead, or a failure class no rule would catch. A real gap is a `silent-but-should` finding even when nothing fired — don't overfit to past examples, reason from the path.
 
-## For every anomaly
+## For every finding
 
-Investigate the ROOT CAUSE — identify the exact rule/metric/recording-rule and whether it is an OTel metric rename, a threshold misfit, a missing/renamed series, provisioning drift (Grafana API edits silently revert the file SSOT in `tooling/grafana/provisioning/alerting/rules.yaml`), or a genuine incident. GROUP findings that share one root cause. For each group propose a CONCRETE action item: the precise edit to `rules.yaml` + the fix + how to validate via `render-alerting.sh` + `promtool`, routed through the alert-rule-change-validator skill. Cheaply validate when you can (`promtool check rules`, or confirm the metric series actually exists).
+Name the exact rule/metric/series/path and the ROOT CAUSE — one of: OTel rename · threshold misfit · missing/renamed series · provisioning drift (Grafana API edits silently revert the file SSOT `tooling/grafana/provisioning/alerting/rules.yaml`) · coverage gap (signal/alert that should exist but doesn't) · genuine incident. GROUP findings sharing one cause; one concrete action item per group, routed through the validator skill. Validate cheaply before asserting (confirm the series exists; query the source-of-truth, e.g. the DB row, not the absence of a log).
 
 ## Remediation policy
 
-- **Proactive — fix in-run, no approval (docs + tooling ONLY):** CLI scripts in `~/.local/bin` (`prom`/`loki`/`grr` gaps), Grafana dashboards-as-code via `grr`, runbook/doc notes. Fix at the source, verify, list under **Remediated**.
-- **Ask first — propose, do NOT ship (anything in the Pharmia repo):** `tooling/grafana/provisioning/alerting/rules.yaml` and any other `PharmaMate` change. Back it with `render-alerting.sh` + `promtool check rules`, route through the alert-rule-change-validator skill, list under **Needs approval**, and stop. NEVER push a Pharmia branch or open a PR from this task.
+- **Proactive — fix in-run, no approval (docs + tooling ONLY):** CLI scripts in `~/.local/bin` (`prom`/`loki`/`grr` gaps), Grafana dashboards-as-code via `grr`, runbook/memory notes. Fix at source, verify, list under **Remediated**.
+- **Ask first — propose, do NOT ship (any `PharmaMate` change):** `rules.yaml`, relay/app code, anything in the repo. Back it with the relevant validation (`render-alerting.sh` + `promtool check rules` for alert rules), route through the validator skill, list under **Needs approval**, stop. NEVER push a Pharmia branch or open a PR from this task.
 
-## Output — terse, one line per item (no prose paragraphs; omit empty sections)
+## Output — terse, bullets only, omit empty sections
 
 Write `~/.cache/pharmia-health/alert-$(date +%F).md` in this exact shape:
+
 - **Header:** `# Alert Health <date> — <GREEN | N issue(s)>`
-- **Two one-liners:** `Alerts:` firing-as-expected · firing-but-shouldn't · silent-but-should · NoData — each a count. `Signals:` poller-cursor `ok|drop` · OTel-rename `none|<metric>`.
-- **`## Issues`** (omit if none) — one bullet each: `[rule/metric] <symptom> — RC <root cause: rename|threshold|missing series|provisioning drift|incident>. → REMEDIATED <cli/dashboard> | ASK rules.yaml: <edit>`
-- **`## Remediated`** (CLI/dashboard fixed this run) — one bullet each: `<cli|dashboard>: <what> (verified <how>)`
-- **`## Needs approval`** (rules.yaml / Pharmia repo — proposed, not shipped) — one bullet each: `<rule>: <edit> — validate render-alerting.sh + promtool`
+- **Signals (ONE line):** `firing-as-expected N · firing-but-shouldn't N · silent-but-should N · NoData N (healthy|…) · poller-cursor ok|drop · OTel-rename none|<metric> · coverage ok|gap`
+- **`## Issues`** — `[rule/metric/path] <symptom> — RC <root cause>. → REMEDIATED <what> | ASK <file>: <edit>`
+- **`## Remediated`** — `<cli|dashboard|note>: <what> (verified <how>)`
+- **`## Needs approval`** — `<rule/file>: <edit> — validate <how>`
+- **`## Context`** (optional, ≤3 bullets, one line each, no prose) — genuine/CTO-accepted firings worth noting.
 
 Then PushNotification, one line: `Alert <date>: GREEN` — or `Alert <date>: N issues, k remediated, j need approval — <worst one-liner>`.
