@@ -315,6 +315,30 @@ resource "coder_agent" "main" {
       mkdir -p "$HOME/.agents"; cp -rn /opt/bento/claude-config/agents-std/. "$HOME/.agents/" 2>/dev/null || true
     fi
     echo "[startup] synced codex/opencode/agentskills formats → $HOME (no-clobber)"
+    # Workspace-context rule — the baked team rules describe the full Bento CLI toolkit,
+    # which makes Claude OVER-CLAIM access it doesn't have here (CLIs are baked but
+    # zero-creds → inert). This rule states the workspace truth. Written once (no-clobber).
+    if [ ! -f "$HOME/.claude/rules/workspace-context.md" ]; then
+      cat > "$HOME/.claude/rules/workspace-context.md" <<'RULE'
+# Bento Workspace Context (zero-creds) — READ FIRST
+
+You are inside a SHARED Bento Coder workspace (code.bentostudio.io), not the CTO's
+workstation. The Bento wrapper CLIs (loki, tempo, prom, pyro, pg, threads, langfuse,
+dokploy, cfdns, twenty, autumn, ol, comp, pharmia-*) are on PATH but UN-credentialed:
+no tokens, no SSH keys, no ~/.config/<tool> — they WILL fail here. Do NOT claim or
+offer access to observability, prod/canary data, CRM, billing, or infra operations.
+
+What DOES work out of the box:
+- AI agents: claude, codex, opencode, goose (platform keys injected)
+- git to git.bentostudio.io via the dev's own Forgejo OAuth
+- the shared dev API (https://api.dev.pharmia.ca) for frontend work
+- the full code/research toolchain (node/bun/uv, gh, ripgrep, …)
+
+Per-identity ops credentials are granted out-of-band only — if the dev needs one,
+tell them to ask the CTO instead of trying the CLI.
+RULE
+      echo "[startup] wrote workspace-context rule"
+    fi
     mkdir -p /home/coder/.local/share/code-server/User
     if [ ! -f /home/coder/.local/share/code-server/User/settings.json ]; then
       cat > /home/coder/.local/share/code-server/User/settings.json <<'SETTINGS'
