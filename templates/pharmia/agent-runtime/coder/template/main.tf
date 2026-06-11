@@ -11,12 +11,22 @@
 # the image or injected here. Per-identity prod creds are granted out-of-band, never via
 # this template (see PLAN-shared-agent-vps.md credentials axis).
 #
-# EDITORS / AGENTS — official pinned registry modules: code-server
-# (browser/OpenVSX), vscode-web (browser/MS-marketplace, for ms-python.* etc.),
-# vscode-desktop and cursor (open the workspace in the dev's LOCAL desktop editor
-# over remote), and claude-code (Anthropic CLI agent, INSTALLED but un-credentialed
-# — each dev authenticates themselves; NO baked key). Extension lists are TEMPLATE
-# DEFAULTS; users can add more.
+# EDITORS / AGENTS — official pinned registry modules.
+#   Browser IDEs: code-server (OpenVSX) + vscode-web (MS marketplace). Desktop hand-offs
+#   (pure protocol buttons, nothing installed in-container): vscode-desktop, cursor,
+#   windsurf, zed, jetbrains-gateway (downloads the IDE backend on first connect).
+#   AI agents: claude-code + codex (CLI launcher tiles), opencode + goose (AgentAPI web
+#   chat tiles, gated by the *_web_chat params below). ALL agent binaries are PRE-BAKED
+#   in the workspace image (install_* = false → instant start, no per-start downloads).
+#   gemini / amp / cursor-agent are ALSO baked but module-less: their registry modules
+#   hard-inherit agentapi_subdomain=true, which is a dead link on this no-wildcard box —
+#   use them from the terminal.
+#   ZERO-CREDS invariant: every agent ships UN-credentialed (no API key / OAuth token
+#   inputs set anywhere in this file); each dev authenticates themselves on first use.
+#
+# SUBDOMAIN GOTCHA — this control plane has NO wildcard access URL, so every web
+# coder_app MUST be path-based: subdomain = false. vscode-web + filebrowser DEFAULT
+# to subdomain = true upstream — never drop the explicit override.
 #
 # DEV ERGONOMICS (all official pinned registry modules — no hand-rolled scripts):
 #   • git-clone → clones git_repo ONLY when the dev sets the param (default is
@@ -71,7 +81,7 @@ data "coder_parameter" "workspace_image" {
   display_name = "Workspace image"
   description  = "Container image for the workspace. Must include git + a non-root sudo user 'coder' (or build from the provided Dockerfile). Default is the pinned Pharmia agent-runtime image."
   type         = "string"
-  default      = "git.bentostudio.io/bentostudio/pharmia-agent-runtime:1.0.0"
+  default      = "git.bentostudio.io/bentostudio/pharmia-agent-runtime:1.1.0"
   mutable      = true
 }
 
@@ -129,6 +139,28 @@ data "coder_parameter" "dev_api_url" {
   description  = "Backend the local Vite frontend talks to. Default is the shared dev environment API. Used to write apps/web/.env after clone."
   type         = "string"
   default      = "https://api.dev.pharmia.ca"
+  mutable      = true
+}
+
+# AI web-chat tiles (AgentAPI) are OPT-IN per workspace: each enabled chat runs an
+# agentapi server + the agent process from workspace start (~200-300 MB RSS inside the
+# workspace's own memory cap). The agent BINARIES are baked and always usable from the
+# terminal regardless of these toggles — the params only control the dashboard chat tiles.
+data "coder_parameter" "opencode_web_chat" {
+  name         = "opencode_web_chat"
+  display_name = "OpenCode web chat"
+  description  = "Dashboard chat tile backed by the baked opencode binary (un-credentialed — run `opencode auth login` once). The CLI works in the terminal either way."
+  type         = "bool"
+  default      = true
+  mutable      = true
+}
+
+data "coder_parameter" "goose_web_chat" {
+  name         = "goose_web_chat"
+  display_name = "Goose web chat"
+  description  = "Dashboard chat tile backed by the baked goose binary (un-credentialed — bring your own provider key). The CLI works in the terminal either way."
+  type         = "bool"
+  default      = false
   mutable      = true
 }
 
@@ -206,10 +238,10 @@ SETTINGS
 # code-server (browser, OpenVSX). Pinned. Extensions are TEMPLATE DEFAULTS;
 # users can install more per-workspace.
 module "code-server" {
-  source     = "registry.coder.com/coder/code-server/coder"
-  version    = "1.5.0"
-  agent_id   = coder_agent.main.id
-  order      = 1
+  source   = "registry.coder.com/coder/code-server/coder"
+  version  = "1.5.0"
+  agent_id = coder_agent.main.id
+  order    = 1
   extensions = [
     "anthropic.claude-code",
     "ms-python.python",
@@ -231,7 +263,8 @@ module "vscode-web" {
   agent_id       = coder_agent.main.id
   accept_license = true
   order          = 2
-  extensions     = [
+  subdomain      = false # upstream default is true → dead link without a wildcard access URL
+  extensions = [
     "ms-python.python",
     "ms-python.debugpy",
     "ms-python.vscode-pylance",
@@ -254,16 +287,114 @@ module "cursor" {
   order    = 4
 }
 
-# claude-code — Anthropic's CLI agent, INSTALLED but NOT credentialed. Both
-# anthropic_api_key and claude_code_oauth_token are deliberately left unset, so
-# NO ambient secret is baked into the template (zero-creds rule holds). Each dev
-# authenticates themselves on first run (`claude` login with their own account /
-# key, or `claude setup-token`).
-module "claude-code" {
-  source   = "registry.coder.com/coder/claude-code/coder"
-  version  = "5.2.0"
+# windsurf — open in the dev's LOCAL Windsurf over remote (protocol button only).
+module "windsurf" {
+  source   = "registry.coder.com/coder/windsurf/coder"
+  version  = "1.3.1"
   agent_id = coder_agent.main.id
+  folder   = "/home/coder"
+  order    = 5
 }
+
+# zed — open in the dev's LOCAL Zed over SSH (protocol button only).
+module "zed" {
+  source   = "registry.coder.com/coder/zed/coder"
+  version  = "1.1.4"
+  agent_id = coder_agent.main.id
+  folder   = "/home/coder"
+  order    = 6
+}
+
+# jetbrains-gateway — open in a LOCAL JetBrains IDE via Gateway. Adds an IDE-picker
+# param on workspace create. NOTE: first connect downloads the IDE *backend* (~1 GB)
+# into the workspace home volume — on-demand only, nothing runs until a dev uses it.
+module "jetbrains-gateway" {
+  source         = "registry.coder.com/coder/jetbrains-gateway/coder"
+  version        = "1.2.6"
+  agent_id       = coder_agent.main.id
+  agent_name     = "main"
+  folder         = "/home/coder"
+  jetbrains_ides = ["WS", "IU", "PY", "GO"]
+  default        = "WS"
+  order          = 7
+}
+
+# filebrowser — web file manager (upload/download/browse the home volume). Uses the
+# baked binary (run.sh skips install when `filebrowser` is on PATH). Path-based.
+module "filebrowser" {
+  source     = "registry.coder.com/coder/filebrowser/coder"
+  version    = "1.1.5"
+  agent_id   = coder_agent.main.id
+  agent_name = "main" # REQUIRED when subdomain=false (path URLs are /@owner/ws.<agent>/apps/…)
+  folder     = "/home/coder"
+  subdomain  = false # upstream default is true → dead link without a wildcard access URL
+  order      = 20
+}
+
+# ── AI agents ────────────────────────────────────────────────────────────────
+
+# claude-code — Anthropic's CLI agent, PRE-BAKED in the image and NOT credentialed.
+# install_claude_code = false → the module skips its per-start download and PATH-detects
+# the baked `claude` binary (instant start). Both anthropic_api_key and
+# claude_code_oauth_token are deliberately left unset, so NO ambient secret is baked
+# into the template (zero-creds rule holds). Each dev authenticates themselves on
+# first run (`claude` login with their own account / key, or `claude setup-token`).
+module "claude-code" {
+  source              = "registry.coder.com/coder/claude-code/coder"
+  version             = "5.2.0"
+  agent_id            = coder_agent.main.id
+  install_claude_code = false
+}
+
+# codex — OpenAI's CLI agent (CLI launcher tile, no AgentAPI daemon). Pre-baked binary
+# (install_codex = false → PATH-detect), openai_api_key left unset (zero-creds).
+module "codex" {
+  source        = "registry.coder.com/coder-labs/codex/coder"
+  version       = "5.1.0"
+  agent_id      = coder_agent.main.id
+  install_codex = false
+}
+
+# opencode — sst's CLI agent with an AgentAPI web chat tile (path-based; the module
+# defaults subdomain=false). Pre-baked binary (install_opencode = false → the module
+# PATH-detects it). cli_app = true also exposes a terminal launcher tile. auth_json /
+# config_json left unset — each dev runs `opencode auth login` once (zero-creds).
+# Gated by the opencode_web_chat param: the chat tile costs ~200-300 MB RSS per
+# workspace while running, so devs can switch it off; the binary works regardless.
+module "opencode" {
+  count            = data.coder_parameter.opencode_web_chat.value ? 1 : 0
+  source           = "registry.coder.com/coder-labs/opencode/coder"
+  version          = "0.1.2"
+  agent_id         = coder_agent.main.id
+  workdir          = "/home/coder"
+  install_opencode = false
+  subdomain        = false
+  cli_app          = true
+  order            = 10
+}
+
+# goose — Block's CLI agent with an AgentAPI web chat tile (path-based). Pre-baked
+# binary (install_goose = false → PATH-detect). Provider/model are REQUIRED inputs;
+# anthropic is configured WITHOUT any key — the dev brings their own (zero-creds).
+# Default-off: opt in per workspace via the goose_web_chat param.
+module "goose" {
+  count          = data.coder_parameter.goose_web_chat.value ? 1 : 0
+  source         = "registry.coder.com/coder/goose/coder"
+  version        = "3.0.1"
+  agent_id       = coder_agent.main.id
+  folder         = "/home/coder"
+  install_goose  = false
+  subdomain      = false
+  goose_provider = "anthropic"
+  goose_model    = "claude-sonnet-4-6"
+  order          = 11
+}
+
+# gemini-cli, amp, cursor-agent — baked in the image, NO registry module on purpose:
+# their modules (coder-labs/gemini, coder-labs/sourcegraph-amp, coder-labs/cursor-cli)
+# inherit agentapi_subdomain = true with no override input, which renders a dead web
+# tile on this no-wildcard control plane. Use them from the terminal: `gemini`, `amp`,
+# `cursor-agent` (each prompts for its own auth on first use).
 
 # ── Repo + dev ergonomics (official modules) ───────────────────────────────────
 
@@ -310,11 +441,11 @@ module "personalize" {
 # The post_clone_script wires apps/web/.env → shared dev API so frontend tasks
 # work without a local stack.
 module "git-clone" {
-  count    = local.repo_url != "" ? 1 : 0
-  source   = "registry.coder.com/coder/git-clone/coder"
-  version  = "2.0.1"
-  agent_id = coder_agent.main.id
-  url      = local.repo_url
+  count             = local.repo_url != "" ? 1 : 0
+  source            = "registry.coder.com/coder/git-clone/coder"
+  version           = "2.0.1"
+  agent_id          = coder_agent.main.id
+  url               = local.repo_url
   post_clone_script = <<-EOS
     set -u
     WEB_ENV="$HOME/${replace(basename(local.repo_url), ".git", "")}/apps/web/.env"
@@ -362,9 +493,9 @@ resource "docker_volume" "home" {
 }
 
 resource "docker_container" "workspace" {
-  count = data.coder_workspace.me.start_count
-  image = data.coder_parameter.workspace_image.value
-  name  = "coder-${data.coder_workspace_owner.me.name}-${lower(data.coder_workspace.me.name)}"
+  count    = data.coder_workspace.me.start_count
+  image    = data.coder_parameter.workspace_image.value
+  name     = "coder-${data.coder_workspace_owner.me.name}-${lower(data.coder_workspace.me.name)}"
   hostname = data.coder_workspace.me.name
 
   # Resource caps (sized for the 4c/8GB box).

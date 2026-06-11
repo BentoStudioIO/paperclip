@@ -72,16 +72,26 @@ coder create my-ws --template pharmia-dev-sandbox \
 ```
 
 - **Image:** defaults to the pinned Pharmia agent-runtime image
-  `git.bentostudio.io/bentostudio/pharmia-agent-runtime:1.0.0` — a zero-creds full Bento
+  `git.bentostudio.io/bentostudio/pharmia-agent-runtime:1.1.0` — a zero-creds full Bento
   engineering environment (node 24 + bun/uv + Bento wrapper CLIs + gh/gitleaks/oha/bx/logcli/
-  ovhcloud/curl_cffi + claude-code + codex + the **team engineering agents/skills** baked into
+  ovhcloud/curl_cffi + the **team engineering agents/skills** baked into
   `/opt/bento/claude-config`). Pinned (not `:latest`) for reproducible workspaces — bump the
   default when publishing a new version. On start the template syncs the baked agents/skills/rules
   into `$HOME/.claude` with `cp -rn` (no-clobber), solving the home-volume-shadowing problem.
   The image bakes the toolkit via `../provision.sh` and renders the agents/skills via `../build.sh`.
-- **IDE:** Coder's official `coder/code-server` registry module. Seeds the default `settings.json`
-  and pre-installs OpenVSX extensions (`anthropic.claude-code`, `ms-python.python`,
-  `ms-python.debugpy`, `tomoki1207.pdf`) — all template defaults users can override.
+- **AI agents (ALL pre-baked in the image, ALL un-credentialed — each dev brings their own auth):**
+  `claude`, `codex`, `opencode`, `gemini`, `amp`, `goose`, `cursor-agent`. Registry modules wire
+  the dashboard tiles: `claude-code` + `codex` (CLI launchers, `install_* = false` → no per-start
+  download), `opencode` + `goose` (AgentAPI web chat, path-based, gated by the per-workspace
+  `opencode_web_chat` / `goose_web_chat` params — each enabled chat costs ~200-300 MB RSS).
+  gemini/amp/cursor-agent have NO module on purpose: their modules hard-inherit
+  `agentapi_subdomain = true` (dead link without a wildcard) — terminal-only.
+- **Editors:** `code-server` (OpenVSX; seeds `settings.json` + extensions `anthropic.claude-code`,
+  `ms-python.python`, `ms-python.debugpy`, `tomoki1207.pdf`), `vscode-web` (MS marketplace,
+  `subdomain = false` — upstream default true is a dead link here), desktop hand-offs
+  `vscode-desktop` / `cursor` / `windsurf` / `zed` / `jetbrains-gateway` (IDE backend downloads
+  on first connect, ~1 GB into the home volume), and `filebrowser` (web file manager,
+  `subdomain = false`, uses the baked binary).
 - **Resource caps** are sized for the 4c/8GB box (cpu ≤4, memory ≤5 GB).
 
 ## Rollback (to the old stack)

@@ -2,9 +2,11 @@
 #
 # Bakes a ZERO-CREDS engineering environment: node 24 + bun + uv toolchain, the Bento CLI
 # toolkit (SSOT = templates/pharmia/cli), the research toolkit (gh/gitleaks/oha/bx/logcli/
-# ovhcloud/curl_cffi), the coding agents (claude-code + codex), and the TEAM engineering
-# agents + skills (rendered from templates/pharmia/{agents,skills}). Credentials are NOT
-# baked — prod access is granted out-of-band per-identity, never via this image.
+# ovhcloud/curl_cffi), the coding agents (claude-code, codex, opencode, gemini-cli, amp,
+# goose, cursor-agent — all UN-credentialed; each dev brings their own auth), filebrowser,
+# and the TEAM engineering agents + skills (rendered from templates/pharmia/{agents,skills}).
+# Credentials are NOT baked — prod access is granted out-of-band per-identity, never via
+# this image.
 #
 # Browsers are intentionally SKIPPED here (WITH_BROWSERS unset) to keep the Coder workspace
 # image lean — dev workspaces don't need Camoufox/Chromium e2e.

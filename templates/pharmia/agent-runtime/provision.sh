@@ -27,6 +27,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 # Pinned versions (URLs validated 2026-06-08; bump together with the Dockerfile ARGs).
 GH_VERSION=2.93.0; GITLEAKS_VERSION=8.30.1; OHA_VERSION=1.14.0; BX_VERSION=1.5.0; LOKI_VERSION=3.7.2
+FILEBROWSER_VERSION=2.63.14
 
 say(){ printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
 
@@ -35,7 +36,7 @@ say "apt: base deps"
 $SUDO apt-get update -qq
 $SUDO apt-get install -y --no-install-recommends \
   bash curl jq git openssh-client postgresql-client ca-certificates \
-  python3 python3-pip ripgrep less unzip xz-utils build-essential
+  python3 python3-pip ripgrep less unzip xz-utils bzip2 build-essential
 if [ "${WITH_BROWSERS:-0}" = "1" ]; then
   say "apt: browser/X11 runtime deps"
   $SUDO apt-get install -y --no-install-recommends \
@@ -91,9 +92,34 @@ else echo "WARN: could not resolve ovhcloud release URL — skipping"; fi
 say "pip: curl_cffi"
 $SUDO pip3 install --no-cache-dir --break-system-packages "curl_cffi==0.13.0" || true
 
-# 5) Coding agents (global npm) ----------------------------------------------------------
-say "npm -g: claude-code + codex"
-$SUDO npm install -g @anthropic-ai/claude-code @openai/codex
+# 5) Coding agents — baked so Coder workspace modules start instantly with install_* = false
+#    (zero-creds: every agent is installed UN-credentialed; each dev authenticates themselves)
+say "npm -g: claude-code + codex + opencode + gemini-cli + amp"
+$SUDO npm install -g @anthropic-ai/claude-code @openai/codex opencode-ai @google/gemini-cli @sourcegraph/amp
+
+# goose (Block's CLI agent) — static binary; CONFIGURE=false keeps it non-interactive
+if ! command -v goose >/dev/null 2>&1; then
+  say "goose: install → $CLI_INSTALL_DIR"
+  curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh \
+    | $SUDO env CONFIGURE=false GOOSE_BIN_DIR="$CLI_INSTALL_DIR" bash || true
+fi
+
+# filebrowser (web file manager, served per-workspace by the Coder filebrowser module)
+if ! command -v filebrowser >/dev/null 2>&1; then
+  say "filebrowser: install v${FILEBROWSER_VERSION} → $CLI_INSTALL_DIR"
+  dl "https://github.com/filebrowser/filebrowser/releases/download/v${FILEBROWSER_VERSION}/linux-amd64-filebrowser.tar.gz" "$tmp/fb.tgz"
+  tar -xzf "$tmp/fb.tgz" -C "$tmp" filebrowser && $SUDO install -m755 "$tmp/filebrowser" "$CLI_INSTALL_DIR/filebrowser"
+fi
+
+# cursor-agent (Cursor's CLI agent) — installer is $HOME-relative, so bake under /opt and
+# symlink onto PATH. Self-update is read-only for non-root (sudo available in workspaces).
+if ! command -v cursor-agent >/dev/null 2>&1; then
+  say "cursor-agent: install → /opt/cursor-agent"
+  { $SUDO env HOME=/opt/cursor-agent bash -c 'curl -fsS https://cursor.com/install | bash' \
+    && $SUDO chmod -R a+rX /opt/cursor-agent \
+    && $SUDO ln -sf /opt/cursor-agent/.local/bin/cursor-agent "$CLI_INSTALL_DIR/cursor-agent"; } \
+    || echo "WARN: cursor-agent install failed — skipping (not fatal)"
+fi
 
 # 6) Optional: browser engines ----------------------------------------------------------
 if [ "${WITH_BROWSERS:-0}" = "1" ]; then
@@ -120,5 +146,5 @@ if [ "${WITH_CODE_SERVER:-0}" = "1" ] && ! command -v code-server >/dev/null 2>&
   echo "code-server installed — enable per-user: systemctl --user enable --now code-server (binds 127.0.0.1:8080; reach via ssh -L)."
 fi
 
-say "DONE. Verify: $(command -v gh logcli ovhcloud claude codex node bun uv 2>/dev/null | tr '\n' ' ')"
+say "DONE. Verify: $(command -v gh logcli ovhcloud claude codex opencode gemini amp goose filebrowser node bun uv 2>/dev/null | tr '\n' ' ')"
 say "Wrapper CLIs on PATH: $(command -v loki pg threads ol comp dokploy cfdns 2>/dev/null | tr '\n' ' ')"
