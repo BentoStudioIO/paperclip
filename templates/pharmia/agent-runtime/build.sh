@@ -40,6 +40,9 @@ cp -f "$PHARMIA_DIR/rules/"*.md "$STAGE/rules/" 2>/dev/null || true
 # Coder workspaces it makes Claude over-claim toolkit access. Excluded from the image —
 # runtimes that inject scoped creds (Daytona/paperclip) should supply it themselves.
 rm -f "$STAGE/rules/environment-bindings.md"
+# Team CLAUDE.md (engineering discipline distilled from the CTO's guide) — synced to
+# ~/.claude/CLAUDE.md by the template startup (no-clobber; Claude Code loads it natively).
+cp -f "$SCRIPT_DIR/workspace-CLAUDE.md" "$STAGE/CLAUDE.md"
 cp -r "$RENDER_HOME/.codex/." "$STAGE/codex/" 2>/dev/null || true             # -> ~/.codex
 cp -r "$RENDER_HOME/.config/opencode/." "$STAGE/opencode/" 2>/dev/null || true # -> ~/.config/opencode
 cp -r "$RENDER_HOME/.agents/." "$STAGE/agents-std/" 2>/dev/null || true        # -> ~/.agents (agentskills.io)

@@ -306,6 +306,12 @@ resource "coder_agent" "main" {
       # injected scoped creds) — in zero-creds workspaces it made Claude over-claim access.
       # Removed every start (re-copied by the no-clobber sync above, so rm must follow it).
       rm -f "$HOME/.claude/rules/environment-bindings.md"
+      # Team CLAUDE.md (engineering discipline; baked from workspace-CLAUDE.md) — written
+      # once if absent so a dev's own CLAUDE.md edits are never overwritten.
+      if [ -f /opt/bento/claude-config/CLAUDE.md ] && [ ! -f "$HOME/.claude/CLAUDE.md" ]; then
+        cp /opt/bento/claude-config/CLAUDE.md "$HOME/.claude/CLAUDE.md"
+        echo "[startup] seeded team CLAUDE.md"
+      fi
     fi
     # codex + opencode + agentskills.io std formats (rulesync fanout, baked at /opt/bento).
     # Same no-clobber pattern as .claude → a dev's own edits are never overwritten.
