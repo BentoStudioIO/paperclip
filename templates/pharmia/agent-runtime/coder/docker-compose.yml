@@ -34,21 +34,34 @@ services:
       CODER_OIDC_CLIENT_SECRET: "${CODER_OIDC_CLIENT_SECRET}"
       CODER_OIDC_SCOPES: "openid,profile,email"
       CODER_OIDC_SIGN_IN_TEXT: "Sign in with PocketID"
+      CODER_OIDC_EMAIL_DOMAIN: "${CODER_OIDC_EMAIL_DOMAIN:-}"
+      CODER_MAX_ADMIN_TOKEN_LIFETIME: "${CODER_MAX_ADMIN_TOKEN_LIFETIME:-}"
+      CODER_MAX_TOKEN_LIFETIME: "${CODER_MAX_TOKEN_LIFETIME:-}"
+      CODER_DISABLE_PASSWORD_AUTH: "${CODER_DISABLE_PASSWORD_AUTH:-false}"
+      # Shared-workspace model (CTO 2026-06-11): allow path-based apps with share=authenticated.
+      # "Dangerous" = path apps share the API origin; acceptable for this trusted internal team.
+      CODER_DANGEROUS_ALLOW_PATH_APP_SHARING: "true"
       # CODER_OIDC_EMAIL_DOMAIN intentionally UNSET → all email domains allowed.
       # Group/role sync is a Premium feature — NOT configured; admins assigned manually.
       # Reduce footprint on this small box.
       CODER_TELEMETRY_ENABLE: "false"
       CODER_UPDATE_CHECK: "false"
+      # --- Forgejo external-auth (git.bentostudio.io) ---
+      # Disables Coder's built-in GitHub device-flow provider; git auth is Forgejo-only.
+      CODER_OAUTH2_GITHUB_DEFAULT_PROVIDER_ENABLE: "${CODER_OAUTH2_GITHUB_DEFAULT_PROVIDER_ENABLE}"
+      CODER_EXTERNAL_AUTH_0_ID: "${CODER_EXTERNAL_AUTH_0_ID}"
+      CODER_EXTERNAL_AUTH_0_TYPE: "${CODER_EXTERNAL_AUTH_0_TYPE}"
+      CODER_EXTERNAL_AUTH_0_CLIENT_ID: "${CODER_EXTERNAL_AUTH_0_CLIENT_ID}"
+      CODER_EXTERNAL_AUTH_0_CLIENT_SECRET: "${CODER_EXTERNAL_AUTH_0_CLIENT_SECRET}"
+      CODER_EXTERNAL_AUTH_0_AUTH_URL: "${CODER_EXTERNAL_AUTH_0_AUTH_URL}"
+      CODER_EXTERNAL_AUTH_0_TOKEN_URL: "${CODER_EXTERNAL_AUTH_0_TOKEN_URL}"
+      CODER_EXTERNAL_AUTH_0_REGEX: "${CODER_EXTERNAL_AUTH_0_REGEX}"
+      CODER_EXTERNAL_AUTH_0_DISPLAY_NAME: "${CODER_EXTERNAL_AUTH_0_DISPLAY_NAME}"
     # Provision workspace containers on THIS host via the docker socket.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      # Read-only registry credential so the terraform docker provider (the provisioner
-      # runs INSIDE this container, as uid 1000) can pull the private workspace image
-      # from git.bentostudio.io — pulls are client-side, host `docker login` does not
-      # apply. Referenced by template/main.tf: provider "docker" registry_auth.
-      # Create/rotate on the box (root's config.json itself is 600 → unreadable by the
-      # container user, so we keep a uid-1000-owned copy inside root-700 /etc/coder):
-      #   install -m 400 -o 1000 -g 1000 /root/.docker/config.json /etc/coder/registry-docker-config.json
+      # Read-only registry credential so the terraform docker provider can pull the
+      # private workspace image from git.bentostudio.io (template registry_auth).
       - /etc/coder/registry-docker-config.json:/docker-auth/config.json:ro
     # Host docker group gid so the coder process can talk to the socket.
     # gid 985 = `docker` group on the agents VPS (getent group docker). Override via env.

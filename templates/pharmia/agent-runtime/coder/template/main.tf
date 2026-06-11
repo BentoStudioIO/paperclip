@@ -340,6 +340,7 @@ module "code-server" {
   version  = "1.5.0"
   agent_id = coder_agent.main.id
   order    = 1
+  share    = "authenticated" # shared devbox: any logged-in user may open
   extensions = [
     "anthropic.claude-code",
     "ms-python.python",
@@ -361,7 +362,8 @@ module "vscode-web" {
   agent_id       = coder_agent.main.id
   accept_license = true
   order          = 2
-  subdomain      = false # upstream default is true → dead link without a wildcard access URL
+  share          = "authenticated" # shared devbox: any logged-in user may open
+  subdomain      = false           # upstream default is true → dead link without a wildcard access URL
   extensions = [
     "ms-python.python",
     "ms-python.debugpy",
@@ -427,6 +429,7 @@ module "filebrowser" {
   folder     = "/home/coder"
   subdomain  = false # upstream default is true → dead link without a wildcard access URL
   order      = 20
+  share      = "authenticated" # shared devbox: any logged-in user may open
 }
 
 # ── AI agents ────────────────────────────────────────────────────────────────
@@ -498,6 +501,7 @@ resource "coder_app" "claude_code" {
   icon         = "/icon/claude.svg"
   command      = "claude"
   order        = 8
+  share        = "authenticated" # shared devbox: any logged-in user may open
 }
 
 resource "coder_app" "codex" {
@@ -507,6 +511,7 @@ resource "coder_app" "codex" {
   icon         = "/icon/openai.svg"
   command      = "codex"
   order        = 9
+  share        = "authenticated" # shared devbox: any logged-in user may open
 }
 
 # gemini-cli, amp, cursor-agent — baked in the image, NO registry module on purpose:
@@ -587,7 +592,7 @@ resource "coder_app" "vite" {
   icon         = "/icon/code.svg"
   url          = "http://localhost:5173"
   subdomain    = false
-  share        = "owner"
+  share        = "authenticated" # shared devbox
   healthcheck {
     url       = "http://localhost:5173"
     interval  = 10
