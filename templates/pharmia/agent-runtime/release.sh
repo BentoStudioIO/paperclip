@@ -4,9 +4,11 @@
 # Layers (all reproducible from this repo):
 #   IMAGE    bento-agent-runtime — built by build.sh from the paperclip SSOT (binaries,
 #            AI agents, team agents/skills in every harness format, tmux/screen).
-#   TEMPLATE bento-workspace — template/main.tf (tiles, key injection, claude env parity,
-#            startup logic, VS Code settings/extensions). Pushed with 4 SENSITIVE template
-#            variables read from /etc/coder/* ON THE BOX (never from this repo).
+#   TEMPLATE bento-workspace — template/main.tf (tiles, claude env parity, startup logic,
+#            VS Code settings/extensions). Pushed with 2 FREE-tier variables (groq +
+#            opencode-zen) read from /etc/coder/* ON THE BOX. claude-code + codex auth via
+#            the CTO's subscription OAuth, bind-mounted by the template (NO API key, NO
+#            --variable — the key-as-variable path polluted Coder's Postgres, now scrubbed).
 #   VOLUME   per-workspace home — DERIVED state; self-assembles on first start. Only the
 #            dev's own work is unique to it.
 #
@@ -34,7 +36,11 @@ VERSION="$(cat "$SCRIPT_DIR/VERSION")"
 BOX="agents"                          # ssh alias (ubuntu@149.56.13.177)
 TEMPLATE_NAME="bento-workspace"
 DEVBOX="bentoadmin/devbox"
-KEYS=(anthropic-api-key openai-api-key groq-api-key opencode-zen-key)
+# FREE-tier provider keys only. anthropic/openai are GONE: claude-code + codex now
+# authenticate via the CTO's *subscription* OAuth, bind-mounted by the template from
+# /etc/coder/{claude-credentials,codex-auth}.json (NO API billing, NO template variable
+# — pushing the key as a --variable polluted Coder's Postgres and was scrubbed).
+KEYS=(groq-api-key opencode-zen-key)
 
 WITH_IMAGE=0; WITH_DEVBOX=0
 for a in "$@"; do case "$a" in
@@ -61,7 +67,7 @@ say "template: stage $TEMPLATE_NAME (fresh dirs — host AND container, see nest
 ssh "$BOX" 'sudo rm -rf /tmp/coder-tpl && mkdir -p /tmp/coder-tpl'
 scp -q "$SCRIPT_DIR/coder/template/main.tf" "$BOX:/tmp/coder-tpl/"
 
-say "template: push with the 4 sensitive variables (keys live ONLY on the box)"
+say "template: push with the 2 FREE-tier variables (groq + opencode-zen; keys live ONLY on the box)"
 ssh "$BOX" 'sudo bash -c "
   set -euo pipefail
   TK=\$(cat /etc/coder/owner-token)
@@ -73,12 +79,10 @@ ssh "$BOX" 'sudo bash -c "
   done
   docker exec -e CODER_URL=http://localhost:7080 -e CODER_SESSION_TOKEN=\$TK coder \
     sh -c '\''coder templates push '"$TEMPLATE_NAME"' -d /tmp/coder-tpl \
-      --variable anthropic_api_key=\"\$(cat /tmp/anthropic-api-key)\" \
-      --variable openai_api_key=\"\$(cat /tmp/openai-api-key)\" \
       --variable groq_api_key=\"\$(cat /tmp/groq-api-key)\" \
       --variable opencode_zen_api_key=\"\$(cat /tmp/opencode-zen-key)\" \
       --yes 2>&1 | tail -2'\''
-  docker exec -u 0 coder sh -c \"rm -f /tmp/anthropic-api-key /tmp/openai-api-key /tmp/groq-api-key /tmp/opencode-zen-key\"
+  docker exec -u 0 coder sh -c \"rm -f /tmp/groq-api-key /tmp/opencode-zen-key\"
 "'
 
 # ── 3) shared devbox ─────────────────────────────────────────────────────────

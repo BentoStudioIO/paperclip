@@ -8,9 +8,11 @@
 #   • Containers are recreated on start/stop but the home VOLUME persists (lifecycle
 #     ignore_changes), so a user's work survives restarts while staying isolated.
 #
-# CREDENTIALS — these are NO-CREDS dev sandboxes. ZERO prod credentials are baked into
-# the image or injected here. Per-identity prod creds are granted out-of-band, never via
-# this template (see PLAN-shared-agent-vps.md credentials axis).
+# CREDENTIALS — NO prod credentials and NO AI API keys are baked or injected here. The
+# ONLY ambient credential is the CTO's AI *subscription* OAuth (Claude Max + ChatGPT Pro),
+# bind-mounted read-only and seeded into $HOME so claude-code + codex work with zero API
+# billing (see the "Platform AI credential" block below). Per-identity prod/ops creds are
+# still granted out-of-band, never via this template (see PLAN-shared-agent-vps.md).
 #
 # EDITORS / AGENTS — official pinned registry modules.
 #   Browser IDE: code-server (OpenVSX; ONE browser VS Code on purpose — vscode-web was
@@ -25,8 +27,10 @@
 #   gemini / amp / cursor-agent are ALSO baked but module-less: their registry modules
 #   hard-inherit agentapi_subdomain=true, which is a dead link on this no-wildcard box —
 #   use them from the terminal.
-#   ZERO-CREDS invariant: every agent ships UN-credentialed (no API key / OAuth token
-#   inputs set anywhere in this file); each dev authenticates themselves on first use.
+#   NO-API-KEY invariant: no API key is set anywhere in this file. claude-code + codex
+#   are pre-authenticated via the shared subscription OAuth (seeded, billing-free);
+#   opencode / goose / gemini / amp / cursor-agent ship un-credentialed (free-tier keys
+#   or each dev authenticates on first use).
 #
 # SUBDOMAIN GOTCHA — this control plane has NO wildcard access URL, so every web
 # coder_app MUST be path-based: subdomain = false. vscode-web + filebrowser DEFAULT
@@ -183,45 +187,31 @@ locals {
   repo_url = trimspace(data.coder_parameter.git_repo.value)
 }
 
-# ── Platform AI credential (admin-gated) ──────────────────────────────────────
-# Platform AI-provider keys shared from Paperclip (same keys pharmia-dev uses).
-# Supplied at template-push time as SENSITIVE template variables so they never
-# touch git — the box keeps them at /etc/coder/{anthropic,openai}-api-key (root 600):
-#   coder templates push ... \
-#     --variable anthropic_api_key="$(cat /etc/coder/anthropic-api-key)" \
-#     --variable openai_api_key="$(cat /etc/coder/openai-api-key)"
-# CTO DECISION 2026-06-11: injected into EVERY workspace (not admin-gated) — anyone
-# can use the providers. ANTHROPIC_API_KEY authenticates claude-code/opencode/goose;
-# OPENAI_API_KEY authenticates codex. Each reads its key from session env.
-# NOTE: template variables are per-push — a later push WITHOUT --variable silently
-# disables injection (fail-closed; re-supply both on every push).
-variable "anthropic_api_key" {
-  type        = string
-  default     = ""
-  sensitive   = true
-  description = "Anthropic API key injected into all workspaces. Empty disables injection."
-}
-
-variable "openai_api_key" {
-  type        = string
-  default     = ""
-  sensitive   = true
-  description = "OpenAI API key (codex) injected into all workspaces. Empty disables injection."
-}
-
-resource "coder_env" "anthropic_api_key" {
-  count    = var.anthropic_api_key != "" ? data.coder_workspace.me.start_count : 0
-  agent_id = coder_agent.main.id
-  name     = "ANTHROPIC_API_KEY"
-  value    = var.anthropic_api_key
-}
-
-resource "coder_env" "openai_api_key" {
-  count    = var.openai_api_key != "" ? data.coder_workspace.me.start_count : 0
-  agent_id = coder_agent.main.id
-  name     = "OPENAI_API_KEY"
-  value    = var.openai_api_key
-}
+# ── Platform AI credential (SUBSCRIPTION, not API-key) ────────────────────────
+# CTO DECISION 2026-06-11 (revised): Coder must carry NO AI API billing. claude-code
+# and codex authenticate with the CTO's *subscription* credentials (Claude Max +
+# ChatGPT Pro) — NOT ANTHROPIC_API_KEY / OPENAI_API_KEY. The prior API-key injection
+# (a `variable` + `coder_env` carrying the key as a template VARIABLE) was REMOVED: that
+# path wrote the secret into Coder's Postgres (template_version_variables /
+# cached_plan / provisioner_jobs.input / workspace_agents.environment_variables) and
+# had to be scrubbed. Re-introducing a key via a coder_env/variable would re-pollute it.
+#
+# How the subscription creds reach a workspace (NO env var, NO template variable):
+#   1. Host keeps copies READABLE BY THE WORKSPACE-AGENT UID. In THIS image the agent runs
+#      as `coder` = uid 1001 (uid 1000 is `node`), so the files are owned 1001:1001 mode 400
+#      — NOT uid 1000 like the control-plane's registry-docker-config.json (that container
+#      runs the coder server as a different uid). Install on the box with:
+#        install -m 400 -o 1001 -g 1001 <src> /etc/coder/claude-credentials.json
+#        install -m 400 -o 1001 -g 1001 <src> /etc/coder/codex-auth.json
+#      (uid 1000 → the agent CANNOT read the mount → seed_cred silently no-ops, agents unauthed.)
+#        /etc/coder/claude-credentials.json   (~/.claude/.credentials.json — claudeAiOauth)
+#        /etc/coder/codex-auth.json           (~/.codex/auth.json — auth_mode=chatgpt)
+#   2. Each is bind-mounted :ro into the workspace container (docker_container below).
+#   3. The startup_script SEEDS them into $HOME (post-volume-mount) as writable copies so
+#      each agent's own OAuth token refresh persists per-workspace.
+# Result: claude/codex authenticate via the seeded OAuth files; ANTHROPIC_API_KEY /
+# OPENAI_API_KEY stay UNSET in every workspace (zero billing). groq + opencode-zen below
+# are FREE tiers (no billing) and remain key-injected as before.
 
 variable "groq_api_key" {
   type        = string
@@ -244,17 +234,17 @@ variable "opencode_zen_api_key" {
   description = "OpenCode Zen API key (FREE coding models: opencode/big-pickle, minimax-m2.5-free, nemotron-3-super-free) injected into all workspaces as OPENCODE_API_KEY. Empty disables injection."
 }
 
-# Claude Code env parity with the CTO's workstation (~/.claude/settings.json env block,
-# mirrored 2026-06-11 — "local CLAUDE_ENVS should be the same in the builder").
+# Claude Code env parity with the CTO's workstation (~/.claude/settings.json env block).
 # AGENT_TEAMS is the split-window teammates feature; tmux+screen are baked in the image
-# (>=1.2.1) so split-pane display works. Model overrides upgrade haiku→sonnet and
-# sonnet/opus→opus-4-8 1M-context — NOTE this raises spend on the shared platform key.
+# (>=1.2.1) so split-pane display works. The remaining vars are pure ergonomics/telemetry.
+#
+# ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL overrides were REMOVED (2026-06-11): they
+# pinned every tier to opus-4-8[1m], which only made sense on a metered API key. On the
+# shared *subscription* credential that would burn the Claude Max rate windows for the
+# whole team — so the model choice is left to Claude Code's defaults / each dev's own pick.
 locals {
   claude_code_env = {
     CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS  = "1"
-    ANTHROPIC_DEFAULT_HAIKU_MODEL         = "claude-sonnet-4-6"
-    ANTHROPIC_DEFAULT_SONNET_MODEL        = "claude-opus-4-8[1m]"
-    ANTHROPIC_DEFAULT_OPUS_MODEL          = "claude-opus-4-8[1m]"
     CLAUDE_AUTOCOMPACT_PCT_OVERRIDE       = "80"
     CLAUDE_CODE_DISABLE_TELEMETRY         = "1"
     CLAUDE_CODE_NO_FLICKER                = "1"
@@ -366,7 +356,8 @@ no tokens, no SSH keys, no ~/.config/<tool> — they WILL fail here. Do NOT clai
 offer access to observability, prod/canary data, CRM, billing, or infra operations.
 
 What DOES work out of the box:
-- AI agents: claude, codex, opencode, goose (platform keys injected)
+- AI agents: claude + codex (authenticated via the platform SUBSCRIPTION credential —
+  shared rate window, so be economical); opencode/goose use free-tier keys or your own
 - git to git.bentostudio.io via the dev's own Forgejo OAuth
 - the shared dev API (https://api.dev.pharmia.ca) for frontend work
 - the full code/research toolchain (node/bun/uv, gh, ripgrep, …)
@@ -376,13 +367,37 @@ tell them to ask the CTO instead of trying the CLI.
 RULE
       echo "[startup] wrote workspace-context rule"
     fi
-    # Codex auth: unlike claude (reads ANTHROPIC_API_KEY from env directly), the codex
-    # CLI needs auth.json written once. When OPENAI_API_KEY is injected and codex isn't
-    # already logged in, write it. Idempotent + zero-touch for every workspace.
-    if [ -n "$${OPENAI_API_KEY:-}" ] && ! codex login status >/dev/null 2>&1; then
-      printenv OPENAI_API_KEY | codex login --with-api-key >/dev/null 2>&1 \
-        && echo "[startup] codex authenticated via OPENAI_API_KEY" || true
+    # ── SUBSCRIPTION-CREDENTIAL SEED (zero API billing) ───────────────────────
+    # claude-code + codex authenticate from the CTO's *subscription* OAuth files, NOT
+    # ANTHROPIC_API_KEY / OPENAI_API_KEY (both stay UNSET — no billing). The host bind-
+    # mounts the read-only source copies (docker_container volumes below):
+    #     /claude-auth/.credentials.json  →  $HOME/.claude/.credentials.json
+    #     /codex-auth/auth.json           →  $HOME/.codex/auth.json
+    # We must SEED these DELIBERATELY (not via the no-clobber cp -rn above) so they are
+    # reliably present after the per-user home volume mounts. The seeded copy is WRITABLE
+    # (600, owned by coder) so each agent's own OAuth token refresh persists per-workspace.
+    # Seed only when the workspace copy is MISSING or EMPTY; a present-and-nonempty copy is
+    # a per-workspace refreshed token — leave it untouched.
+    seed_cred() { # $1 = source (ro bind-mount)  $2 = dest in $HOME
+      [ -s "$1" ] || return 0                     # no source → nothing to seed
+      if [ ! -s "$2" ]; then
+        mkdir -p "$(dirname "$2")"
+        install -m 600 "$1" "$2" 2>/dev/null \
+          && echo "[startup] seeded subscription credential → $2" || true
+      fi
+    }
+    # LEGACY-BILLING EVICTION (codex): an old home volume may carry a codex auth.json from
+    # the previous API-key regime ({"auth_mode":"apikey","OPENAI_API_KEY":...}) — that is
+    # OpenAI billing and must NOT survive on this billing-free box. If present, delete it so
+    # the seed below replaces it with the subscription ChatGPT auth. (claude has no analogue:
+    # the old template injected ANTHROPIC_API_KEY as an env var, never wrote .credentials.json,
+    # so there is no stale API-key claude file to evict.)
+    if [ -s "$HOME/.codex/auth.json" ] && grep -q '"auth_mode"[[:space:]]*:[[:space:]]*"apikey"' "$HOME/.codex/auth.json" 2>/dev/null; then
+      rm -f "$HOME/.codex/auth.json"
+      echo "[startup] evicted legacy API-key codex auth.json (billing) → will re-seed subscription auth"
     fi
+    seed_cred /claude-auth/.credentials.json "$HOME/.claude/.credentials.json"
+    seed_cred /codex-auth/auth.json          "$HOME/.codex/auth.json"
   EOT
 
   metadata {
@@ -728,6 +743,26 @@ resource "docker_container" "workspace" {
     container_path = "/home/coder"
     volume_name    = docker_volume.home.name
     read_only      = false
+  }
+
+  # ── SUBSCRIPTION-CREDENTIAL bind-mounts (read-only, NO API billing) ──────────
+  # Host-side copies (mode 400, owned by the WORKSPACE-AGENT uid = 1001 `coder` in this
+  # image — see the install note in the "Platform AI credential" block) of the CTO's
+  # subscription OAuth files, mounted :ro. The startup_script SEEDS them into $HOME
+  # post-volume-mount as writable copies (so each agent's token refresh persists). Same
+  # host-bind-mount idea as the control plane's registry-docker-config.json — NOT a
+  # coder_env/template-variable (that path polluted Postgres and was scrubbed).
+  # NOTE: a bind-mount source that does not exist on the host makes the container fail
+  # to start, so /etc/coder/{claude-credentials,codex-auth}.json MUST stay in place.
+  volumes {
+    container_path = "/claude-auth/.credentials.json"
+    host_path      = "/etc/coder/claude-credentials.json"
+    read_only      = true
+  }
+  volumes {
+    container_path = "/codex-auth/auth.json"
+    host_path      = "/etc/coder/codex-auth.json"
+    read_only      = true
   }
 
   # Reach the Coder control plane on the host.
