@@ -95,7 +95,7 @@ data "coder_parameter" "workspace_image" {
   display_name = "Workspace image"
   description  = "Container image for the workspace. Must include git + a non-root sudo user 'coder' (or build from the provided Dockerfile). Default is the pinned Bento agent-runtime image."
   type         = "string"
-  default      = "git.bentostudio.io/bentostudio/bento-agent-runtime:1.2.1"
+  default      = "git.bentostudio.io/bentostudio/bento-agent-runtime:1.2.2"
   mutable      = true
 }
 
@@ -295,13 +295,29 @@ resource "coder_agent" "main" {
     set -u
     if [ -d /opt/bento/claude-config ]; then
       mkdir -p "$HOME/.claude"
+      # PRUNE first: anything stamped "source: paperclip" that no longer exists in the bake
+      # was deleted from the SSOT — remove it from the volume (dev-authored files have no
+      # marker and are never touched). Without this, culled skills lived forever in volumes.
+      for f in "$HOME/.claude/agents"/*.md; do
+        [ -f "$f" ] || continue
+        if grep -q "source: paperclip" "$f" 2>/dev/null && [ ! -f "/opt/bento/claude-config/agents/$(basename "$f")" ]; then
+          rm -f "$f"
+        fi
+      done
+      for d in "$HOME/.claude/skills"/*/; do
+        [ -d "$d" ] || continue
+        n="$(basename "$d")"
+        if [ -f "$d/SKILL.md" ] && grep -q "source: paperclip" "$d/SKILL.md" 2>/dev/null && [ ! -d "/opt/bento/claude-config/skills/$n" ]; then
+          rm -rf "$d"
+        fi
+      done
       for sub in agents skills rules; do
         if [ -d "/opt/bento/claude-config/$sub" ]; then
           mkdir -p "$HOME/.claude/$sub"
           cp -rn /opt/bento/claude-config/$sub/. "$HOME/.claude/$sub/" 2>/dev/null || true
         fi
       done
-      echo "[startup] synced team agents/skills/rules → $HOME/.claude (no-clobber)"
+      echo "[startup] synced team agents/skills/rules → $HOME/.claude (no-clobber + marker-prune)"
       # environment-bindings.md is the PAPERCLIP-SANDBOX edition of the toolkit doc (assumes
       # injected scoped creds) — in zero-creds workspaces it made Claude over-claim access.
       # Removed every start (re-copied by the no-clobber sync above, so rm must follow it).
@@ -315,14 +331,25 @@ resource "coder_agent" "main" {
     fi
     # codex + opencode + agentskills.io std formats (rulesync fanout, baked at /opt/bento).
     # Same no-clobber pattern as .claude → a dev's own edits are never overwritten.
-    if [ -d /opt/bento/claude-config/codex ]; then
-      mkdir -p "$HOME/.codex"; cp -rn /opt/bento/claude-config/codex/. "$HOME/.codex/" 2>/dev/null || true
+    # codex/opencode/agentskills mirrors are PURE machine-generated rulesync output —
+    # replace the generated subtrees wholesale so culled items disappear (auth.json,
+    # config.json and other user files in those dirs are NOT under these subpaths).
+    if [ -d /opt/bento/claude-config/codex/agents ]; then
+      mkdir -p "$HOME/.codex"; rm -rf "$HOME/.codex/agents"
+      cp -r /opt/bento/claude-config/codex/agents "$HOME/.codex/agents" 2>/dev/null || true
     fi
     if [ -d /opt/bento/claude-config/opencode ]; then
-      mkdir -p "$HOME/.config/opencode"; cp -rn /opt/bento/claude-config/opencode/. "$HOME/.config/opencode/" 2>/dev/null || true
+      mkdir -p "$HOME/.config/opencode"
+      for sub in agents skills; do
+        if [ -d "/opt/bento/claude-config/opencode/$sub" ]; then
+          rm -rf "$HOME/.config/opencode/$sub"
+          cp -r "/opt/bento/claude-config/opencode/$sub" "$HOME/.config/opencode/$sub" 2>/dev/null || true
+        fi
+      done
     fi
-    if [ -d /opt/bento/claude-config/agents-std ]; then
-      mkdir -p "$HOME/.agents"; cp -rn /opt/bento/claude-config/agents-std/. "$HOME/.agents/" 2>/dev/null || true
+    if [ -d /opt/bento/claude-config/agents-std/skills ]; then
+      mkdir -p "$HOME/.agents"; rm -rf "$HOME/.agents/skills"
+      cp -r /opt/bento/claude-config/agents-std/skills "$HOME/.agents/skills" 2>/dev/null || true
     fi
     echo "[startup] synced codex/opencode/agentskills formats → $HOME (no-clobber)"
     # Workspace-context rule — the baked team rules describe the full Bento CLI toolkit,

@@ -89,9 +89,14 @@ if [ "$WITH_DEVBOX" = 1 ]; then
     TK=\$(cat /etc/coder/owner-token)
     WS_ID=\$(curl -s -H \"Coder-Session-Token: \$TK\" \"http://127.0.0.1:7080/api/v2/workspaces?q=owner:bentoadmin+name:devbox\" \
       | python3 -c \"import json,sys; print(json.load(sys.stdin)[\\\"workspaces\\\"][0][\\\"id\\\"])\")
+    # Pin the build to the ACTIVE template version — a build POST without
+    # template_version_id reuses the workspace'"'"'s pinned (old) version and the new
+    # startup logic never runs (cost a debug cycle).
+    TV_ID=\$(curl -s -H \"Coder-Session-Token: \$TK\" \"http://127.0.0.1:7080/api/v2/workspaces?q=owner:bentoadmin+name:devbox\" \
+      | python3 -c \"import json,sys; print(json.load(sys.stdin)[\\\"workspaces\\\"][0][\\\"template_active_version_id\\\"])\")
     curl -s -X POST -H \"Coder-Session-Token: \$TK\" -H \"Content-Type: application/json\" \
       \"http://127.0.0.1:7080/api/v2/workspaces/\$WS_ID/builds\" \
-      -d \"{\\\"transition\\\":\\\"start\\\",\\\"rich_parameter_values\\\":[{\\\"name\\\":\\\"workspace_image\\\",\\\"value\\\":\\\"'"$REGISTRY:$VERSION"'\\\"}]}\" \
+      -d \"{\\\"transition\\\":\\\"start\\\",\\\"template_version_id\\\":\\\"\$TV_ID\\\",\\\"rich_parameter_values\\\":[{\\\"name\\\":\\\"workspace_image\\\",\\\"value\\\":\\\"'"$REGISTRY:$VERSION"'\\\"}]}\" \
       | python3 -c \"import json,sys; d=json.load(sys.stdin); print(\\\"build:\\\", d.get(\\\"status\\\", d))\"
     for i in \$(seq 1 60); do
       docker ps --format \"{{.Names}}\" | grep -q coder-bentoadmin-devbox && break; sleep 5
