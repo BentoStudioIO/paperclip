@@ -95,7 +95,7 @@ data "coder_parameter" "workspace_image" {
   display_name = "Workspace image"
   description  = "Container image for the workspace. Must include git + a non-root sudo user 'coder' (or build from the provided Dockerfile). Default is the pinned Bento agent-runtime image."
   type         = "string"
-  default      = "git.bentostudio.io/bentostudio/bento-agent-runtime:1.2.0"
+  default      = "git.bentostudio.io/bentostudio/bento-agent-runtime:1.2.1"
   mutable      = true
 }
 
@@ -242,6 +242,31 @@ variable "opencode_zen_api_key" {
   default     = ""
   sensitive   = true
   description = "OpenCode Zen API key (FREE coding models: opencode/big-pickle, minimax-m2.5-free, nemotron-3-super-free) injected into all workspaces as OPENCODE_API_KEY. Empty disables injection."
+}
+
+# Claude Code env parity with the CTO's workstation (~/.claude/settings.json env block,
+# mirrored 2026-06-11 — "local CLAUDE_ENVS should be the same in the builder").
+# AGENT_TEAMS is the split-window teammates feature; tmux+screen are baked in the image
+# (>=1.2.1) so split-pane display works. Model overrides upgrade haiku→sonnet and
+# sonnet/opus→opus-4-8 1M-context — NOTE this raises spend on the shared platform key.
+locals {
+  claude_code_env = {
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS  = "1"
+    ANTHROPIC_DEFAULT_HAIKU_MODEL         = "claude-sonnet-4-6"
+    ANTHROPIC_DEFAULT_SONNET_MODEL        = "claude-opus-4-8[1m]"
+    ANTHROPIC_DEFAULT_OPUS_MODEL          = "claude-opus-4-8[1m]"
+    CLAUDE_AUTOCOMPACT_PCT_OVERRIDE       = "80"
+    CLAUDE_CODE_DISABLE_TELEMETRY         = "1"
+    CLAUDE_CODE_NO_FLICKER                = "1"
+    CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING = "1"
+  }
+}
+
+resource "coder_env" "claude_code_env" {
+  for_each = local.claude_code_env
+  agent_id = coder_agent.main.id
+  name     = each.key
+  value    = each.value
 }
 
 resource "coder_env" "opencode_zen_api_key" {

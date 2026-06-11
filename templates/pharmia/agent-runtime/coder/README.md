@@ -72,7 +72,7 @@ coder create my-ws --template bento-workspace \
 ```
 
 - **Image:** defaults to the pinned Bento agent-runtime image
-  `git.bentostudio.io/bentostudio/bento-agent-runtime:1.2.0` — a zero-creds full Bento
+  `git.bentostudio.io/bentostudio/bento-agent-runtime:1.2.1` — a zero-creds full Bento
   engineering environment (node 24 + bun/uv + Bento wrapper CLIs + gh/gitleaks/oha/bx/logcli/
   ovhcloud/curl_cffi + the **team engineering agents/skills** baked into
   `/opt/bento/claude-config`). Pinned (not `:latest`) for reproducible workspaces — bump the
@@ -98,6 +98,12 @@ coder create my-ws --template bento-workspace \
   (the `vscode-desktop` module duplicated it and was removed). Desktop hand-offs: `cursor` /
   `windsurf` / `zed` / `jetbrains-gateway` (IDE backend downloads on first connect, ~1 GB into
   the home volume). Plus `filebrowser` (web file manager, `subdomain = false`, baked binary).
+- **Claude Code env parity (since 1.2.1):** the template injects the CTO's workstation
+  `~/.claude/settings.json` env block into every workspace (`coder_env` for_each):
+  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` (split-window teammates — tmux + screen are baked
+  in the image for the pane display), model overrides (haiku→sonnet-4-6, sonnet/opus→
+  opus-4-8 1M-context — raises spend on the shared key), autocompact 80%, telemetry off,
+  no-flicker, adaptive-thinking off. Update path: edit `locals.claude_code_env` in main.tf.
 - **Resource caps** are sized for the 4c/8GB box (cpu ≤4, memory ≤5 GB).
 
 ## Rollback (to the old stack)

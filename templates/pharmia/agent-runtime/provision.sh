@@ -36,7 +36,8 @@ say "apt: base deps"
 $SUDO apt-get update -qq
 $SUDO apt-get install -y --no-install-recommends \
   bash curl jq git openssh-client postgresql-client ca-certificates \
-  python3 python3-pip ripgrep less unzip xz-utils bzip2 build-essential
+  python3 python3-pip ripgrep less unzip xz-utils bzip2 build-essential \
+  tmux screen
 if [ "${WITH_BROWSERS:-0}" = "1" ]; then
   say "apt: browser/X11 runtime deps"
   $SUDO apt-get install -y --no-install-recommends \
