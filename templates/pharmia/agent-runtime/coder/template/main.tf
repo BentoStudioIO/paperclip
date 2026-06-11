@@ -179,6 +179,36 @@ locals {
   repo_url = trimspace(data.coder_parameter.git_repo.value)
 }
 
+# ── Platform AI credential (admin-gated) ──────────────────────────────────────
+# ANTHROPIC_API_KEY shared from the Paperclip platform (same key pharmia-dev uses).
+# Supplied at template-push time as a SENSITIVE template variable so it never
+# touches git — the box keeps it at /etc/coder/anthropic-api-key (root, 600):
+#   coder templates push ... --variable anthropic_api_key="$(cat /etc/coder/anthropic-api-key)"
+# Injected ONLY into workspaces owned by ai_key_owners — intern/dev workspaces
+# stay ZERO-CREDS BY CONSTRUCTION (count = 0 unless the owner matches).
+# claude-code, opencode, and goose all read ANTHROPIC_API_KEY from session env,
+# so one injection authenticates all three for admin workspaces.
+# NOTE: template variables are per-push — a later push WITHOUT --variable
+# silently disables injection (fail-closed by design; re-supply each push).
+variable "anthropic_api_key" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "Anthropic API key injected into admin-owned workspaces only. Empty disables injection."
+}
+
+locals {
+  # Coder usernames whose workspaces receive the platform Anthropic key.
+  ai_key_owners = toset(["amine", "momo", "bentoadmin"])
+}
+
+resource "coder_env" "anthropic_api_key" {
+  count    = var.anthropic_api_key != "" && contains(local.ai_key_owners, local.username) ? 1 : 0
+  agent_id = coder_agent.main.id
+  name     = "ANTHROPIC_API_KEY"
+  value    = var.anthropic_api_key
+}
+
 resource "coder_agent" "main" {
   arch = "amd64"
   os   = "linux"
