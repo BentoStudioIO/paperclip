@@ -21,7 +21,7 @@
 #   #    see agent-runtime/build.sh — it renders then builds.
 #   docker build --platform linux/amd64 \
 #     -f templates/pharmia/agent-runtime/Dockerfile \
-#     -t git.bentostudio.io/bentostudio/pharmia-agent-runtime:1.0.0 templates/pharmia
+#     -t git.bentostudio.io/bentostudio/bento-agent-runtime:1.0.0 templates/pharmia
 FROM node:24-bookworm-slim
 
 # Run the SSOT provisioner: installs toolchain + pinned binaries + Bento CLI toolkit +

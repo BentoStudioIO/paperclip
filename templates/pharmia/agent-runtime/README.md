@@ -50,7 +50,7 @@ Provision the live value (it's in `~/.config/pharmia-env-backups/prod-canary/app
 ## Build
 
 ```sh
-docker build -f templates/pharmia/agent-runtime/Dockerfile -t pharmia-agent-runtime templates/pharmia
+docker build -f templates/pharmia/agent-runtime/Dockerfile -t bento-agent-runtime templates/pharmia
 ```
 
 Push the tag to the registry Daytona pulls from, then reference it as the Daytona

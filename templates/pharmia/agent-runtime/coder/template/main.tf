@@ -81,7 +81,7 @@ data "coder_external_auth" "forgejo" {
   id    = "forgejo"
 }
 
-# Workspace base image. Default: the published Pharmia agent-runtime image — a zero-creds
+# Workspace base image. Default: the published Bento agent-runtime image — a zero-creds
 # full Bento engineering environment (node 24 + bun/uv + Bento wrapper CLIs + gh/gitleaks/
 # oha/bx/logcli/ovhcloud/curl_cffi + claude-code + codex + the team engineering agents/skills
 # baked into /opt/bento/claude-config). PINNED to a version (not :latest) for reproducible
@@ -90,9 +90,9 @@ data "coder_external_auth" "forgejo" {
 data "coder_parameter" "workspace_image" {
   name         = "workspace_image"
   display_name = "Workspace image"
-  description  = "Container image for the workspace. Must include git + a non-root sudo user 'coder' (or build from the provided Dockerfile). Default is the pinned Pharmia agent-runtime image."
+  description  = "Container image for the workspace. Must include git + a non-root sudo user 'coder' (or build from the provided Dockerfile). Default is the pinned Bento agent-runtime image."
   type         = "string"
-  default      = "git.bentostudio.io/bentostudio/pharmia-agent-runtime:1.2.0"
+  default      = "git.bentostudio.io/bentostudio/bento-agent-runtime:1.2.0"
   mutable      = true
 }
 

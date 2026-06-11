@@ -71,8 +71,8 @@ coder create my-ws --template bento-workspace \
   --parameter workspace_image=codercom/enterprise-node:ubuntu --yes
 ```
 
-- **Image:** defaults to the pinned Pharmia agent-runtime image
-  `git.bentostudio.io/bentostudio/pharmia-agent-runtime:1.2.0` — a zero-creds full Bento
+- **Image:** defaults to the pinned Bento agent-runtime image
+  `git.bentostudio.io/bentostudio/bento-agent-runtime:1.2.0` — a zero-creds full Bento
   engineering environment (node 24 + bun/uv + Bento wrapper CLIs + gh/gitleaks/oha/bx/logcli/
   ovhcloud/curl_cffi + the **team engineering agents/skills** baked into
   `/opt/bento/claude-config`). Pinned (not `:latest`) for reproducible workspaces — bump the

@@ -10,14 +10,14 @@
 #   templates/pharmia/agent-runtime/build.sh [VERSION]
 #     VERSION  image version tag (default: read from VERSION file beside this script)
 #
-# Tags built: git.bentostudio.io/bentostudio/pharmia-agent-runtime:<VERSION> and :latest
+# Tags built: git.bentostudio.io/bentostudio/bento-agent-runtime:<VERSION> and :latest
 # Push separately:  docker login git.bentostudio.io && docker push <ref>
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"   # .../agent-runtime
 PHARMIA_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"                       # .../templates/pharmia
 REPO_ROOT="$(cd "$PHARMIA_DIR/../.." && pwd)"                     # paperclip repo root
-REGISTRY="git.bentostudio.io/bentostudio/pharmia-agent-runtime"
+REGISTRY="git.bentostudio.io/bentostudio/bento-agent-runtime"
 VERSION="${1:-$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "0.0.0-dev")}"
 STAGE="$SCRIPT_DIR/.claude-config-staging"
 
