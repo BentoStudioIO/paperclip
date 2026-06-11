@@ -445,6 +445,11 @@ module "claude-code" {
   version             = "5.2.0"
   agent_id            = coder_agent.main.id
   install_claude_code = false
+  # The baked binary lives in the root-owned npm prefix (/usr/local) — self-update can't
+  # write there as the coder user and nags "Auto-update failed". Versions ship via image
+  # bumps, so the updater is noise: this sets DISABLE_AUTOUPDATER=1 in the session env.
+  # Ad-hoc update inside a workspace still possible: sudo npm i -g @anthropic-ai/claude-code@latest
+  disable_autoupdater = true
 }
 
 # codex — OpenAI's CLI agent (CLI launcher tile, no AgentAPI daemon). Pre-baked binary
