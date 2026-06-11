@@ -59,6 +59,18 @@ Caddy: `code.bentostudio.io { reverse_proxy 127.0.0.1:7080 }`. After editing the
 Each workspace = a Docker container `coder-<owner>-<workspace>` with its own `docker_volume`
 `coder-<workspace.id>-home` mounted at `/home/coder` — isolated per person, persists across restarts.
 
+**Release = one command** (from the workstation; encodes the docker-cp nesting trap, key
+ownership, per-push variables, and the stored `workspace_image` param):
+
+```bash
+# template-only change (main.tf):
+templates/pharmia/agent-runtime/release.sh
+# new image version (bump VERSION + the main.tf workspace_image default together first):
+templates/pharmia/agent-runtime/release.sh --image --devbox
+```
+
+Manual equivalent (what the script does):
+
 ```bash
 # push the template (as an owner, from template/)
 coder login https://code.bentostudio.io
