@@ -234,6 +234,20 @@ resource "coder_env" "groq_api_key" {
   value    = var.groq_api_key
 }
 
+variable "opencode_zen_api_key" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "OpenCode Zen API key (FREE coding models: opencode/big-pickle, minimax-m2.5-free, nemotron-3-super-free) injected into all workspaces as OPENCODE_API_KEY. Empty disables injection."
+}
+
+resource "coder_env" "opencode_zen_api_key" {
+  count    = var.opencode_zen_api_key != "" ? data.coder_workspace.me.start_count : 0
+  agent_id = coder_agent.main.id
+  name     = "OPENCODE_API_KEY"
+  value    = var.opencode_zen_api_key
+}
+
 resource "coder_agent" "main" {
   arch = "amd64"
   os   = "linux"
