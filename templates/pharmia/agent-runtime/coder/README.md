@@ -91,12 +91,13 @@ coder create my-ws --template bento-workspace \
   `opencode_web_chat` / `goose_web_chat` params — each enabled chat costs ~200-300 MB RSS).
   gemini/amp/cursor-agent have NO module on purpose: their modules hard-inherit
   `agentapi_subdomain = true` (dead link without a wildcard) — terminal-only.
-- **Editors:** `code-server` (OpenVSX; seeds `settings.json` + extensions `anthropic.claude-code`,
-  `ms-python.python`, `ms-python.debugpy`, `tomoki1207.pdf`), `vscode-web` (MS marketplace,
-  `subdomain = false` — upstream default true is a dead link here), desktop hand-offs
-  `vscode-desktop` / `cursor` / `windsurf` / `zed` / `jetbrains-gateway` (IDE backend downloads
-  on first connect, ~1 GB into the home volume), and `filebrowser` (web file manager,
-  `subdomain = false`, uses the baked binary).
+- **Editors (deduped 2026-06-11):** `code-server` is THE browser VS Code (OpenVSX; seeds
+  `settings.json` + extensions `anthropic.claude-code`, `ms-python.python`, `ms-python.debugpy`,
+  `tomoki1207.pdf`) — the `vscode-web` module was removed as a near-duplicate (re-add only for
+  MS-marketplace-only extensions like pylance). VS Code Desktop = Coder's BUILT-IN display app
+  (the `vscode-desktop` module duplicated it and was removed). Desktop hand-offs: `cursor` /
+  `windsurf` / `zed` / `jetbrains-gateway` (IDE backend downloads on first connect, ~1 GB into
+  the home volume). Plus `filebrowser` (web file manager, `subdomain = false`, baked binary).
 - **Resource caps** are sized for the 4c/8GB box (cpu ≤4, memory ≤5 GB).
 
 ## Rollback (to the old stack)

@@ -13,9 +13,12 @@
 # this template (see PLAN-shared-agent-vps.md credentials axis).
 #
 # EDITORS / AGENTS — official pinned registry modules.
-#   Browser IDEs: code-server (OpenVSX) + vscode-web (MS marketplace). Desktop hand-offs
-#   (pure protocol buttons, nothing installed in-container): vscode-desktop, cursor,
-#   windsurf, zed, jetbrains-gateway (downloads the IDE backend on first connect).
+#   Browser IDE: code-server (OpenVSX; ONE browser VS Code on purpose — vscode-web was
+#   a near-duplicate and was removed; re-add it only if someone needs an MS-marketplace-
+#   only extension like pylance). Desktop hand-offs (pure protocol buttons, nothing
+#   installed in-container): cursor, windsurf, zed, jetbrains-gateway (downloads the IDE
+#   backend on first connect). VS Code Desktop uses Coder's BUILT-IN display app — the
+#   vscode-desktop module was removed as an exact duplicate of it.
 #   AI agents: claude-code + codex (CLI launcher tiles), opencode + goose (AgentAPI web
 #   chat tiles, gated by the *_web_chat params below). ALL agent binaries are PRE-BAKED
 #   in the workspace image (install_* = false → instant start, no per-start downloads).
@@ -352,31 +355,6 @@ module "code-server" {
     "explorer.confirmDelete" = false
     "files.autoSave"         = "afterDelay"
   }
-}
-
-# vscode-web (browser, Microsoft marketplace). Offered IN ADDITION to code-server
-# so MS-marketplace-only extensions (full ms-python.* tooling) are available.
-module "vscode-web" {
-  source         = "registry.coder.com/coder/vscode-web/coder"
-  version        = "1.5.0"
-  agent_id       = coder_agent.main.id
-  accept_license = true
-  order          = 2
-  share          = "authenticated" # shared devbox: any logged-in user may open
-  subdomain      = false           # upstream default is true → dead link without a wildcard access URL
-  extensions = [
-    "ms-python.python",
-    "ms-python.debugpy",
-    "ms-python.vscode-pylance",
-  ]
-}
-
-# vscode-desktop — open in the dev's LOCAL VS Code over remote.
-module "vscode-desktop" {
-  source   = "registry.coder.com/coder/vscode-desktop/coder"
-  version  = "1.2.1"
-  agent_id = coder_agent.main.id
-  order    = 3
 }
 
 # cursor — open in the dev's LOCAL Cursor over remote.
