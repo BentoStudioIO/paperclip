@@ -251,6 +251,9 @@ locals {
     CLAUDE_CODE_DISABLE_TELEMETRY         = "1"
     CLAUDE_CODE_NO_FLICKER                = "1"
     CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING = "1"
+    # Route claude through the Bento LiteLLM gateway (subscription auth via the claude-bridge;
+    # the workspace carries only a per-workspace VIRTUAL KEY, never the real setup-token).
+    ANTHROPIC_BASE_URL                    = "https://llm.bentostudio.io"
   }
 }
 
@@ -788,13 +791,14 @@ resource "docker_container" "workspace" {
   # NOTE: a bind-mount source that does not exist on the host makes the container fail
   # to start, so /etc/coder/{claude-credentials,codex-auth}.json MUST stay in place.
   volumes {
-    # Long-lived setup-token (sk-ant-oat01-…, ~1yr) — replaced the shared-session
-    # .credentials.json mount: shared interactive OAuth PROVABLY auths out (refresh
-    # rotation; whoever refreshes second gets 401 + a blanked refresh token). The
-    # setup-token never rotates, so workspaces cannot auth out and the workstation
-    # session is fully decoupled.
+    # Per-workspace LiteLLM VIRTUAL KEY (sk-…) — NOT the real subscription token. claude
+    # routes through the Bento gateway (ANTHROPIC_BASE_URL in claude_code_env); the gateway's
+    # claude-bridge holds the one real `claude setup-token` and injects it upstream. Devs in
+    # the workspace never see the subscription token — only a revocable/budgeted/observable
+    # virtual key. The setup-token never rotates, so the bridge cannot auth out either. (This
+    # file MUST exist on the host or the container fails to start — see note above.)
     container_path = "/claude-auth/oauth-token"
-    host_path      = "/etc/coder/claude-oauth-token"
+    host_path      = "/etc/coder/claude-virtual-key"
     read_only      = true
   }
   volumes {
