@@ -34,12 +34,15 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # Claude subscription auth (no API billing): a long-lived `claude setup-token`
-      # (sk-ant-oat01-...). The claude-local adapter's Agent SDK spawns the claude CLI,
-      # which honors this. Preferred over a shared `.credentials.json` on the volume —
-      # that model auths out on refresh-token rotation (proven 2026-06-12). Value lives
-      # in Dokploy env only, never the repo. Renew yearly via `claude setup-token`.
+      # Claude via the Bento LiteLLM gateway (llm.bentostudio.io) — SUBSCRIPTION auth, no API
+      # billing. CLAUDE_CODE_OAUTH_TOKEN here is a per-consumer LiteLLM VIRTUAL KEY (revocable,
+      # budgeted, observable in Langfuse), NOT the real `claude setup-token` — that lives only
+      # in the gateway's claude-bridge sidecar, never here. ANTHROPIC_BASE_URL points the claude
+      # CLI at the gateway; the bridge injects the real subscription token upstream. The
+      # claude-local adapter's Agent SDK spawns the claude CLI, which honors both vars. Both
+      # values in Dokploy env only, never the repo. Rotate the virtual key via /key CRUD.
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
       POCKET_ID_ISSUER: ${POCKET_ID_ISSUER}
       POCKET_ID_CLIENT_ID: ${POCKET_ID_CLIENT_ID}
       POCKET_ID_CLIENT_SECRET: ${POCKET_ID_CLIENT_SECRET}
