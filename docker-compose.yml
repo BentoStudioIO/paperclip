@@ -34,6 +34,12 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Claude subscription auth (no API billing): a long-lived `claude setup-token`
+      # (sk-ant-oat01-...). The claude-local adapter's Agent SDK spawns the claude CLI,
+      # which honors this. Preferred over a shared `.credentials.json` on the volume —
+      # that model auths out on refresh-token rotation (proven 2026-06-12). Value lives
+      # in Dokploy env only, never the repo. Renew yearly via `claude setup-token`.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       POCKET_ID_ISSUER: ${POCKET_ID_ISSUER}
       POCKET_ID_CLIENT_ID: ${POCKET_ID_CLIENT_ID}
       POCKET_ID_CLIENT_SECRET: ${POCKET_ID_CLIENT_SECRET}
