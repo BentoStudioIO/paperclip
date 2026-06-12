@@ -187,33 +187,30 @@ locals {
   repo_url = trimspace(data.coder_parameter.git_repo.value)
 }
 
-# ── Platform AI credential (SUBSCRIPTION, not API-key) ────────────────────────
-# CTO DECISION 2026-06-11 (revised): Coder must carry NO AI API billing. claude-code
-# and codex authenticate with the CTO's *subscription* credentials (Claude Max +
-# ChatGPT Pro) — NOT ANTHROPIC_API_KEY / OPENAI_API_KEY. The prior API-key injection
-# (a `variable` + `coder_env` carrying the key as a template VARIABLE) was REMOVED: that
-# path wrote the secret into Coder's Postgres (template_version_variables /
-# cached_plan / provisioner_jobs.input / workspace_agents.environment_variables) and
-# had to be scrubbed. Re-introducing a key via a coder_env/variable would re-pollute it.
+# ── Platform AI credential (SUBSCRIPTION via the Bento LiteLLM gateway) ────────
+# CTO DECISION 2026-06-12: Coder carries NO AI API billing AND no real subscription token.
+# claude-code and codex both route through the Bento LiteLLM gateway (llm.bentostudio.io),
+# which holds the CTO's *subscription* credentials server-side (Claude setup-token in its
+# claude-bridge sidecar; ChatGPT OAuth in its native chatgpt/ provider) and brokers them
+# behind a per-workspace VIRTUAL KEY. A workspace NEVER sees a real subscription token — only
+# a revocable/budgeted/observable virtual key. (The earlier API-key injection via a template
+# `variable`+`coder_env` was REMOVED: it wrote the secret into Coder's Postgres and had to be
+# scrubbed; never reintroduce a key — or a real token — that way.)
 #
-# How the subscription creds reach a workspace (NO env var, NO template variable):
-#   1. Host keeps copies READABLE BY THE WORKSPACE-AGENT UID. In THIS image the agent runs
-#      as `coder` = uid 1001 (uid 1000 is `node`), so the files are owned 1001:1001 mode 400
-#      — NOT uid 1000 like the control-plane's registry-docker-config.json (that container
-#      runs the coder server as a different uid). Install on the box with:
-#        install -m 400 -o 1001 -g 1001 <src> /etc/coder/claude-oauth-token
-#        install -m 400 -o 1001 -g 1001 <src> /etc/coder/codex-auth.json
+# How it reaches a workspace (NO env var, NO template variable, NO real token):
+#   1. Host keeps the VIRTUAL KEY readable by the workspace-agent uid. In THIS image the agent
+#      runs as `coder` = uid 1001 (uid 1000 is `node`), so install it 1001:1001 mode 400:
+#        install -m 400 -o 1001 -g 1001 <virtual-key> /etc/coder/claude-virtual-key
 #      (uid 1000 → the agent CANNOT read the mount → wiring silently no-ops, agents unauthed.)
-#        /etc/coder/claude-oauth-token        (claude setup-token, sk-ant-oat01-…, ~1yr —
-#                                              shared-session .credentials.json PROVABLY
-#                                              auths out on refresh rotation; never use it)
-#        /etc/coder/codex-auth.json           (~/.codex/auth.json — auth_mode=chatgpt)
-#   2. Each is bind-mounted :ro into the workspace container (docker_container below).
-#   3. The startup_script SEEDS them into $HOME (post-volume-mount) as writable copies so
-#      each agent's own OAuth token refresh persists per-workspace.
-# Result: claude/codex authenticate via the seeded OAuth files; ANTHROPIC_API_KEY /
-# OPENAI_API_KEY stay UNSET in every workspace (zero billing). groq + opencode-zen below
-# are FREE tiers (no billing) and remain key-injected as before.
+#   2. It is bind-mounted :ro at /claude-auth/oauth-token (docker_container below).
+#   3. The startup_script wires that ONE virtual key into BOTH agents:
+#        claude → ~/.claude/settings.json env CLAUDE_CODE_OAUTH_TOKEN  (+ ANTHROPIC_BASE_URL
+#                 = gateway, set via claude_code_env)
+#        codex  → ~/.codex/config.toml "gateway" provider (base_url = gateway/v1, wire_api =
+#                 responses, experimental_bearer_token = the virtual key)
+# Result: both agents authenticate to the GATEWAY with the virtual key; ANTHROPIC_API_KEY /
+# OPENAI_API_KEY stay UNSET (zero billing); no real subscription token lives in any workspace.
+# groq + opencode-zen below are FREE tiers (no billing) and remain key-injected as before.
 
 variable "groq_api_key" {
   type        = string
@@ -372,36 +369,42 @@ tell them to ask the CTO instead of trying the CLI.
 RULE
       echo "[startup] wrote workspace-context rule"
     fi
-    # ── SUBSCRIPTION-CREDENTIAL SEED (zero API billing) ───────────────────────
-    # claude-code + codex authenticate from the CTO's *subscription* OAuth files, NOT
-    # ANTHROPIC_API_KEY / OPENAI_API_KEY (both stay UNSET — no billing). The host bind-
-    # mounts the read-only source copies (docker_container volumes below):
-    #     /claude-auth/.credentials.json  →  $HOME/.claude/.credentials.json
-    #     /codex-auth/auth.json           →  $HOME/.codex/auth.json
-    # We must SEED these DELIBERATELY (not via the no-clobber cp -rn above) so they are
-    # reliably present after the per-user home volume mounts. The seeded copy is WRITABLE
-    # (600, owned by coder) so each agent's own OAuth token refresh persists per-workspace.
-    # Seed only when the workspace copy is MISSING or EMPTY; a present-and-nonempty copy is
-    # a per-workspace refreshed token — leave it untouched.
-    seed_cred() { # $1 = source (ro bind-mount)  $2 = dest in $HOME
-      [ -s "$1" ] || return 0                     # no source → nothing to seed
-      if [ ! -s "$2" ]; then
-        mkdir -p "$(dirname "$2")"
-        install -m 600 "$1" "$2" 2>/dev/null \
-          && echo "[startup] seeded subscription credential → $2" || true
-      fi
-    }
-    # LEGACY-BILLING EVICTION (codex): an old home volume may carry a codex auth.json from
-    # the previous API-key regime ({"auth_mode":"apikey","OPENAI_API_KEY":...}) — that is
-    # OpenAI billing and must NOT survive on this billing-free box. If present, delete it so
-    # the seed below replaces it with the subscription ChatGPT auth. (claude has no analogue:
-    # the old template injected ANTHROPIC_API_KEY as an env var, never wrote .credentials.json,
-    # so there is no stale API-key claude file to evict.)
-    if [ -s "$HOME/.codex/auth.json" ] && grep -q '"auth_mode"[[:space:]]*:[[:space:]]*"apikey"' "$HOME/.codex/auth.json" 2>/dev/null; then
-      rm -f "$HOME/.codex/auth.json"
-      echo "[startup] evicted legacy API-key codex auth.json (billing) → will re-seed subscription auth"
+    # ── codex → Bento LiteLLM gateway (subscription auth, token hidden) ────────
+    # codex no longer carries the real ChatGPT OAuth (that mount is gone). It routes through
+    # the gateway exactly like claude: a per-workspace ~/.codex/config.toml selects a "gateway"
+    # provider whose bearer is the SAME mounted VIRTUAL KEY (/claude-auth/oauth-token). The
+    # gateway's LiteLLM chatgpt/ provider holds + refreshes the one real ChatGPT subscription
+    # token, so no codex token (and no rotation race) ever lands in a workspace. Rewritten every
+    # start so routing + key stay current; the dev's other codex settings (model,
+    # model_reasoning_effort, MCP servers) are preserved by the merge.
+    if [ -r /claude-auth/oauth-token ]; then
+      python3 - <<'PYCODEX'
+import pathlib, re
+vk = open('/claude-auth/oauth-token').read().strip()
+cfg = pathlib.Path.home() / '.codex' / 'config.toml'
+text = cfg.read_text() if cfg.exists() else ''
+block = (
+    '[model_providers.gateway]\n'
+    'name = "Bento Gateway"\n'
+    'base_url = "https://llm.bentostudio.io/v1"\n'
+    'wire_api = "responses"\n'
+    'experimental_bearer_token = "' + vk + '"\n'
+)
+if re.search(r'(?m)^\s*model_provider\s*=', text):
+    text = re.sub(r'(?m)^\s*model_provider\s*=.*$', 'model_provider = "gateway"', text)
+else:
+    text = 'model_provider = "gateway"\n' + text
+if not re.search(r'(?m)^\s*model\s*=', text):
+    text = 'model = "gpt-5.5"\n' + text
+if '[model_providers.gateway]' in text:
+    text = re.sub(r'(?ms)^\[model_providers\.gateway\].*?(?=^\[|\Z)', block, text)
+else:
+    text = text.rstrip() + '\n\n' + block
+cfg.parent.mkdir(parents=True, exist_ok=True)
+cfg.write_text(text)
+print("[startup] wired codex -> gateway (config.toml + virtual key)")
+PYCODEX
     fi
-    seed_cred /codex-auth/auth.json          "$HOME/.codex/auth.json"
     # claude: long-lived setup-token via settings.json env (NOT a credentials file —
     # the shared-session model proved fatal: rotation races 401 the workspace). The env
     # block is merged EVERY start so the token always mirrors the box file. A dev who
@@ -801,11 +804,9 @@ resource "docker_container" "workspace" {
     host_path      = "/etc/coder/claude-virtual-key"
     read_only      = true
   }
-  volumes {
-    container_path = "/codex-auth/auth.json"
-    host_path      = "/etc/coder/codex-auth.json"
-    read_only      = true
-  }
+  # codex no longer mounts the real ChatGPT OAuth — it routes through the gateway with the
+  # same virtual key as claude (see the codex config.toml write in the startup script). The
+  # one real ChatGPT subscription token lives only in the gateway's chatgpt/ provider.
 
   # Reach the Coder control plane on the host.
   host {
