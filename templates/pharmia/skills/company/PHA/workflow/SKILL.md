@@ -26,8 +26,20 @@ The coordinator (main Claude session) is the **only actor that can talk to the h
 2. Collecting all BLOCKING items and **asking the user** before proceeding to the next step
 3. Applying DEFAULTABLE items with stated defaults (user can override)
 4. Feeding user answers into the next subagent's prompt as resolved constraints
+5. **Persisting every gate decision into the artifact before proceeding** (see below)
 
 **When to ask:** After any step that surfaces ambiguities — typically after the spec ambiguity audit (Step 1) and after the planner's clarification gate (Step 3). Never proceed past a gate with unresolved BLOCKING items.
+
+### Persisting gate decisions (compaction-proofing)
+
+Every human answer to a BLOCKING question, every accepted-or-overridden DEFAULTABLE, and every direction the human gives at a gate **must be written into the spec or plan file immediately — before the next step runs.** Do not carry a gate decision only in the conversation: feeding it into "the next subagent's prompt" is not enough.
+
+**Why:** The review loops (Step 3, Steps 4+5) re-inject the spec/plan verbatim each iteration precisely so the artifact is the single source of truth and the loop never depends on accumulated conversation state. A decision that lives only in coordinator context is invisible to that re-injection, and is exactly what auto-compaction silently drops — the constraint evaporates and a later iteration re-introduces the gap the human already closed. Persisting it keeps the "spec as steering wheel" invariant intact: the wheel is connected to the wheels.
+
+**How:** Record the answer where a fresh reviewer/implementer would read it — as a resolved requirement, an acceptance criterion, a `Context:` note on the affected task, or a short "Resolved decisions" subsection. Capture the human's actual wording for anything they were specific about; do not paraphrase a constraint into something looser.
+
+<!-- Evolution: 2026-06-12 | evidence: harness-design review — the ZK loops re-inject spec/plan verbatim each iteration, but gate answers were only fed into "the next subagent's prompt", never written to the artifact. A verbal BLOCKING resolution lived solely in coordinator context → vulnerable to auto-compaction silently dropping it, after which a later clean-context iteration re-opens the closed gap. This is the exact "compaction drops the exact wording of a requirement" failure. | added the persist-gate-decisions rule + enforcement at the Step 1 and Step 3 gates so the artifact stays the complete source of truth -->
+
 
 ## When to Use
 
@@ -117,7 +129,7 @@ After the spec is written, run an **ambiguity audit**: ask "what ambiguities exi
 
 Skip this for simple specs (2-3 requirements, no auth changes). The coordinator fixes any structural gaps directly before presenting to the human.
 
-**Coordinator action:** Present the spec to the human along with any BLOCKING ambiguities as explicit questions. Do not proceed until all BLOCKING items are resolved. Then present the full spec for approval.
+**Coordinator action:** Present the spec to the human along with any BLOCKING ambiguities as explicit questions. Do not proceed until all BLOCKING items are resolved. **Write each resolution back into the spec** (as a requirement, acceptance criterion, or resolved-decision note) before presenting the full spec for approval — the spec the human approves must already contain every gate answer, not just the conversation.
 
 **Gate:** Human approves spec before proceeding.
 
@@ -147,7 +159,7 @@ The coordinator writes the plan (or dispatches a `planner` agent), then runs an 
 ### Initial plan
 
 The planner (or coordinator):
-- Runs `/clarification-gate` on the spec — if BLOCKING items surface, **pause the loop** and ask the human before continuing
+- Runs `/clarification-gate` on the spec — if BLOCKING items surface, **pause the loop**, ask the human, and **write each answer into the plan (or spec) before resuming** so the next clean-context iteration re-injects it
 - Produces tasks (TASK-xxx) traced to requirements (REQ-xxx)
 - Each task has a `Context:` field with all info needed for agent-agnostic execution
 - Runs 4-Persona Audit including task count sanity check and security review
