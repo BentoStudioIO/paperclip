@@ -201,10 +201,12 @@ locals {
 #      as `coder` = uid 1001 (uid 1000 is `node`), so the files are owned 1001:1001 mode 400
 #      — NOT uid 1000 like the control-plane's registry-docker-config.json (that container
 #      runs the coder server as a different uid). Install on the box with:
-#        install -m 400 -o 1001 -g 1001 <src> /etc/coder/claude-credentials.json
+#        install -m 400 -o 1001 -g 1001 <src> /etc/coder/claude-oauth-token
 #        install -m 400 -o 1001 -g 1001 <src> /etc/coder/codex-auth.json
-#      (uid 1000 → the agent CANNOT read the mount → seed_cred silently no-ops, agents unauthed.)
-#        /etc/coder/claude-credentials.json   (~/.claude/.credentials.json — claudeAiOauth)
+#      (uid 1000 → the agent CANNOT read the mount → wiring silently no-ops, agents unauthed.)
+#        /etc/coder/claude-oauth-token        (claude setup-token, sk-ant-oat01-…, ~1yr —
+#                                              shared-session .credentials.json PROVABLY
+#                                              auths out on refresh rotation; never use it)
 #        /etc/coder/codex-auth.json           (~/.codex/auth.json — auth_mode=chatgpt)
 #   2. Each is bind-mounted :ro into the workspace container (docker_container below).
 #   3. The startup_script SEEDS them into $HOME (post-volume-mount) as writable copies so
@@ -396,8 +398,39 @@ RULE
       rm -f "$HOME/.codex/auth.json"
       echo "[startup] evicted legacy API-key codex auth.json (billing) → will re-seed subscription auth"
     fi
-    seed_cred /claude-auth/.credentials.json "$HOME/.claude/.credentials.json"
     seed_cred /codex-auth/auth.json          "$HOME/.codex/auth.json"
+    # claude: long-lived setup-token via settings.json env (NOT a credentials file —
+    # the shared-session model proved fatal: rotation races 401 the workspace). The env
+    # block is merged EVERY start so the token always mirrors the box file. A dev who
+    # wants their own account in this workspace: remove the env key + `claude login`.
+    if [ -r /claude-auth/oauth-token ]; then
+      python3 - <<'PYMERGE'
+import json, pathlib
+p = pathlib.Path.home() / '.claude' / 'settings.json'
+tok = open('/claude-auth/oauth-token').read().strip()
+d = {}
+if p.exists():
+    try: d = json.loads(p.read_text() or '{}')
+    except Exception: d = {}
+d.setdefault('env', {})['CLAUDE_CODE_OAUTH_TOKEN'] = tok
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps(d, indent=2))
+PYMERGE
+      echo "[startup] wired CLAUDE_CODE_OAUTH_TOKEN into ~/.claude/settings.json"
+    fi
+    # Evict a DEAD shared-session credentials file (failed rotation blanks refreshToken;
+    # such a file would never self-heal). A personal `claude login` has a nonempty
+    # refreshToken and is left untouched.
+    if [ -s "$HOME/.claude/.credentials.json" ]; then
+      if python3 -c "
+import json,sys
+d=json.load(open('$HOME/.claude/.credentials.json'))
+sys.exit(0 if not (d.get('claudeAiOauth') or {}).get('refreshToken') else 1)
+" 2>/dev/null; then
+        rm -f "$HOME/.claude/.credentials.json"
+        echo "[startup] evicted dead shared-session claude credentials"
+      fi
+    fi
   EOT
 
   metadata {
@@ -755,8 +788,13 @@ resource "docker_container" "workspace" {
   # NOTE: a bind-mount source that does not exist on the host makes the container fail
   # to start, so /etc/coder/{claude-credentials,codex-auth}.json MUST stay in place.
   volumes {
-    container_path = "/claude-auth/.credentials.json"
-    host_path      = "/etc/coder/claude-credentials.json"
+    # Long-lived setup-token (sk-ant-oat01-…, ~1yr) — replaced the shared-session
+    # .credentials.json mount: shared interactive OAuth PROVABLY auths out (refresh
+    # rotation; whoever refreshes second gets 401 + a blanked refresh token). The
+    # setup-token never rotates, so workspaces cannot auth out and the workstation
+    # session is fully decoupled.
+    container_path = "/claude-auth/oauth-token"
+    host_path      = "/etc/coder/claude-oauth-token"
     read_only      = true
   }
   volumes {
