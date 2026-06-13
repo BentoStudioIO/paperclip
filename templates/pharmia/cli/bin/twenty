@@ -476,7 +476,7 @@ EOF
         fi
         ;;
       upsert)
-        first=""; last=""; email=""; phone=""; city=""; jobTitle=""; source=""; tenant=""; group=""; group_set=0
+        first=""; last=""; email=""; phone=""; city=""; jobTitle=""; source=""; tenant=""; group=""; group_set=0; pharmiaUserId=""
         while [[ $# -gt 0 ]]; do
           case "$1" in
             --first)     first="$2"; shift 2 ;;
@@ -487,6 +487,7 @@ EOF
             --job-title) jobTitle="$2"; shift 2 ;;
             --source)    source="$2"; shift 2 ;;
             --tenant)    tenant="$2"; shift 2 ;;
+            --pharmia-user-id) pharmiaUserId="$2"; shift 2 ;;
             --group)     group="$2"; group_set=1; shift 2 ;;
             -h|--help)
               cat <<'EOF'
@@ -502,6 +503,10 @@ Usage: twenty person upsert --email <email> [flags]
   --job-title <title>
   --source <enum>       PHARMIA_SIGNUP INBOUND_MEETING REFERRAL COLD SOCIAL EVENT PARTNER_REFERRAL
   --tenant <slug>       pharmiaTenant
+  --pharmia-user-id <id>  Pharmia better-auth user id (ba_user.id) — the CRM<->app
+                        link. Set it when a person signs up to Pharmia/Atlas so
+                        the "Atlas user" segments work. (Backfilled daily by
+                        pharmia-twenty-atlas-sync via email if not set here.)
   --group <enum|null>   PHARMACIST_OWNER PHARMACIST VC INFLUENCER MENTOR CLIENT SALES PARTNER (or 'null' to clear)
 EOF
               exit 0 ;;
@@ -530,6 +535,7 @@ EOF
         [[ -n "$city" ]]     && data=$(echo "$data" | jq --arg v "$city" '. + {city:$v}')
         [[ -n "$jobTitle" ]] && data=$(echo "$data" | jq --arg v "$jobTitle" '. + {jobTitle:$v}')
         [[ -n "$tenant" ]]   && data=$(echo "$data" | jq --arg v "$tenant" '. + {pharmiaTenant:$v}')
+        [[ -n "$pharmiaUserId" ]] && data=$(echo "$data" | jq --arg v "$pharmiaUserId" '. + {pharmiaUserId:$v}')
 
         # GraphQL can't merge a variable object with inline enum fields, so fold
         # the SELECT enums into $data as JSON values — the server accepts

@@ -52,8 +52,13 @@ LINKEDIN PIPELINE: <ran ok | empty | unavailable — honest status>
 
 ## Writing to Twenty (qualified only)
 - Create **opportunities** for owner-operators (per CRM rules: rencontre/contact propriétaire = opportunity).
-- Use `twenty gql` mutations — never hand-crafted UUIDs (server generates). Enrich with title/city/OPQ
+- Use the high-level `twenty` subcommands (`person upsert`, `opportunity create`, `note add`) — never raw gql,
+  never hand-crafted UUIDs. Dedupe first (`person get` / `opportunity get --person`). Enrich with title/city/OPQ
   license before writing. Confirm against OPQ before asserting ownership.
+- **Link to the app**: if the prospect already has a Pharmia account, set `twenty person upsert … --pharmia-user-id <ba_user.id>`
+  (`pg canary app "SELECT id FROM ba_user WHERE lower(email)='<email>'"`) — that's what marks them an **Atlas user**
+  in the CRM (a pharmacist owner who's already trialing Atlas is the hottest possible lead). The daily
+  `pharmia-twenty-atlas-sync` cron backfills this by email, but set it explicitly when you know it.
 
 ## Rules
 - You rank and write to CRM; you NEVER send a DM. Output is a human action list.
