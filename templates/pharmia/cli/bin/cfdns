@@ -12,6 +12,16 @@ mkdir -p "$CONFIG_DIR"
 
 declare -A ZONE_ID_CACHE=()
 
+# Normalize an explicit --proxied value: true/on/yes/1 -> true; false/off/no/0 -> false.
+# Returns "" for anything else, so the caller treats a bare `--proxied` as true.
+_proxied_val() {
+  case "${1:-}" in
+    true|on|yes|1)  echo true ;;
+    false|off|no|0) echo false ;;
+    *)              echo "" ;;
+  esac
+}
+
 usage() {
   cat <<EOF
 Usage: cfdns <command> [args]
@@ -25,15 +35,15 @@ Commands:
                                      List DNS records. <zone-or-fqdn> is auto-resolved.
   get <zone-or-fqdn> <record-id>     Get a single record by ID
   get <name> [type]                  Get a single record by name (+optional type)
-  add <zone-or-fqdn> <type> <name> <content> [--proxied] [--ttl N] [--force-proxy] [--dry-run]
-                                     Create a DNS record. --proxied requires --force-proxy.
+  add <zone-or-fqdn> <type> <name> <content> [--proxied [true|false]] [--ttl N] [--force-proxy] [--dry-run]
+                                     Create a DNS record. Default unproxied; --proxied true needs --force-proxy.
   set <zone> <record-id> <content>   Update record content by ID (legacy form)
-  set <name> [type] [--content V] [--ttl N] [--proxied BOOL] [--force-proxy]
+  set <name> [type] [--content V] [--ttl N] [--proxied true|false] [--force-proxy]
                                      Update record by name (+optional type)
   rm  <zone> <record-id>             Delete a record by ID (legacy form)
   rm  <name> [type]                  Delete record by name (+optional type)
-  upsert <zone-or-fqdn> <type> <name> <content> [--ttl N] [--proxied] [--force-proxy]
-                                     Create if absent, PATCH if present. Idempotent.
+  upsert <zone-or-fqdn> <type> <name> <content> [--ttl N] [--proxied [true|false]] [--force-proxy]
+                                     Create if absent, PATCH if present. Idempotent. Default unproxied.
   find [zone-or-fqdn] [--name SUB] [--content VAL] [--json]
                                      Search by name substring or content. Zone optional.
   audit [zone-or-fqdn]               Report proxied records (policy violation). Exit 1 if any.
@@ -267,18 +277,15 @@ case "$CMD" in
     ;;
 
   add)
-    [[ $# -lt 4 ]] && die "usage: cfdns add <zone-or-fqdn> <type> <name> <content> [--proxied] [--ttl N] [--force-proxy] [--dry-run]"
+    [[ $# -lt 4 ]] && die "usage: cfdns add <zone-or-fqdn> <type> <name> <content> [--proxied [true|false]] [--ttl N] [--force-proxy] [--dry-run]"
     ZNAME=$(resolve_zone_name "$1")
     TYPE="$2"; NAME="$3"; CONTENT="$4"; shift 4
     PROXIED=false; TTL=1; FORCE_PROXY=0; DRY_RUN=0
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --proxied)
-          if [[ "${2:-}" == "true" || "${2:-}" == "false" ]]; then
-            PROXIED="$2"; shift 2
-          else
-            PROXIED=true; shift
-          fi ;;
+          _pv=$(_proxied_val "${2:-}")
+          if [[ -n "$_pv" ]]; then PROXIED="$_pv"; shift 2; else PROXIED=true; shift; fi ;;
         --ttl) TTL="$2"; shift 2 ;;
         --force-proxy) FORCE_PROXY=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -301,7 +308,7 @@ case "$CMD" in
     ;;
 
   set)
-    [[ $# -lt 1 ]] && die "usage: cfdns set <zone> <record-id> <content> | cfdns set <name> [type] [--content V] [--ttl N] [--proxied BOOL] [--force-proxy]"
+    [[ $# -lt 1 ]] && die "usage: cfdns set <zone> <record-id> <content> | cfdns set <name> [type] [--content V] [--ttl N] [--proxied true|false] [--force-proxy]"
     # Legacy form: <zone> <record-id> <content>
     if [[ $# -ge 3 ]] && is_record_id "$2" && [[ "$3" != --* ]]; then
       ZNAME=$(resolve_zone_name "$1"); ZID=$(zone_id "$ZNAME")
@@ -320,7 +327,9 @@ case "$CMD" in
       case "$1" in
         --content) CONTENT="$2"; shift 2 ;;
         --ttl) TTL="$2"; shift 2 ;;
-        --proxied) PROXIED="$2"; shift 2 ;;
+        --proxied)
+          _pv=$(_proxied_val "${2:-}")
+          if [[ -n "$_pv" ]]; then PROXIED="$_pv"; shift 2; else PROXIED=true; shift; fi ;;
         --force-proxy) FORCE_PROXY=1; shift ;;
         *) die "unknown flag: $1" ;;
       esac
@@ -353,15 +362,15 @@ case "$CMD" in
     ;;
 
   upsert)
-    [[ $# -lt 4 ]] && die "usage: cfdns upsert <zone-or-fqdn> <type> <name> <content> [--ttl N] [--proxied] [--force-proxy]"
+    [[ $# -lt 4 ]] && die "usage: cfdns upsert <zone-or-fqdn> <type> <name> <content> [--ttl N] [--proxied [true|false]] [--force-proxy]"
     ZNAME=$(resolve_zone_name "$1")
     TYPE="$2"; NAME="$3"; CONTENT="$4"; shift 4
     PROXIED=false; TTL=1; FORCE_PROXY=0
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --proxied)
-          if [[ "${2:-}" == "true" || "${2:-}" == "false" ]]; then PROXIED="$2"; shift 2
-          else PROXIED=true; shift; fi ;;
+          _pv=$(_proxied_val "${2:-}")
+          if [[ -n "$_pv" ]]; then PROXIED="$_pv"; shift 2; else PROXIED=true; shift; fi ;;
         --ttl) TTL="$2"; shift 2 ;;
         --force-proxy) FORCE_PROXY=1; shift ;;
         *) die "unknown flag: $1" ;;
