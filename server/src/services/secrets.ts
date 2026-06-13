@@ -361,6 +361,10 @@ export function secretService(db: Db) {
     context: SecretConsumerContext | undefined,
   ) {
     if (!context) return null;
+    // Plugin secret resolution intentionally bypasses the per-binding gate
+    // (scoped to the invocation company instead); still record the access via
+    // recordAccessEvent so plugin resolutions are audited.
+    if (context.consumerType === "plugin") return null;
     if (!context.configPath) {
       throw unprocessable("Secret resolution requires a binding config path", { code: "binding_missing" });
     }

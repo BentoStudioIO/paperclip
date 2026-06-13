@@ -495,7 +495,13 @@ export function buildHostServices(
     db,
     pluginId,
     resolveSecretValue: (companyId, secretId) =>
-      secrets.resolveSecretValue(companyId, secretId, "latest"),
+      secrets.resolveSecretValue(companyId, secretId, "latest", {
+        consumerType: "plugin",
+        consumerId: pluginId,
+        actorType: "plugin",
+        actorId: pluginId,
+        pluginId,
+      }),
   });
   const companies = companyService(db);
   const agents = agentService(db);

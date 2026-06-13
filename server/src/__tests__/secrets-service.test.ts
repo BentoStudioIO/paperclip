@@ -12,6 +12,7 @@ import {
   companySecretVersions,
   companySecrets,
   createDb,
+  plugins,
   secretAccessEvents,
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -51,6 +52,7 @@ describeEmbeddedPostgres("secretService", () => {
     await db.delete(companySecrets);
     await db.delete(companySecretProviderConfigs);
     await db.delete(agents);
+    await db.delete(plugins);
     await db.delete(companies);
   });
 
@@ -203,6 +205,51 @@ describeEmbeddedPostgres("secretService", () => {
     expect(events).toHaveLength(2);
     expect(events.map((event) => event.outcome).sort()).toEqual(["failure", "success"]);
     expect(JSON.stringify(events)).not.toContain("runtime-secret");
+  });
+
+  it("audits plugin secret resolution without requiring a binding", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+    const secret = await svc.create(companyId, {
+      name: `plugin-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "plugin-super-secret",
+    });
+    const [plugin] = await db
+      .insert(plugins)
+      .values({
+        pluginKey: `acme.audit-${randomUUID()}`,
+        packageName: "@acme/audit",
+        version: "1.0.0",
+        manifestJson: {} as never,
+      })
+      .returning();
+    const pluginId = plugin!.id;
+
+    // No binding is synced for plugins — the gate is intentionally bypassed and
+    // resolution is scoped to the invocation company instead.
+    const value = await svc.resolveSecretValue(companyId, secret.id, "latest", {
+      consumerType: "plugin",
+      consumerId: pluginId,
+      actorType: "plugin",
+      actorId: pluginId,
+      pluginId,
+    });
+
+    expect(value).toBe("plugin-super-secret");
+    const events = await svc.listAccessEvents(companyId, secret.id);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      companyId,
+      secretId: secret.id,
+      consumerType: "plugin",
+      consumerId: pluginId,
+      actorType: "plugin",
+      actorId: pluginId,
+      pluginId,
+      outcome: "success",
+    });
+    expect(JSON.stringify(events)).not.toContain("plugin-super-secret");
   });
 
   it("denies runtime secret resolution outside the low-trust binding allowlist", async () => {
