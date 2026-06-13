@@ -2116,6 +2116,32 @@ def _final_assistant_text(msgs):
     return ""
 
 
+def _norm(s):
+    """Normalize text for citation/quote matching.
+
+    The Atlas prompt makes the model HTML-escape `<`,`>`,`&` *inside* the
+    `original=` quote (e.g. `original="CrCl &lt; 30 mL/min"`), but the stored
+    tool result carries the literal characters — so a raw substring test
+    false-flags exactly the dose/threshold cites that matter most. Unescape
+    first, then NFKC, collapse all whitespace incl. NBSP to single spaces, and
+    casefold. No accent-stripping (that would let a genuinely altered quote
+    pass).
+    """
+    import html as _html, unicodedata as _ud, re as _re2
+    if not s:
+        return ""
+    s = _html.unescape(s)
+    s = _ud.normalize("NFKC", s)
+    s = s.replace(" ", " ")
+    # Fold typographic dash/hyphen variants (‑ – — − etc.) to ASCII '-' — safe,
+    # purely typographic (unlike accent-stripping). NFKC does NOT do this, and a
+    # dose like "1‑2" (non-breaking hyphen) would else never match source "1-2".
+    s = s.translate({0x2010: 0x2D, 0x2011: 0x2D, 0x2012: 0x2D, 0x2013: 0x2D,
+                     0x2014: 0x2D, 0x2015: 0x2D, 0x2212: 0x2D})
+    s = _re2.sub(r"\s+", " ", s)
+    return s.strip().casefold()
+
+
 def _extract_citations(text):
     """Pull <cite>/<pharmia-source>/<pharmia-act> tags from the final answer.
 
@@ -2238,32 +2264,59 @@ if mode == "rca":
     if not cites:
         print("  No <cite>/<pharmia-source>/<pharmia-act> tags in the final answer.")
     else:
-        fabricated = 0
+        # Pre-normalize every tool-result blob once (HTML-unescape + NFKC +
+        # whitespace-collapse + casefold) so the dose/threshold cites the model
+        # HTML-escaped inside original= match the literal source text.
+        norm_blobs = [(tool_name, _norm(blob)) for tool_name, blob in all_results]
+
+        with_quote = 0       # cites carrying an original= verbatim quote
+        quote_ok = 0         # quote found verbatim in a fetched source
+        quote_bad = 0        # quote in NOTHING fetched → candidate fabrication
+        attr_ok = 0          # no quote, but a title/url attribute matched (weak)
+        attr_bad = 0         # no quote and no attribute match
         for i, c in enumerate(cites):
-            matched_tool = None
-            matched_ref = None
-            for ref in c["refs"]:
-                needle = ref.strip().lower()
-                if len(needle) < 4:
-                    continue
-                for tool_name, blob in all_results:
-                    if needle in blob.lower():
-                        matched_tool, matched_ref = tool_name, ref
+            label = (c["refs"][0] if c["refs"] else c["raw"])[:60]
+            print(f"  [{i+1}] <{c['tag']}> {label}")
+            norm_orig = _norm(c["attrs"].get("original", ""))
+            if len(norm_orig) >= 8:
+                # Real quote-integrity: is the verbatim quote in ANY fetched source?
+                with_quote += 1
+                hit = next((t for t, b in norm_blobs if norm_orig in b), None)
+                if hit:
+                    quote_ok += 1
+                    print(f"        ↳ ✓ quote verified in tool: {hit}")
+                else:
+                    quote_bad += 1
+                    print(f"        ↳ ⚠ QUOTE NOT IN ANY FETCHED SOURCE — candidate fabrication")
+                    print(f"            original={c['attrs'].get('original','')[:90]!r}")
+            else:
+                # No verbatim quote to verify → fall back to attribute match (weak).
+                matched_tool = matched_ref = None
+                for ref in c["refs"]:
+                    needle = _norm(ref)
+                    if len(needle) < 4:
+                        continue
+                    hit = next((t for t, b in norm_blobs if needle in b), None)
+                    if hit:
+                        matched_tool, matched_ref = hit, ref
                         break
                 if matched_tool:
-                    break
-            label = c["refs"][0] if c["refs"] else c["raw"]
-            if matched_tool:
-                print(f"  [{i+1}] <{c['tag']}> {label[:60]}")
-                print(f"        ↳ matched in tool: {matched_tool}  (via {matched_ref[:50]!r})")
-            else:
-                fabricated += 1
-                print(f"  [{i+1}] <{c['tag']}> {label[:60]}")
-                print(f"        ↳ ⚠ UNMATCHED — no tool result contains this reference (possibly fabricated)")
-        if fabricated:
-            print(f"\n  ⚠ {fabricated}/{len(cites)} citation(s) unmatched — review for fabrication.")
+                    attr_ok += 1
+                    print(f"        ↳ ~ attribute-matched in {matched_tool} (no original= quote to verify)")
+                else:
+                    attr_bad += 1
+                    print(f"        ↳ ⚠ UNMATCHED — neither quote nor reference in any tool result")
+        print()
+        if with_quote:
+            rate = 100.0 * quote_bad / with_quote
+            print(f"  Quote-integrity: {quote_ok}/{with_quote} verified · "
+                  f"{quote_bad} candidate fabrication(s)  ({rate:.0f}% unverified)")
         else:
-            print(f"\n  All {len(cites)} citation(s) trace to a tool result.")
+            print("  Quote-integrity: no citation carried an original= verbatim quote")
+        if attr_ok or attr_bad:
+            print(f"  Attribute-only (no quote): {attr_ok} matched · {attr_bad} unmatched")
+        print("  note: whole-blob match — a verified quote may still be mis-attributed to the"
+              " wrong source; 'unverified' = the verbatim text is in NOTHING fetched this turn.")
 
     # 3. Per-turn prompt size ---------------------------------------------
     turns = _per_turn_prompt_sizes(messages)
