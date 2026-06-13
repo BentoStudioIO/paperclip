@@ -2282,6 +2282,20 @@ if mode == "rca":
                 # Real quote-integrity: is the verbatim quote in ANY fetched source?
                 with_quote += 1
                 hit = next((t for t, b in norm_blobs if norm_orig in b), None)
+                if not hit:
+                    # The model routinely joins two NON-CONTIGUOUS verbatim spans
+                    # with an ellipsis ("A ... B") — a pure substring test then
+                    # false-flags an accurate quote. Verify each fragment in the
+                    # SAME source instead: still verbatim, so invented text can't
+                    # pass (this only rescues real-but-spliced quotes).
+                    raw_orig = c["attrs"].get("original", "").replace("…", "...")
+                    frags = [_norm(p) for p in raw_orig.split("...")]
+                    frags = [f for f in frags if len(f) >= 8]
+                    if len(frags) >= 2:
+                        hit = next((t for t, b in norm_blobs
+                                    if all(f in b for f in frags)), None)
+                        if hit:
+                            hit += " (ellipsis-joined; all fragments verbatim)"
                 if hit:
                     quote_ok += 1
                     print(f"        ↳ ✓ quote verified in tool: {hit}")
