@@ -1,0 +1,26 @@
+# Wildcard toolbox route for self-hosted Daytona.
+# Daytona advertises per-sandbox toolbox URLs at https://PORT-SANDBOXID.daytona.bentostudio.io
+# The proxy (TOOLBOX_ONLY_MODE=true) forwards to the correct sandbox toolbox.
+# Dokploy only injects container labels for explicit hosts; the wildcard needs this file-provider route.
+# Wildcard TLS requires DNS-01 -> cloudflare certresolver (configured in traefik.yml).
+# Managed out-of-band (file provider, live-reloaded) to avoid force-recreating the runner/sandboxes.
+# NOTE: file-provider .yml files are Go templates - do not use double-curly tokens in comments.
+http:
+  routers:
+    daytona-wildcard-websecure:
+      rule: "HostRegexp(`^[a-z0-9-]+\\.daytona\\.bentostudio\\.io$`)"
+      entryPoints:
+        - websecure
+      service: daytona-wildcard-proxy
+      priority: 1
+      tls:
+        certResolver: cloudflare
+        domains:
+          - main: "daytona.bentostudio.io"
+            sans:
+              - "*.daytona.bentostudio.io"
+  services:
+    daytona-wildcard-proxy:
+      loadBalancer:
+        servers:
+          - url: "http://compose-override-redundant-feed-qo9ky7-proxy-1:4000"

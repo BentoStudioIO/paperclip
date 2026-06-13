@@ -1,0 +1,23 @@
+# Toolbox path route for self-hosted Daytona.
+# The api advertises sandbox.toolboxProxyUrl = https://daytona.bentostudio.io/toolbox
+# (app host + /toolbox), so the SDK sends exec to daytona.bentostudio.io/toolbox/SANDBOXID/...
+# But daytona.bentostudio.io routes to api:3000, which serves the dashboard SPA at /toolbox
+# (catch-all 200 HTML) -> SDK gets HTML, returns empty result. THIS is the real exec blocker.
+# Fix: route daytona.bentostudio.io + PathPrefix(/toolbox) to the proxy:4000
+# (TOOLBOX_ONLY_MODE), at higher priority than the api host router. The proxy expects the
+# full /toolbox/SANDBOXID/... path (no strip). Cert for daytona.bentostudio.io already exists.
+# file-provider .yml files are Go templates - do not use double-curly tokens in comments.
+http:
+  routers:
+    daytona-toolbox-path:
+      rule: "Host(`daytona.bentostudio.io`) && PathPrefix(`/toolbox`)"
+      entryPoints:
+        - websecure
+      service: daytona-toolbox-proxy
+      priority: 1000
+      tls: {}
+  services:
+    daytona-toolbox-proxy:
+      loadBalancer:
+        servers:
+          - url: "http://compose-override-redundant-feed-qo9ky7-proxy-1:4000"

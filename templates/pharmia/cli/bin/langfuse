@@ -95,8 +95,11 @@ _preprocess_list_args() {
 
 # Detect the triple "api <resource> list" to apply list preprocessing.
 # Returns 0 if list-like, sets REPLY_RESOURCE.
+# Excludes metrics/metrics-v2s: those take a --query object, not --limit/--since,
+# so injecting the default --limit makes the npm binary reject "unknown option '--limit'".
 _is_list_cmd() {
-  [[ "${1:-}" == "api" && "${3:-}" == "list" ]]
+  [[ "${1:-}" == "api" && "${3:-}" == "list" \
+     && "${2:-}" != "metrics" && "${2:-}" != "metrics-v2s" ]]
 }
 
 # ---------- commands ----------

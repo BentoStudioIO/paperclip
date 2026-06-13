@@ -1,0 +1,48 @@
+global:
+  sendAnonymousUsage: false
+providers:
+  swarm:
+    exposedByDefault: false
+    watch: true
+  docker:
+    exposedByDefault: false
+    watch: true
+    network: dokploy-network
+  file:
+    directory: /etc/dokploy/traefik/dynamic
+    watch: true
+entryPoints:
+  web:
+    address: :80
+  websecure:
+    address: :443
+    http3:
+      advertisedPort: 443
+    http:
+      tls:
+        certResolver: letsencrypt
+api:
+  insecure: true
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: amine@bentostudio.io
+      storage: /etc/dokploy/traefik/dynamic/acme.json
+      httpChallenge:
+        entryPoint: web
+  cloudflare:
+    acme:
+      email: amine@bentostudio.io
+      storage: /etc/dokploy/traefik/dynamic/acme-cloudflare.json
+      dnsChallenge:
+        provider: cloudflare
+        resolvers:
+          - "1.1.1.1:53"
+          - "8.8.8.8:53"
+accessLog:
+  filePath: /etc/dokploy/traefik/dynamic/access.log
+  format: json
+  bufferingSize: 100
+  filters:
+    retryAttempts: true
+    minDuration: 10ms

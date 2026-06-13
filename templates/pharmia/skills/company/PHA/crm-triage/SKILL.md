@@ -24,60 +24,60 @@ periodic batch reconcile.
 This skill owns **only the sequence**. Every rule, schema, and entity convention
 lives in the tool's home doc — this file points there and never restates it.
 
-## Hard Rule (read first)
+## Write authorization (read first)
 
-**Confirm before any CRM write.** Never run a `twenty gql '<mutation>'` write,
-attach a reward, or claw back a cohort grant without explicit team/operator
-confirmation of the enriched record. This is rule #4 of the OPQ research protocol
-in `~/.claude/rules/twenty-crm.md` — surfaced here because it is non-negotiable
-and easy to skip in a batch loop. Read-only classification and lookups need no
-confirmation; writes do.
+- **Interactive / batch / destructive writes** — operator-run triage, cohort
+  reconcile, `reward:attach`, cohort claw-back, deletes: **confirm before
+  writing.** Read-only classification and lookups never need confirmation.
+- **Autonomous watch** — a single signup/booking trigger enriching ONE record
+  via `twenty person upsert` + `twenty note add` (idempotent by design): write
+  WITHOUT per-record confirm. This is the only autonomous-write exception.
+
+The field/enum model, the `twenty` subcommands, and the ownership +
+identity-enrichment procedure are in
+[`references/twenty-entity-rules.md`](references/twenty-entity-rules.md). This
+skill is runtime-self-contained — it does NOT depend on `~/.claude/rules/`.
 
 ## The Loop
 
-### 1. CLASSIFY — `opq-verify`
+### 1. CLASSIFY — OPQ repertoire
 
-The single classification primitive. Resolves a name or license number against
-the live OPQ repertoire and returns the canonical class.
+Resolve the name/license against the live OPQ repertoire → student | licensed | unknown.
 
-```bash
-opq-verify classify "<name-or-license>" --json
-```
+- If `opq-verify` is installed: `opq-verify classify "<name-or-license>" --json` (authoritative class + confidence).
+- Otherwise (e.g. the agents-VPS runtime — `opq-verify` is NOT there): use the raw OPQ index — see the OPQ block in [`references/twenty-entity-rules.md`](references/twenty-entity-rules.md).
 
-Returns JSON: `{ "class": "...", "licenseNumber": "...", "city": "...", "matchConfidence": "..." }`
-where `class` is `student` | `licensed` | `unknown`. Add `--human` for a
-one-line stdout summary, `--refresh` to force-refetch the OPQ index.
-
-Do **not** restate classification rules here — `opq-verify` is the source of
-truth for what counts as student vs licensed and how confidence is scored. Treat
-its output as authoritative. A `weak` / low `matchConfidence` or `unknown` class
-means you do **not** have a confident match — escalate to the enrich step's
-web/OPQ cross-reference before deciding, and never auto-write on a weak match.
+A weak/unknown match means you do **not** have a confident match — an empty OPQ
+result is NOT "not a pharmacist". Run the identity-enrichment procedure (LinkedIn
+/ web / alt ordres, in the references file) before deciding; never auto-write on a
+weak match without enrichment.
 
 ### 2. ENRICH + WRITE — `twenty`
 
-With the class in hand, enrich (web search + OPQ cross-reference for title,
-pharmacy affiliation, ownership status, city) and write the record to Twenty CRM.
+With the class in hand, enrich (ownership detection + identity enrichment — both
+MANDATORY, procedures in the references file) and write via the high-level
+`twenty` subcommands (never raw gql, never hand-crafted UUIDs):
 
 ```bash
-twenty gql '<mutation>'    # let GraphQL generate UUIDs; never hand-craft them
+twenty person get <email|phone|name> --json          # lookup/dedupe FIRST
+twenty person upsert --email X --first .. --last .. --phone +1.. --city .. \
+  --job-title ".." --source <enum> --tenant <slug> --group <enum> \
+  --pharmia-user-id <ba_user.id>     # CRM<->app link → marks them an Atlas user.
+                                     # Set whenever they have a Pharmia account; get
+                                     # id via `pg canary app "SELECT id FROM ba_user
+                                     # WHERE lower(email)='<email>'"`. (Daily
+                                     # pharmia-twenty-atlas-sync backfills by email.)
+twenty opportunity get --person <id>                 # dedupe before creating
+twenty opportunity create --name ".." --stage MEETING --close-date <ISO> --person <id>
+twenty note add --title ".." --md ".." --link person:<id> [--link opportunity:<id>]
 ```
 
-Never use raw SQL for writes — all writes go through GraphQL.
-
-**All entity rules live in `~/.claude/rules/twenty-crm.md` — do not duplicate
-them here.** Read it for:
-
-- People / Companies — keep current, enrich title + workplace + affiliations.
-- Opportunities — owner-operators / pharmaciens proprietaires → contract path.
-- Tasks — strategic moves (VC/partnership intros), not operational to-dos.
-- The full OPQ research protocol (verify → web-enrich → confirm → write → flag
-  discrepancies) and trial rules.
-- The confirm-before-write rule (#4) restated above.
-
-Cross-reference the `opq-verify` result against what the signup/team claims and
-**flag any discrepancy** (e.g. claims licensed, OPQ says student/unknown) before
-writing.
+**Entity model, enums, ownership detection, identity enrichment (OPQ-empty),
+name-splitting, and Note structure → [`references/twenty-entity-rules.md`](references/twenty-entity-rules.md)** (runtime-self-contained).
+Key rules: `source`=origin vs `group`=persona (distinct); owner-operators are the
+top cohort (detect, never skip); always `person get`/`opportunity get` before
+create (dedupe). Flag any discrepancy (claims licensed, OPQ says student/unknown)
+before writing.
 
 ### 3. COHORT RECONCILE — `autumn`
 
@@ -104,8 +104,6 @@ Every grant or claw-back is a CRM-affecting write → **confirm before applying*
 
 ## DRY Pointers (single source of truth)
 
-- Classification rules + OPQ index → `opq-verify` (`opq-verify --help`)
-- CRM entity rules, OPQ research protocol, confirm-before-write → `~/.claude/rules/twenty-crm.md`
+- CRM entity model, enums, ownership/identity procedures, write-authorization → [`references/twenty-entity-rules.md`](references/twenty-entity-rules.md) (the runtime SSOT; keep in sync with the human-side `~/.claude/rules/twenty-crm.md`)
+- OPQ index → raw curl (in the references file); `opq-verify` if installed
 - Reward / cohort definitions + Autumn surface → `autumn --help`
-
-This skill adds nothing those three own. If a rule here drifts from them, they win.
