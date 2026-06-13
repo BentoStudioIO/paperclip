@@ -19,17 +19,27 @@ Environment knowledge for operating Pharmia and Bento Studio infrastructure on D
 ## Dokploy CLI
 
 ```bash
-# General pattern
-dokploy <instance> <endpoint> ['json-body']
+# Pattern: dokploy <instance> <args...>  (instances: bento, devops, prod, orange)
+# Most args forward to @dokploy/cli; a few are custom wrapper commands (see --help).
 
-# Instances: bento, devops, prod, orange
-# GET vs POST auto-detected from ~/.config/dokploy/queries.txt
-# Output is unwrapped tRPC JSON — pipe to jq
+# Read
+dokploy bento project all --json                 # projects + composes/apps
+dokploy bento status [--broken] [--json]         # health across services
+dokploy bento apps [<substr>]                    # flat service list -> NAME, ID (composeId)
+dokploy bento logs <app> [--tail N] [--deployment N]
 
-# Examples
-dokploy bento compose.all | jq '.[].name'
-dokploy prod compose.one '{"composeId":"aJZ7Nr83ddA1gux9p6cEE"}' | jq '.status'
-dokploy devops compose.deploy '{"composeId":"..."}'
+# Deploy (composeId from `apps` / `project all`)
+dokploy bento compose deploy --composeId XUsJlG8eIiGnZNadm3x5J
+
+# Env (corruption-proof: backup->keydiff-guard->verify->git commit; SAVE only, NOT deploy)
+dokploy bento env-set <app> KEY=VAL [--dry-run]  # follow with `compose deploy` to apply
+dokploy bento env-rm  <app> KEY [--dry-run]
+dokploy bento env-rollback <app> [<sha>]         # restore prior env from git history
+
+# GOTCHA: the old dotted `compose.all` / `compose.one '{json}'` syntax is GONE —
+# those silently no-op. For reads the CLI doesn't expose, query Dokploy's Postgres
+# directly: docker exec <dokploy-postgres> psql -U dokploy -d dokploy
+#   tables: compose (sourceType/branch/env/autoDeploy), domain (host/port/uniqueConfigKey), deployment (status)
 ```
 
 ## VPS Topology
