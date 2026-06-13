@@ -142,6 +142,19 @@ export interface PluginSecretsHandlerOptions {
    * the secret belongs to the acting company before returning the value.
    */
   resolveSecretValue: (companyId: string, secretId: string) => Promise<string>;
+  /**
+   * Single-company shim: derive the acting company when no invocation scope is
+   * present (e.g. a plugin worker resolving its token at INIT, before any
+   * invocation exists). Must return the sole company id ONLY when the instance
+   * hosts exactly one company, else null.
+   *
+   * This fallback exists ONLY because the instance is single-company; the
+   * proper fix is the plugin worker runtime carrying an explicit company scope
+   * (upstream SAG-3560). Remove this fallback if/when the instance goes
+   * multi-company — at that point returning null keeps resolution fail-closed
+   * and forces an explicit invocation scope.
+   */
+  resolveFallbackCompanyId?: () => Promise<string | null>;
 }
 
 /**
@@ -218,7 +231,7 @@ function createRateLimiter(maxAttempts: number, windowMs: number) {
 export function createPluginSecretsHandler(
   options: PluginSecretsHandlerOptions,
 ): PluginSecretsService {
-  const { pluginId, resolveSecretValue } = options;
+  const { pluginId, resolveSecretValue, resolveFallbackCompanyId } = options;
 
   // Rate limit: max 30 resolution attempts per plugin per minute
   const rateLimiter = createRateLimiter(30, 60_000);
@@ -261,12 +274,23 @@ export function createPluginSecretsHandler(
       // so a secret belonging to another company never resolves. Any
       // post-UUID failure is masked as InvalidSecretRefError to avoid a
       // cross-company existence oracle.
+      //
+      // When there is no invocation scope (e.g. plugin worker INIT, before any
+      // invocation exists), fall back to the sole company — but ONLY when the
+      // instance is single-company (resolveFallbackCompanyId returns the id
+      // only in that case, else null). This never bypasses ownership: the
+      // fallback merely supplies WHICH company to resolve against;
+      // resolveSecretValue still enforces `secret.companyId === companyId`. In
+      // a multi-company instance the fallback yields null → still fail-closed,
+      // requiring an explicit invocation scope. See SAG-3560.
       // ---------------------------------------------------------------
-      const actingCompanyId =
+      const scopedCompanyId =
         !context?.invalidInvocationScope &&
         typeof context?.invocationScope?.companyId === "string"
           ? context.invocationScope.companyId.trim()
           : null;
+      const actingCompanyId =
+        scopedCompanyId || ((await resolveFallbackCompanyId?.()) ?? null);
       if (!actingCompanyId) throw invalidSecretRef(trimmedRef);
 
       try {

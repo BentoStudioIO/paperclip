@@ -6,11 +6,15 @@ const SECRET_REF = "77777777-7777-4777-8777-777777777777";
 const COMPANY_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const COMPANY_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
-function makeHandler(resolveSecretValue: (companyId: string, secretId: string) => Promise<string>) {
+function makeHandler(
+  resolveSecretValue: (companyId: string, secretId: string) => Promise<string>,
+  resolveFallbackCompanyId?: () => Promise<string | null>,
+) {
   return createPluginSecretsHandler({
     db: {} as never,
     pluginId: PLUGIN_ID,
     resolveSecretValue,
+    resolveFallbackCompanyId,
   });
 }
 
@@ -67,6 +71,32 @@ describe("createPluginSecretsHandler", () => {
         { invocationScope: { companyId: COMPANY_A }, invalidInvocationScope: true },
       ),
     ).rejects.toThrow(/invalid secret reference/i);
+    expect(resolveSecretValue).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the sole company when invocation scope is absent (single-company instance)", async () => {
+    // Scope-less plugin init (e.g. discord worker resolving its token at startup)
+    // resolves against the single company the instance hosts.
+    const resolveSecretValue = vi.fn(async () => "init-time-token");
+    const resolveFallbackCompanyId = vi.fn(async () => COMPANY_A);
+    const handler = makeHandler(resolveSecretValue, resolveFallbackCompanyId);
+
+    const value = await handler.resolve({ secretRef: SECRET_REF });
+
+    expect(value).toBe("init-time-token");
+    expect(resolveFallbackCompanyId).toHaveBeenCalledTimes(1);
+    expect(resolveSecretValue).toHaveBeenCalledWith(COMPANY_A, SECRET_REF);
+  });
+
+  it("still fails closed when the fallback returns null (multi-company instance)", async () => {
+    const resolveSecretValue = vi.fn(async () => "should-not-resolve");
+    const resolveFallbackCompanyId = vi.fn(async () => null);
+    const handler = makeHandler(resolveSecretValue, resolveFallbackCompanyId);
+
+    await expect(handler.resolve({ secretRef: SECRET_REF })).rejects.toThrow(
+      /invalid secret reference/i,
+    );
+    expect(resolveFallbackCompanyId).toHaveBeenCalledTimes(1);
     expect(resolveSecretValue).not.toHaveBeenCalled();
   });
 

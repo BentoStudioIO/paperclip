@@ -491,6 +491,7 @@ export function buildHostServices(
   const stateStore = pluginStateStore(db);
   const pluginDb = pluginDatabaseService(db);
   const secrets = secretService(db);
+  const companies = companyService(db);
   const secretsHandler = createPluginSecretsHandler({
     db,
     pluginId,
@@ -502,8 +503,18 @@ export function buildHostServices(
         actorId: pluginId,
         pluginId,
       }),
+    // Single-company shim for scope-less plugin INIT resolution (e.g. the
+    // discord plugin resolving its token at worker startup, before any
+    // invocation scope exists). Returns the sole company id ONLY when the
+    // instance hosts exactly one company; in a multi-company instance this
+    // returns null and resolution stays fail-closed. Ownership is still
+    // enforced by resolveSecretValue. Remove when the worker runtime carries
+    // an explicit company scope (SAG-3560).
+    resolveFallbackCompanyId: async () => {
+      const all = await companies.list();
+      return all.length === 1 ? all[0]!.id : null;
+    },
   });
-  const companies = companyService(db);
   const agents = agentService(db);
   const managedAgents = pluginManagedAgentService(db, {
     pluginId,
