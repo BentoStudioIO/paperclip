@@ -39,6 +39,10 @@ Usage:
                                                  SSH-tail a deployment log
   dokploy <instance> status [--broken] [--json]  health view across services
   dokploy <instance> apps [<project>] [--json]   flat service list in a project
+  dokploy <instance> deployments [<app>] [--running] [--limit N] [--json]
+                                                 recent deploys across the instance (or one
+                                                 service); shows what is building NOW — the
+                                                 only view of the cross-service build queue
   dokploy <instance> env-backup <app>            snapshot full env -> local git history (verified)
   dokploy <instance> env-set <app> KEY=VAL [...] [--dry-run]
                                                  corruption-proof env upsert: backup(git) ->
@@ -627,6 +631,58 @@ PY
   rm -f "$pre" "$cand" "$live"
 }
 
+# cmd_deployments [<app-substr>] [--running] [--limit N] [--json]
+# Instance-wide deployment feed (or one service) read straight from the Dokploy
+# Postgres `deployment` table over SSH. This is the ONLY place the cross-service
+# build queue is visible: composeStatus/applicationStatus only reflect the last
+# RESULT (not in-progress), and there is no tRPC all-deployments endpoint. NOTE: a
+# deploy QUEUED behind another has no row yet — if a service's latest row predates
+# your push AND another service shows `running`, yours is waiting behind it. A
+# README-only / no-op change can finish `done` without recreating the container
+# (identical image), so trust this feed, not container restart times.
+cmd_deployments() {
+  local filter="" limit=15 json=0 running=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json)             json=1; shift ;;
+      --running|--active)  running=1; shift ;;
+      --limit)            limit="${2:-15}"; shift 2 ;;
+      -*)  echo "deployments: unknown flag '$1'" >&2; exit 1 ;;
+      *)   filter="$1"; shift ;;
+    esac
+  done
+  [[ "$limit" =~ ^[0-9]+$ ]] || limit=15
+  filter="${filter//[^A-Za-z0-9._-]/}"   # defense: filter is interpolated into an ilike literal
+  local where="true"
+  [[ -n "$filter" ]] && where="coalesce(c.name,a.name) ilike '%${filter}%'"
+  (( running )) && where="${where} and d.status not in ('done','cancelled','error')"
+  local sql
+  if (( json )); then
+    sql="select coalesce(json_agg(row_to_json(t) order by t.\"createdAt\" desc),'[]') from (
+           select coalesce(c.name,a.name) as service, d.status, d.\"createdAt\", d.title
+           from deployment d
+           left join compose c on c.\"composeId\"=d.\"composeId\"
+           left join application a on a.\"applicationId\"=d.\"applicationId\"
+           where ${where} order by d.\"createdAt\" desc limit ${limit}) t;"
+  else
+    sql="select coalesce(c.name,a.name) as service, d.status,
+                to_char(d.\"createdAt\"::timestamptz at time zone 'UTC','MM-DD HH24:MI') as utc,
+                left(d.title,46) as title
+         from deployment d
+         left join compose c on c.\"composeId\"=d.\"composeId\"
+         left join application a on a.\"applicationId\"=d.\"applicationId\"
+         where ${where} order by d.\"createdAt\" desc limit ${limit};"
+  fi
+  local flags="-P pager=off"
+  (( json )) && flags="-t -A"
+  # SQL travels on STDIN -> docker exec -i psql, so the query needs no shell-quoting.
+  printf '%s\n' "$sql" | ssh "$SSH_HOST" '
+    if ! docker ps >/dev/null 2>&1; then echo "deployments: no docker access on this host (read-only/restricted env?) — not available here" >&2; exit 3; fi
+    dbc=$(docker ps --format "{{.Names}}" | grep -i dokploy-postgres | head -1)
+    [ -z "$dbc" ] && { echo "deployments: dokploy-postgres container not found" >&2; exit 3; }
+    docker exec -i "$dbc" psql -U dokploy -d dokploy '"$flags"
+}
+
 case "${1:-}" in
   env-backup)   shift; cmd_env_backup "$@" ;;
   env-set)      shift; cmd_env_set "$@" ;;
@@ -635,6 +691,7 @@ case "${1:-}" in
   logs)   shift; cmd_logs "$@" ;;
   status) shift; cmd_status "$@" ;;
   apps)   shift; cmd_apps "$@" ;;
+  deployments) shift; cmd_deployments "$@" ;;
   ""|-h|--help|help)
     usage
     if [[ -n "$OFFICIAL" ]]; then

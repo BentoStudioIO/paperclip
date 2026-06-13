@@ -27,6 +27,7 @@ dokploy bento project all --json                 # projects + composes/apps
 dokploy bento status [--broken] [--json]         # health across services
 dokploy bento apps [<substr>]                    # flat service list -> NAME, ID (composeId)
 dokploy bento logs <app> [--tail N] [--deployment N]
+dokploy bento deployments [<app>] [--running] [--json]  # deploy feed = the build QUEUE (what's building NOW)
 
 # Deploy (composeId from `apps` / `project all`)
 dokploy bento compose deploy --composeId XUsJlG8eIiGnZNadm3x5J
@@ -37,9 +38,12 @@ dokploy bento env-rm  <app> KEY [--dry-run]
 dokploy bento env-rollback <app> [<sha>]         # restore prior env from git history
 
 # GOTCHA: the old dotted `compose.all` / `compose.one '{json}'` syntax is GONE —
-# those silently no-op. For reads the CLI doesn't expose, query Dokploy's Postgres
-# directly: docker exec <dokploy-postgres> psql -U dokploy -d dokploy
-#   tables: compose (sourceType/branch/env/autoDeploy), domain (host/port/uniqueConfigKey), deployment (status)
+# those silently no-op. `status`/`apps` show only the LAST result, never in-flight,
+# so use `deployments` to see what's building / queued. For other reads, query
+# Dokploy's Postgres directly: docker exec <dokploy-postgres> psql -U dokploy -d dokploy
+#   tables: compose (sourceType/branch/env/autoDeploy), domain (host/port/uniqueConfigKey)
+# (a deploy queued behind another has NO deployment row until it starts; a no-op/
+#  README-only change can finish 'done' WITHOUT recreating the container — same image.)
 ```
 
 ## VPS Topology
