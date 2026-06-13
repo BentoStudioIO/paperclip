@@ -14,6 +14,8 @@ TWENTY_API_KEY_ID_OVERRIDE="${TWENTY_API_KEY_ID:-}"
 TWENTY_URL="${TWENTY_URL:-https://twenty.bentostudio.io}"
 TWENTY_SSH_HOST="${TWENTY_SSH_HOST:-bento}"
 TWENTY_CONTAINER="${TWENTY_CONTAINER:-bento-studio-twenty-w9iq7f-twenty-server-1}"
+# Postgres container: derived from the server container name unless overridden.
+TWENTY_PG_CONTAINER="${TWENTY_PG_CONTAINER:-${TWENTY_CONTAINER/-twenty-server-1/-twenty-postgres-1}}"
 TWENTY_WORKSPACE_ID="${TWENTY_WORKSPACE_ID:-1475ef88-e279-4c28-8696-beefd02a2c87}"
 TWENTY_API_KEY_ID="${TWENTY_API_KEY_ID:-70256598-2eec-4e8d-b9eb-81222a69492d}"
 
@@ -44,6 +46,10 @@ Commands:
   fields <object>   List fields on an object (by nameSingular)
   field-create <objectId> <name> <label> <type> [json-extras]
                     Create a custom field on an object
+  doctor [--fix]    Detect (and with --fix, repair) v2-migration schema gaps:
+                    NULL applicationId on metadata (FlatEntityMapsException /
+                    "An error occurred" on view render) + empty navigationMenuItem
+                    (blank sidebar). Reads/writes DB via SSH+psql.
 
 Examples:
   twenty token
@@ -158,6 +164,15 @@ rest_call() {
   [[ -n "$body" ]] && curl_args+=(-d "$body")
 
   curl "${curl_args[@]}"
+}
+
+# Run SQL (read from stdin) against the workspace DB via SSH + the postgres
+# container. base64 the payload so arbitrary SQL survives the ssh/docker layers
+# intact (no quoting hell). Output is pipe-separated, header-less.
+pg_exec() {
+  local b64
+  b64=$(base64 -w0 2>/dev/null || base64)
+  ssh "$TWENTY_SSH_HOST" "PGU=\$(docker exec $TWENTY_PG_CONTAINER printenv POSTGRES_USER 2>/dev/null); echo '$b64' | base64 -d | docker exec -i $TWENTY_PG_CONTAINER psql -U \"\$PGU\" -d twenty -t -A -F'|'"
 }
 
 case "${1:-}" in
@@ -306,6 +321,64 @@ case "$CMD" in
     else
       api_call "/metadata" "$payload" | jq .
     fi
+    ;;
+
+  doctor)
+    # Detect (and with --fix, repair) v2-migration schema gaps that crash the
+    # frontend on self-hosted instances upgraded across versions (esp. via :latest):
+    #   1. NULL applicationId on core metadata rows -> FlatEntityMapsException
+    #      ("Application with id null not found ...", surfaced as "An error occurred").
+    #   2. Empty core.navigationMenuItem -> blank sidebar (no objects/favorites).
+    # Reads/writes the DB directly via SSH+psql (the metadata GraphQL API can't
+    # backfill applicationId). Standard app = core.application name 'Twenty Standard'.
+    do_fix=0; [[ "${1:-}" == "--fix" ]] && do_fix=1
+
+    std_app=$(printf "select id from core.application where \"workspaceId\"='%s' and name='Twenty Standard' limit 1;" "$TWENTY_WORKSPACE_ID" | pg_exec | tr -d '[:space:]')
+    if [[ -z "$std_app" ]]; then
+      echo "twenty doctor: could not resolve the 'Twenty Standard' application id (check TWENTY_PG_CONTAINER / workspace)." >&2
+      exit 1
+    fi
+    echo "Twenty Standard application: $std_app"
+
+    echo "== null applicationId across core metadata (workspace-scoped where applicable) =="
+    null_report=$(printf "%s" "do \$do\$
+declare r record; n bigint; found bool := false;
+begin
+  for r in select table_name from information_schema.columns
+           where table_schema='core' and column_name='applicationId' order by table_name loop
+    execute format('select count(*) from core.%I where \"applicationId\" is null', r.table_name) into n;
+    if n > 0 then raise notice '%|%', r.table_name, n; found := true; end if;
+  end loop;
+  if not found then raise notice 'OK|0'; end if;
+end \$do\$;" | pg_exec 2>&1 | sed 's/^NOTICE: *//;s/^psql.*NOTICE: *//' | grep -E '\|[0-9]+$' || true)
+    echo "$null_report" | awk -F'|' 'NF==2{printf "  %-28s %s null\n",$1,$2}'
+
+    navcount=$(printf "select count(*) from core.\"navigationMenuItem\" where \"workspaceId\"='%s';" "$TWENTY_WORKSPACE_ID" | pg_exec | tr -d '[:space:]')
+    echo "== navigationMenuItem rows: ${navcount} ${navcount:+$([[ "$navcount" == 0 ]] && echo '(EMPTY -> blank sidebar; needs seeding)')}"
+
+    if (( do_fix == 0 )); then
+      echo
+      echo "Run 'twenty doctor --fix' to backfill NULL applicationId -> Twenty Standard."
+      echo "(navigationMenuItem seeding is not auto-fixed — it needs the standard menu seed; see memory twenty-nav-menu-fix.)"
+      exit 0
+    fi
+
+    echo "== --fix: backfilling NULL applicationId -> $std_app =="
+    printf "%s" "do \$do\$
+declare r record; n bigint;
+begin
+  for r in select table_name from information_schema.columns
+           where table_schema='core' and column_name='applicationId'
+           and table_name <> 'connectedAccount'  -- messaging account, not render metadata; leave for manual review
+           order by table_name loop
+    execute format('update core.%I set \"applicationId\"=%L where \"applicationId\" is null', r.table_name, '$std_app');
+    get diagnostics n = row_count;
+    if n > 0 then raise notice 'fixed %|%', r.table_name, n; end if;
+  end loop;
+end \$do\$;" | pg_exec 2>&1 | sed 's/^NOTICE: *//' | grep -E 'fixed ' | sed 's/^fixed /  fixed /;s/|/ = /' || echo "  (nothing to fix)"
+    echo
+    echo "Done. Restart the Twenty server so the flat-entity cache rebuilds:"
+    echo "  ssh $TWENTY_SSH_HOST 'docker restart $TWENTY_CONTAINER'"
     ;;
 
   *)
