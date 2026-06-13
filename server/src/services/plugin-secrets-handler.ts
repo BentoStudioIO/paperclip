@@ -40,9 +40,6 @@ import {
   readConfigValueAtPath,
 } from "./json-schema-secret-refs.js";
 
-export const PLUGIN_SECRET_REFS_DISABLED_MESSAGE =
-  "Plugin secret references are disabled until company-scoped plugin config lands";
-
 // ---------------------------------------------------------------------------
 // Error helpers
 // ---------------------------------------------------------------------------
@@ -139,6 +136,25 @@ export interface PluginSecretsHandlerOptions {
    * that reach the plugin worker.
    */
   pluginId: string;
+  /**
+   * Resolve a company-scoped secret UUID to its latest plaintext value.
+   * Delegates to `secretService(db).resolveSecretValue`, which enforces that
+   * the secret belongs to the acting company before returning the value.
+   */
+  resolveSecretValue: (companyId: string, secretId: string) => Promise<string>;
+}
+
+/**
+ * Invocation context forwarded from the worker→host RPC boundary.
+ *
+ * Structurally compatible with `WorkerHostCallContext` from the plugins SDK.
+ * The acting company is derived solely from `invocationScope.companyId`; a
+ * worker cannot supply or override it, so resolution is always scoped to the
+ * company that owns the running invocation.
+ */
+export interface PluginCallContext {
+  invocationScope?: { companyId: string } | null;
+  invalidInvocationScope?: boolean;
 }
 
 /**
@@ -153,7 +169,10 @@ export interface PluginSecretsService {
    * @throws {Error} If the secret is not found, has no versions, or
    *   the provider fails to resolve
    */
-  resolve(params: PluginSecretsResolveParams): Promise<string>;
+  resolve(
+    params: PluginSecretsResolveParams,
+    context?: PluginCallContext,
+  ): Promise<string>;
 }
 
 /**
@@ -199,13 +218,16 @@ function createRateLimiter(maxAttempts: number, windowMs: number) {
 export function createPluginSecretsHandler(
   options: PluginSecretsHandlerOptions,
 ): PluginSecretsService {
-  const { pluginId } = options;
+  const { pluginId, resolveSecretValue } = options;
 
   // Rate limit: max 30 resolution attempts per plugin per minute
   const rateLimiter = createRateLimiter(30, 60_000);
 
   return {
-    async resolve(params: PluginSecretsResolveParams): Promise<string> {
+    async resolve(
+      params: PluginSecretsResolveParams,
+      context?: PluginCallContext,
+    ): Promise<string> {
       const { secretRef } = params;
 
       // ---------------------------------------------------------------
@@ -230,9 +252,28 @@ export function createPluginSecretsHandler(
         throw invalidSecretRef(trimmedRef);
       }
 
-      // Fail closed until plugin config and worker runtime both carry an
-      // explicit company scope for secret bindings and resolution.
-      throw new Error(PLUGIN_SECRET_REFS_DISABLED_MESSAGE);
+      // ---------------------------------------------------------------
+      // 2. Resolve scoped to the invocation's company.
+      //
+      // The acting company is taken only from the host-issued invocation
+      // scope — a worker cannot supply or forge it. resolveSecretValue
+      // re-checks ownership (`secret.companyId !== companyId → unprocessable`),
+      // so a secret belonging to another company never resolves. Any
+      // post-UUID failure is masked as InvalidSecretRefError to avoid a
+      // cross-company existence oracle.
+      // ---------------------------------------------------------------
+      const actingCompanyId =
+        !context?.invalidInvocationScope &&
+        typeof context?.invocationScope?.companyId === "string"
+          ? context.invocationScope.companyId.trim()
+          : null;
+      if (!actingCompanyId) throw invalidSecretRef(trimmedRef);
+
+      try {
+        return await resolveSecretValue(actingCompanyId, trimmedRef);
+      } catch {
+        throw invalidSecretRef(trimmedRef);
+      }
     },
   };
 }

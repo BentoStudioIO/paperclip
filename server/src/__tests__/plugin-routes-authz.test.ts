@@ -307,8 +307,10 @@ describe.sequential("plugin install and upgrade authz", () => {
     expect(mockLifecycle.unload).toHaveBeenCalledWith(pluginId, true);
   }, 20_000);
 
-  it("rejects plugin config saves that contain secret refs even for instance admins", async () => {
+  it("persists plugin config saves that contain secret refs for instance admins", async () => {
     readyPlugin();
+    const configJson = { apiKeyRef: "77777777-7777-4777-8777-777777777777" };
+    mockRegistry.upsertConfig.mockResolvedValue({ id: pluginId, configJson });
 
     const { app } = await createApp({
       type: "board",
@@ -320,15 +322,10 @@ describe.sequential("plugin install and upgrade authz", () => {
 
     const res = await request(app)
       .post(`/api/plugins/${pluginId}/config`)
-      .send({
-        configJson: {
-          apiKeyRef: "77777777-7777-4777-8777-777777777777",
-        },
-      });
+      .send({ configJson });
 
-    expect(res.status).toBe(422);
-    expect(res.body.error).toMatch(/secret references are disabled/i);
-    expect(mockRegistry.upsertConfig).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(mockRegistry.upsertConfig).toHaveBeenCalledWith(pluginId, { configJson });
   }, 20_000);
 
   it("allows instance admins to upgrade plugins", async () => {
