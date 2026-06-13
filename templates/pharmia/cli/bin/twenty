@@ -31,12 +31,12 @@ usage() {
 Usage: twenty [--json] [--dry-run] <command> [args]
 
 Global flags:
-  --json            Emit raw JSON instead of human-formatted tables
-                    (applies to: objects, fields)
+  --json            Emit raw JSON instead of human-formatted output
+                    (applies to: objects, fields, person/company/opportunity get)
   --dry-run         Print the payload that would be sent without calling the API
-                    (applies to: field-create)
+                    (applies to: field-create, all high-level write commands)
 
-Commands:
+Low-level commands:
   token             Generate and print a fresh API token
   gql <query>       Execute GraphQL against /api (data API)
   meta <query>      Execute GraphQL against /metadata (metadata API)
@@ -46,21 +46,34 @@ Commands:
   fields <object>   List fields on an object (by nameSingular)
   field-create <objectId> <name> <label> <type> [json-extras]
                     Create a custom field on an object
-  doctor [--fix]    Detect (and with --fix, repair) v2-migration schema gaps:
-                    NULL applicationId on metadata (FlatEntityMapsException /
-                    "An error occurred" on view render) + empty navigationMenuItem
-                    (blank sidebar). Reads/writes DB via SSH+psql.
+  doctor [--fix]    Detect/repair v2-migration schema gaps (NULL applicationId,
+                    empty navigationMenuItem). Reads/writes DB via SSH+psql.
+
+High-level commands (no hand-written GraphQL; run '<cmd> --help' for flags):
+  person get <email|phone|name>   Look up a person (email, then phone, then name)
+  person upsert ...               Create-or-update a person by primaryEmail
+  company upsert ...              Create-or-update a company by name
+  opportunity get --person <id>   Find an opportunity (dedupe by point of contact)
+  opportunity create ...          Create an opportunity
+  opportunity update <id> ...     Update an opportunity's stage / close date
+  note add ...                    Create a note (markdown) + link it to records
+  task create ...                 Create a task (+ optional record links)
+
+Enums (discover live with 'twenty fields <obj>' + 'twenty meta'):
+  person.source   PHARMIA_SIGNUP INBOUND_MEETING REFERRAL COLD SOCIAL EVENT PARTNER_REFERRAL
+  person.group    PHARMACIST_OWNER PHARMACIST VC INFLUENCER MENTOR CLIENT SALES PARTNER
+  opportunity.stage  NEW SCREENING MEETING PROPOSAL DONE CLIENT LATER
+  task.status     TODO IN_PROGRESS PLANNED DONE WONT_DO WAITING LATER
 
 Examples:
-  twenty token
   twenty objects
   twenty fields person
-  twenty fields company
-  twenty field-create 933a569d-... lastCheckedAt "Last Checked" DATE_TIME
-  twenty meta '{ objects(paging:{first:5}) { edges { node { id nameSingular } } } }'
-  twenty gql '{ people(first:3) { edges { node { id name { firstName lastName } } } } }'
-  twenty rest GET /rest/metadata/objects
-  twenty rest POST /rest/metadata/fields '{"objectMetadataId":"...","name":"foo","label":"Foo","type":"DATE_TIME"}'
+  twenty person get jane@pharmacie.qc.ca
+  twenty person upsert --first Jane --last Tremblay --email jane@pharmacie.qc.ca \
+    --phone +15145551234 --city Montreal --source INBOUND_MEETING --group PHARMACIST_OWNER
+  twenty opportunity create --name "Pharmacie Tremblay" --stage SCREENING --person <personId>
+  twenty note add --title "Meeting" --md "## Notes" --link person:<id> --link opportunity:<id>
+  twenty task create --title "Intro to VC" --due 2026-07-01 --link person:<id>
 
 Token is auto-generated via SSH to the Twenty server container (1h cache).
 Config: ~/.config/twenty/config
@@ -164,6 +177,64 @@ rest_call() {
   [[ -n "$body" ]] && curl_args+=(-d "$body")
 
   curl "${curl_args[@]}"
+}
+
+# --- High-level data-API helpers -------------------------------------------
+# All write commands route through here so they share dry-run, error surfacing,
+# and a single place where the GraphQL request is built. `query` is the GraphQL
+# source string; `vars_json` is a JSON object of variables (default {}). Risky
+# user input ALWAYS travels as a variable, never string-interpolated into the
+# query text — enums are the only thing kept inline (GraphQL enums aren't
+# strings). On any GraphQL `errors`, prints them to stderr and exits 1 so a
+# failed write never looks like a success to a caller piping the output.
+
+data_gql() {
+  local query="$1" vars_json="${2:-{\}}"
+  local payload
+  payload=$(jq -nc --arg q "$query" --argjson v "$vars_json" '{query: $q, variables: $v}')
+  if (( DRY_RUN )); then
+    echo "$payload" | jq .
+    return 0
+  fi
+  local resp
+  resp=$(api_call "/graphql" "$payload")
+  if echo "$resp" | jq -e '.errors' >/dev/null 2>&1; then
+    echo "twenty: GraphQL error:" >&2
+    echo "$resp" | jq -r '.errors[].message' >&2 2>/dev/null || echo "$resp" >&2
+    exit 1
+  fi
+  echo "$resp"
+}
+
+# Resolve a person by email (exact), then phone (exact), then name (ilike on
+# first OR last). Echoes the matched node JSON (or empty). First match wins.
+person_lookup() {
+  local needle="$1" resp node
+  # email
+  resp=$(data_gql '{ people(filter: { emails: { primaryEmail: { eq: $e } } }, first: 1) { edges { node { id name { firstName lastName } emails { primaryEmail } phones { primaryPhoneNumber } city jobTitle source group pharmiaTenant } } } }' "$(jq -nc --arg e "$needle" '{e:$e}')" 2>/dev/null || true)
+  node=$(echo "$resp" | jq -c '.data.people.edges[0].node // empty' 2>/dev/null)
+  [[ -n "$node" ]] && { echo "$node"; return 0; }
+  # phone (strip non-digits/leading +)
+  resp=$(data_gql '{ people(filter: { phones: { primaryPhoneNumber: { eq: $p } } }, first: 1) { edges { node { id name { firstName lastName } emails { primaryEmail } phones { primaryPhoneNumber } city jobTitle source group pharmiaTenant } } } }' "$(jq -nc --arg p "$needle" '{p:$p}')" 2>/dev/null || true)
+  node=$(echo "$resp" | jq -c '.data.people.edges[0].node // empty' 2>/dev/null)
+  [[ -n "$node" ]] && { echo "$node"; return 0; }
+  # name ilike
+  resp=$(data_gql '{ people(filter: { or: [ { name: { firstName: { ilike: $n } } }, { name: { lastName: { ilike: $n } } } ] }, first: 1) { edges { node { id name { firstName lastName } emails { primaryEmail } phones { primaryPhoneNumber } city jobTitle source group pharmiaTenant } } } }' "$(jq -nc --arg n "%${needle}%" '{n:$n}')" 2>/dev/null || true)
+  echo "$resp" | jq -c '.data.people.edges[0].node // empty' 2>/dev/null
+}
+
+# Look up a single person by exact primaryEmail; echoes id or empty.
+person_id_by_email() {
+  local email="$1" resp
+  resp=$(data_gql '{ people(filter: { emails: { primaryEmail: { eq: $e } } }, first: 1) { edges { node { id } } } }' "$(jq -nc --arg e "$email" '{e:$e}')")
+  echo "$resp" | jq -r '.data.people.edges[0].node.id // empty'
+}
+
+# Look up a single company by exact name; echoes id or empty.
+company_id_by_name() {
+  local name="$1" resp
+  resp=$(data_gql '{ companies(filter: { name: { eq: $n } }, first: 1) { edges { node { id } } } }' "$(jq -nc --arg n "$name" '{n:$n}')")
+  echo "$resp" | jq -r '.data.companies.edges[0].node.id // empty'
 }
 
 # Run SQL (read from stdin) against the workspace DB via SSH + the postgres
@@ -379,6 +450,372 @@ end \$do\$;" | pg_exec 2>&1 | sed 's/^NOTICE: *//' | grep -E 'fixed ' | sed 's/^
     echo
     echo "Done. Restart the Twenty server so the flat-entity cache rebuilds:"
     echo "  ssh $TWENTY_SSH_HOST 'docker restart $TWENTY_CONTAINER'"
+    ;;
+
+  person)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      get)
+        if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || $# -lt 1 ]]; then
+          cat <<'EOF'
+Usage: twenty person get <email|phone|name> [--json]
+  Looks up a person by primaryEmail (exact), then primaryPhoneNumber (exact),
+  then name (ilike on first OR last). First match wins. Exit 1 if none.
+EOF
+          [[ $# -lt 1 ]] && exit 1 || exit 0
+        fi
+        node=$(person_lookup "$1")
+        if [[ -z "$node" ]]; then
+          echo "No person found for: $1" >&2
+          exit 1
+        fi
+        if (( JSON_OUT )); then
+          echo "$node" | jq .
+        else
+          echo "$node" | jq -r '"id:       \(.id)\nname:     \(.name.firstName) \(.name.lastName)\nemail:    \(.emails.primaryEmail // "")\nphone:    \(.phones.primaryPhoneNumber // "")\ncity:     \(.city // "")\njobTitle: \(.jobTitle // "")\nsource:   \(.source // "")\ngroup:    \(.group // "")\ntenant:   \(.pharmiaTenant // "")"'
+        fi
+        ;;
+      upsert)
+        first=""; last=""; email=""; phone=""; city=""; jobTitle=""; source=""; tenant=""; group=""; group_set=0
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --first)     first="$2"; shift 2 ;;
+            --last)      last="$2"; shift 2 ;;
+            --email)     email="$2"; shift 2 ;;
+            --phone)     phone="$2"; shift 2 ;;
+            --city)      city="$2"; shift 2 ;;
+            --job-title) jobTitle="$2"; shift 2 ;;
+            --source)    source="$2"; shift 2 ;;
+            --tenant)    tenant="$2"; shift 2 ;;
+            --group)     group="$2"; group_set=1; shift 2 ;;
+            -h|--help)
+              cat <<'EOF'
+Usage: twenty person upsert --email <email> [flags]
+  Create-or-update a person keyed on primaryEmail (looks up first; updates if
+  found, else creates). Prints the id and whether it was created or updated.
+
+  --first <name>        firstName
+  --last <name>         lastName
+  --email <email>       primaryEmail  (REQUIRED — the upsert key)
+  --phone <E.164>       e.g. +15145551234  (split into number/+1/CA)
+  --city <city>
+  --job-title <title>
+  --source <enum>       PHARMIA_SIGNUP INBOUND_MEETING REFERRAL COLD SOCIAL EVENT PARTNER_REFERRAL
+  --tenant <slug>       pharmiaTenant
+  --group <enum|null>   PHARMACIST_OWNER PHARMACIST VC INFLUENCER MENTOR CLIENT SALES PARTNER (or 'null' to clear)
+EOF
+              exit 0 ;;
+            *) echo "person upsert: unknown flag '$1'" >&2; exit 1 ;;
+          esac
+        done
+        [[ -z "$email" ]] && { echo "person upsert: --email is required (it is the upsert key)" >&2; exit 1; }
+
+        # Build the data object incrementally so we only send provided fields.
+        # name is a FULL_NAME composite; phones split a leading-+1 E.164 into
+        # number + callingCode + countryCode (we only handle +1/CA explicitly,
+        # everything else keeps the full string as the number with no CC guess).
+        data=$(jq -nc '{}')
+        if [[ -n "$first" || -n "$last" ]]; then
+          data=$(echo "$data" | jq --arg f "$first" --arg l "$last" '. + {name: {firstName:$f, lastName:$l}}')
+        fi
+        data=$(echo "$data" | jq --arg e "$email" '. + {emails: {primaryEmail:$e}}')
+        if [[ -n "$phone" ]]; then
+          if [[ "$phone" =~ ^\+1[0-9]{10}$ ]]; then
+            num="${phone#+1}"
+            data=$(echo "$data" | jq --arg n "$num" '. + {phones: {primaryPhoneNumber:$n, primaryPhoneCallingCode:"+1", primaryPhoneCountryCode:"CA"}}')
+          else
+            data=$(echo "$data" | jq --arg n "$phone" '. + {phones: {primaryPhoneNumber:$n}}')
+          fi
+        fi
+        [[ -n "$city" ]]     && data=$(echo "$data" | jq --arg v "$city" '. + {city:$v}')
+        [[ -n "$jobTitle" ]] && data=$(echo "$data" | jq --arg v "$jobTitle" '. + {jobTitle:$v}')
+        [[ -n "$tenant" ]]   && data=$(echo "$data" | jq --arg v "$tenant" '. + {pharmiaTenant:$v}')
+
+        # GraphQL can't merge a variable object with inline enum fields, so fold
+        # the SELECT enums into $data as JSON values — the server accepts
+        # enum-as-string for SELECT fields (verified). `enum_fields` (inline) is
+        # therefore unused; kept the JSON path as the single source of truth.
+        [[ -n "$source" ]] && data=$(echo "$data" | jq --arg v "$source" '. + {source:$v}')
+        if (( group_set )); then
+          if [[ "$group" == "null" ]]; then data=$(echo "$data" | jq '. + {group:null}')
+          else data=$(echo "$data" | jq --arg v "$group" '. + {group:$v}'); fi
+        fi
+
+        existing=$(person_id_by_email "$email")
+        if [[ -n "$existing" ]]; then
+          out=$(data_gql 'mutation($id: ID!, $data: PersonUpdateInput!) { updatePerson(id: $id, data: $data) { id } }' "$(jq -nc --arg id "$existing" --argjson d "$data" '{id:$id, data:$d}')")
+          (( DRY_RUN )) && { echo "$out"; exit 0; }
+          echo "updated $(echo "$out" | jq -r '.data.updatePerson.id')"
+        else
+          out=$(data_gql 'mutation($data: PersonCreateInput!) { createPerson(data: $data) { id } }' "$(jq -nc --argjson d "$data" '{data:$d}')")
+          (( DRY_RUN )) && { echo "$out"; exit 0; }
+          echo "created $(echo "$out" | jq -r '.data.createPerson.id')"
+        fi
+        ;;
+      -h|--help|"")
+        echo "Usage: twenty person <get|upsert> ...  (run 'twenty person <sub> --help')" >&2
+        [[ "$sub" == "-h" || "$sub" == "--help" ]] && exit 0 || exit 1 ;;
+      *) echo "person: unknown subcommand '$sub'" >&2; exit 1 ;;
+    esac
+    ;;
+
+  company)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      upsert)
+        name=""; employees=""; domain=""; city=""; icp=""; rxPerDay=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --name)       name="$2"; shift 2 ;;
+            --employees)  employees="$2"; shift 2 ;;
+            --domain)     domain="$2"; shift 2 ;;
+            --city)       city="$2"; shift 2 ;;
+            --rx-per-day) rxPerDay="$2"; shift 2 ;;
+            --icp)        icp="true"; shift ;;
+            -h|--help)
+              cat <<'EOF'
+Usage: twenty company upsert --name <name> [flags]
+  Create-or-update a company keyed on exact name.
+  --name <name>        REQUIRED — the upsert key
+  --employees <n>      headcount
+  --domain <host>      primary domain (e.g. pharmacie.qc.ca)
+  --city <city>        sets address.addressCity
+  --rx-per-day <n>     custom field rxPerDay
+  --icp                mark as idealCustomerProfile
+EOF
+              exit 0 ;;
+            *) echo "company upsert: unknown flag '$1'" >&2; exit 1 ;;
+          esac
+        done
+        [[ -z "$name" ]] && { echo "company upsert: --name is required (it is the upsert key)" >&2; exit 1; }
+        data=$(jq -nc --arg n "$name" '{name:$n}')
+        [[ -n "$employees" ]] && data=$(echo "$data" | jq --argjson v "$employees" '. + {employees:$v}')
+        [[ -n "$rxPerDay" ]]  && data=$(echo "$data" | jq --argjson v "$rxPerDay" '. + {rxPerDay:$v}')
+        [[ -n "$domain" ]]    && data=$(echo "$data" | jq --arg v "$domain" '. + {domainName: {primaryLinkUrl:$v}}')
+        [[ -n "$city" ]]      && data=$(echo "$data" | jq --arg v "$city" '. + {address: {addressCity:$v}}')
+        [[ -n "$icp" ]]       && data=$(echo "$data" | jq '. + {idealCustomerProfile:true}')
+
+        existing=$(company_id_by_name "$name")
+        if [[ -n "$existing" ]]; then
+          out=$(data_gql 'mutation($id: ID!, $data: CompanyUpdateInput!) { updateCompany(id: $id, data: $data) { id } }' "$(jq -nc --arg id "$existing" --argjson d "$data" '{id:$id, data:$d}')")
+          (( DRY_RUN )) && { echo "$out"; exit 0; }
+          echo "updated $(echo "$out" | jq -r '.data.updateCompany.id')"
+        else
+          out=$(data_gql 'mutation($data: CompanyCreateInput!) { createCompany(data: $data) { id } }' "$(jq -nc --argjson d "$data" '{data:$d}')")
+          (( DRY_RUN )) && { echo "$out"; exit 0; }
+          echo "created $(echo "$out" | jq -r '.data.createCompany.id')"
+        fi
+        ;;
+      -h|--help|"")
+        echo "Usage: twenty company upsert ...  (run 'twenty company upsert --help')" >&2
+        [[ "$sub" == "-h" || "$sub" == "--help" ]] && exit 0 || exit 1 ;;
+      *) echo "company: unknown subcommand '$sub'" >&2; exit 1 ;;
+    esac
+    ;;
+
+  opportunity)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      get)
+        person=""; all_stages=0
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --person) person="$2"; shift 2 ;;
+            --all)    all_stages=1; shift ;;
+            -h|--help)
+              cat <<'EOF'
+Usage: twenty opportunity get --person <personId> [--all] [--json]
+  Find opportunities where the person is the point of contact. By default only
+  ACTIVE stages (NEW SCREENING MEETING PROPOSAL) — use --all to include
+  DONE/CLIENT/LATER. Use this to dedupe before 'opportunity create'.
+EOF
+              exit 0 ;;
+            *) echo "opportunity get: unknown flag '$1'" >&2; exit 1 ;;
+          esac
+        done
+        [[ -z "$person" ]] && { echo "opportunity get: --person <id> is required" >&2; exit 1; }
+        if (( all_stages )); then
+          out=$(data_gql 'query($p: UUID!) { opportunities(filter: { pointOfContactId: { eq: $p } }, first: 20) { edges { node { id name stage closeDate } } } }' "$(jq -nc --arg p "$person" '{p:$p}')")
+        else
+          out=$(data_gql 'query($p: UUID!) { opportunities(filter: { pointOfContactId: { eq: $p }, stage: { in: [NEW, SCREENING, MEETING, PROPOSAL] } }, first: 20) { edges { node { id name stage closeDate } } } }' "$(jq -nc --arg p "$person" '{p:$p}')")
+        fi
+        if (( JSON_OUT )); then
+          echo "$out" | jq '[.data.opportunities.edges[].node]'
+        else
+          echo "$out" | jq -r '.data.opportunities.edges[].node | "\(.id)\t\(.stage)\t\(.name)"' | column -t -s $'\t'
+        fi
+        ;;
+      create)
+        name=""; stage=""; closeDate=""; person=""; company=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --name)       name="$2"; shift 2 ;;
+            --stage)      stage="$2"; shift 2 ;;
+            --close-date) closeDate="$2"; shift 2 ;;
+            --person)     person="$2"; shift 2 ;;
+            --company)    company="$2"; shift 2 ;;
+            -h|--help)
+              cat <<'EOF'
+Usage: twenty opportunity create --name <name> [flags]
+  --name <name>         REQUIRED
+  --stage <enum>        NEW SCREENING MEETING PROPOSAL DONE CLIENT LATER (default NEW)
+  --close-date <ISO>    e.g. 2026-12-31 (coerced to ISO datetime)
+  --person <personId>   sets pointOfContactId
+  --company <companyId> sets companyId
+EOF
+              exit 0 ;;
+            *) echo "opportunity create: unknown flag '$1'" >&2; exit 1 ;;
+          esac
+        done
+        [[ -z "$name" ]] && { echo "opportunity create: --name is required" >&2; exit 1; }
+        [[ -z "$stage" ]] && stage="NEW"
+        data=$(jq -nc --arg n "$name" --arg s "$stage" '{name:$n, stage:$s}')
+        if [[ -n "$closeDate" ]]; then
+          [[ "$closeDate" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && closeDate="${closeDate}T00:00:00.000Z"
+          data=$(echo "$data" | jq --arg v "$closeDate" '. + {closeDate:$v}')
+        fi
+        [[ -n "$person" ]]  && data=$(echo "$data" | jq --arg v "$person" '. + {pointOfContactId:$v}')
+        [[ -n "$company" ]] && data=$(echo "$data" | jq --arg v "$company" '. + {companyId:$v}')
+        out=$(data_gql 'mutation($data: OpportunityCreateInput!) { createOpportunity(data: $data) { id name stage } }' "$(jq -nc --argjson d "$data" '{data:$d}')")
+        (( DRY_RUN )) && { echo "$out"; exit 0; }
+        echo "$out" | jq -r '.data.createOpportunity | "created \(.id)  stage=\(.stage)  name=\(.name)"'
+        ;;
+      update)
+        id="${1:-}"; shift || true
+        [[ -z "$id" || "$id" == -* ]] && { echo "Usage: twenty opportunity update <id> [--stage <enum>] [--close-date <ISO>]" >&2; exit 1; }
+        stage=""; closeDate=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --stage)      stage="$2"; shift 2 ;;
+            --close-date) closeDate="$2"; shift 2 ;;
+            -h|--help) echo "Usage: twenty opportunity update <id> [--stage <enum>] [--close-date <ISO>]"; exit 0 ;;
+            *) echo "opportunity update: unknown flag '$1'" >&2; exit 1 ;;
+          esac
+        done
+        data=$(jq -nc '{}')
+        [[ -n "$stage" ]] && data=$(echo "$data" | jq --arg v "$stage" '. + {stage:$v}')
+        if [[ -n "$closeDate" ]]; then
+          [[ "$closeDate" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && closeDate="${closeDate}T00:00:00.000Z"
+          data=$(echo "$data" | jq --arg v "$closeDate" '. + {closeDate:$v}')
+        fi
+        [[ "$data" == "{}" ]] && { echo "opportunity update: nothing to update (pass --stage and/or --close-date)" >&2; exit 1; }
+        out=$(data_gql 'mutation($id: ID!, $data: OpportunityUpdateInput!) { updateOpportunity(id: $id, data: $data) { id stage closeDate } }' "$(jq -nc --arg id "$id" --argjson d "$data" '{id:$id, data:$d}')")
+        (( DRY_RUN )) && { echo "$out"; exit 0; }
+        echo "$out" | jq -r '.data.updateOpportunity | "updated \(.id)  stage=\(.stage)  closeDate=\(.closeDate)"'
+        ;;
+      -h|--help|"")
+        echo "Usage: twenty opportunity <get|create|update> ...  (run '... --help')" >&2
+        [[ "$sub" == "-h" || "$sub" == "--help" ]] && exit 0 || exit 1 ;;
+      *) echo "opportunity: unknown subcommand '$sub'" >&2; exit 1 ;;
+    esac
+    ;;
+
+  note)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      add)
+        title=""; md=""; mdfile=""; links=()
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --title)   title="$2"; shift 2 ;;
+            --md)      md="$2"; shift 2 ;;
+            --md-file) mdfile="$2"; shift 2 ;;
+            --link)    links+=("$2"); shift 2 ;;
+            -h|--help)
+              cat <<'EOF'
+Usage: twenty note add --title <title> (--md <markdown> | --md-file <path>) [--link <type>:<id> ...]
+  Creates a note (bodyV2 markdown) AND links it to records in one call.
+  --title <title>           REQUIRED
+  --md <markdown>           note body as markdown (or use --md-file)
+  --md-file <path>          read markdown body from a file
+  --link person:<id>        repeatable; also opportunity:<id>, company:<id>
+EOF
+              exit 0 ;;
+            *) echo "note add: unknown flag '$1'" >&2; exit 1 ;;
+          esac
+        done
+        [[ -z "$title" ]] && { echo "note add: --title is required" >&2; exit 1; }
+        if [[ -n "$mdfile" ]]; then
+          [[ -f "$mdfile" ]] || { echo "note add: --md-file not found: $mdfile" >&2; exit 1; }
+          md=$(cat "$mdfile")
+        fi
+        out=$(data_gql 'mutation($data: NoteCreateInput!) { createNote(data: $data) { id } }' "$(jq -nc --arg t "$title" --arg m "$md" '{data:{title:$t, bodyV2:{markdown:$m}}}')")
+        if (( DRY_RUN )); then echo "$out"; exit 0; fi
+        noteId=$(echo "$out" | jq -r '.data.createNote.id')
+        echo "created note $noteId"
+        for link in "${links[@]}"; do
+          ltype="${link%%:*}"; lid="${link##*:}"
+          case "$ltype" in
+            person)      field="personId" ;;
+            opportunity) field="opportunityId" ;;
+            company)     field="companyId" ;;
+            *) echo "note add: unknown link type '$ltype' (use person|opportunity|company)" >&2; exit 1 ;;
+          esac
+          lout=$(data_gql 'mutation($data: NoteTargetCreateInput!) { createNoteTarget(data: $data) { id } }' "$(jq -nc --arg n "$noteId" --arg t "$lid" --arg f "$field" '{data:({noteId:$n} + {($f):$t})}')")
+          echo "  linked $ltype $lid -> noteTarget $(echo "$lout" | jq -r '.data.createNoteTarget.id')"
+        done
+        ;;
+      -h|--help|"")
+        echo "Usage: twenty note add ...  (run 'twenty note add --help')" >&2
+        [[ "$sub" == "-h" || "$sub" == "--help" ]] && exit 0 || exit 1 ;;
+      *) echo "note: unknown subcommand '$sub'" >&2; exit 1 ;;
+    esac
+    ;;
+
+  task)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      create)
+        title=""; body=""; due=""; status=""; links=()
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --title)  title="$2"; shift 2 ;;
+            --body)   body="$2"; shift 2 ;;
+            --due)    due="$2"; shift 2 ;;
+            --status) status="$2"; shift 2 ;;
+            --link)   links+=("$2"); shift 2 ;;
+            -h|--help)
+              cat <<'EOF'
+Usage: twenty task create --title <title> [flags] [--link <type>:<id> ...]
+  --title <title>      REQUIRED
+  --body <markdown>    task body (bodyV2 markdown)
+  --due <ISO>          due date, e.g. 2026-07-01 (coerced to ISO datetime)
+  --status <enum>      TODO IN_PROGRESS PLANNED DONE WONT_DO WAITING LATER (default TODO)
+  --link person:<id>   repeatable; also opportunity:<id>, company:<id>
+EOF
+              exit 0 ;;
+            *) echo "task create: unknown flag '$1'" >&2; exit 1 ;;
+          esac
+        done
+        [[ -z "$title" ]] && { echo "task create: --title is required" >&2; exit 1; }
+        [[ -z "$status" ]] && status="TODO"
+        data=$(jq -nc --arg t "$title" --arg s "$status" '{title:$t, status:$s}')
+        [[ -n "$body" ]] && data=$(echo "$data" | jq --arg v "$body" '. + {bodyV2:{markdown:$v}}')
+        if [[ -n "$due" ]]; then
+          [[ "$due" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && due="${due}T00:00:00.000Z"
+          data=$(echo "$data" | jq --arg v "$due" '. + {dueAt:$v}')
+        fi
+        out=$(data_gql 'mutation($data: TaskCreateInput!) { createTask(data: $data) { id } }' "$(jq -nc --argjson d "$data" '{data:$d}')")
+        if (( DRY_RUN )); then echo "$out"; exit 0; fi
+        taskId=$(echo "$out" | jq -r '.data.createTask.id')
+        echo "created task $taskId"
+        for link in "${links[@]}"; do
+          ltype="${link%%:*}"; lid="${link##*:}"
+          case "$ltype" in
+            person)      field="personId" ;;
+            opportunity) field="opportunityId" ;;
+            company)     field="companyId" ;;
+            *) echo "task create: unknown link type '$ltype' (use person|opportunity|company)" >&2; exit 1 ;;
+          esac
+          lout=$(data_gql 'mutation($data: TaskTargetCreateInput!) { createTaskTarget(data: $data) { id } }' "$(jq -nc --arg tk "$taskId" --arg t "$lid" --arg f "$field" '{data:({taskId:$tk} + {($f):$t})}')")
+          echo "  linked $ltype $lid -> taskTarget $(echo "$lout" | jq -r '.data.createTaskTarget.id')"
+        done
+        ;;
+      -h|--help|"")
+        echo "Usage: twenty task create ...  (run 'twenty task create --help')" >&2
+        [[ "$sub" == "-h" || "$sub" == "--help" ]] && exit 0 || exit 1 ;;
+      *) echo "task: unknown subcommand '$sub'" >&2; exit 1 ;;
+    esac
     ;;
 
   *)
