@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# discord — outbound Discord actions for Paperclip agents: react, thread, edit, delete.
+#
+# Companion to `discord-post` (which posts messages + file attachments). These are
+# the other actions an agent may need: add/remove an emoji reaction, open a thread,
+# or edit/delete a message the bot posted. Post into a thread by passing the thread
+# id (printed by `discord thread`) to `discord-post`.
+#
+# Auth: reads the bot token from $DISCORD_BOT_TOKEN (NEVER hardcoded — wired by
+# provision-agent-identity.sh). Fail-closed: exits non-zero if the token is unset.
+set -euo pipefail
+
+API="https://discord.com/api/v10"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  discord react   <channelId> <messageId> <emoji>            Add an emoji reaction (👍 or name:id)
+  discord unreact <channelId> <messageId> <emoji>            Remove the bot's reaction
+  discord thread  <channelId> "<name>" [--message <msgId>]   Open a thread; prints the new thread id
+  discord edit    <channelId> <messageId> "<content>"        Edit a message the bot posted
+  discord delete  <channelId> <messageId>                    Delete a message
+
+Auth: requires $DISCORD_BOT_TOKEN (the Paperclip bot token). Fail-closed.
+Ids must be numeric snowflakes. Post into a new thread with: discord-post <threadId> "..."
+EOF
+  exit "${1:-1}"
+}
+
+[[ $# -eq 0 || "${1:-}" == "--help" || "${1:-}" == "-h" ]] && usage 0
+command -v jq   >/dev/null || { echo "discord: jq is required" >&2; exit 2; }
+command -v curl >/dev/null || { echo "discord: curl is required" >&2; exit 2; }
+
+TOKEN="${DISCORD_BOT_TOKEN:-}"
+[[ -n "$TOKEN" ]] || { echo "discord: \$DISCORD_BOT_TOKEN is not set — cannot authenticate as the bot" >&2; exit 1; }
+
+# _api METHOD PATH [curl-args...] — call the Discord API; on non-2xx print the error
+# body and exit 1. Echoes the response body on success. (Single source for every verb.)
+_api() {
+  local method="$1" pathp="$2"; shift 2
+  local body="/tmp/discord.$$" code
+  code="$(curl -sS -o "$body" -w '%{http_code}' -X "$method" "$API$pathp" \
+    -H "Authorization: Bot $TOKEN" -H "Content-Type: application/json" "$@")"
+  if [[ "$code" != 2* ]]; then
+    echo "discord: $method $pathp failed (HTTP $code): $(cat "$body" 2>/dev/null)" >&2
+    rm -f "$body"; exit 1
+  fi
+  cat "$body"; rm -f "$body"
+}
+
+# _snow ID LABEL — require a numeric Discord snowflake.
+_snow() { [[ "$1" =~ ^[0-9]+$ ]] || { echo "discord: ${2:-id} '$1' is not a numeric Discord snowflake" >&2; exit 1; }; }
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  react|unreact)
+    ch="${1:-}"; msg="${2:-}"; emoji="${3:-}"
+    [[ -n "$ch" && -n "$msg" && -n "$emoji" ]] || usage 1
+    _snow "$ch" channelId; _snow "$msg" messageId
+    enc="$(jq -rn --arg e "$emoji" '$e|@uri')"
+    if [[ "$cmd" == react ]]; then
+      _api PUT "/channels/$ch/messages/$msg/reactions/$enc/@me" >/dev/null
+      echo "discord: reacted $emoji to message $msg"
+    else
+      _api DELETE "/channels/$ch/messages/$msg/reactions/$enc/@me" >/dev/null
+      echo "discord: removed reaction $emoji from message $msg"
+    fi
+    ;;
+  thread)
+    ch="${1:-}"; name="${2:-}"
+    [[ -n "$ch" && -n "$name" ]] || usage 1
+    shift 2 || true
+    msgid=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in --message|--from) shift; msgid="${1:-}" ;; *) ;; esac
+      shift || true
+    done
+    _snow "$ch" channelId
+    if [[ -n "$msgid" ]]; then
+      _snow "$msgid" messageId
+      resp="$(_api POST "/channels/$ch/messages/$msgid/threads" \
+        --data "$(jq -nc --arg n "$name" '{name:$n, auto_archive_duration:1440}')")"
+    else
+      resp="$(_api POST "/channels/$ch/threads" \
+        --data "$(jq -nc --arg n "$name" '{name:$n, auto_archive_duration:1440, type:11}')")"
+    fi
+    echo "$resp" | jq -r '.id'
+    ;;
+  edit)
+    ch="${1:-}"; msg="${2:-}"; content="${3:-}"
+    [[ -n "$ch" && -n "$msg" && -n "$content" ]] || usage 1
+    _snow "$ch" channelId; _snow "$msg" messageId
+    _api PATCH "/channels/$ch/messages/$msg" \
+      --data "$(jq -nc --arg c "$content" '{content:$c}')" >/dev/null
+    echo "discord: edited message $msg"
+    ;;
+  delete)
+    ch="${1:-}"; msg="${2:-}"
+    [[ -n "$ch" && -n "$msg" ]] || usage 1
+    _snow "$ch" channelId; _snow "$msg" messageId
+    _api DELETE "/channels/$ch/messages/$msg" >/dev/null
+    echo "discord: deleted message $msg"
+    ;;
+  *) echo "discord: unknown command '$cmd'" >&2; usage 1 ;;
+esac
