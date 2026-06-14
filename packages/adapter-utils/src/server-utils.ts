@@ -1128,6 +1128,22 @@ export function refreshPaperclipWorkspaceEnvForExecution(input: {
   delete input.env.PAPERCLIP_WORKSPACE_WORKTREE_PATH;
   delete input.env.PAPERCLIP_WORKSPACES_JSON;
 
+  // On a remote target, the persisted AGENT_HOME is a control-plane path
+  // (/paperclip/instances/.../workspaces/<id>) that does not exist on the SSH
+  // host — so per-agent memory would land in a phantom dir. When the deployment
+  // declares PAPERCLIP_AGENT_HOME_BASE, rebase AGENT_HOME onto the durable
+  // remote home by id, making the right path correct by construction instead of
+  // patched into the DB after every import.
+  const agentHomeBase = process.env.PAPERCLIP_AGENT_HOME_BASE;
+  const agentHome =
+    input.executionTargetIsRemote &&
+    typeof agentHomeBase === "string" &&
+    agentHomeBase.length > 0 &&
+    typeof input.agentHome === "string" &&
+    input.agentHome.length > 0
+      ? `${agentHomeBase.replace(/\/+$/, "")}/${path.basename(input.agentHome)}`
+      : input.agentHome;
+
   applyPaperclipWorkspaceEnv(input.env, {
     workspaceCwd: shapedWorkspaceEnv.workspaceCwd,
     workspaceSource: input.workspaceSource,
@@ -1137,7 +1153,7 @@ export function refreshPaperclipWorkspaceEnvForExecution(input: {
     workspaceRepoRef: input.workspaceRepoRef,
     workspaceBranch: input.workspaceBranch,
     workspaceWorktreePath: shapedWorkspaceEnv.workspaceWorktreePath,
-    agentHome: input.agentHome,
+    agentHome,
   });
 
   if (shapedWorkspaceEnv.workspaceHints.length > 0) {

@@ -2,3 +2,9 @@
 # Per-agent excludeSkills: [<key>] to opt out.
 # Frontmatter skills: are added on top (deduped).
 skills:
+  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/agent-memory"
+  # para-memory-files is a built-in upstream skill (repo skills/para-memory-files,
+  # /app/skills in the image), keyed paperclipai/paperclip/* — NOT a company skill.
+  # Referencing it under company/<id>/ would dangle (verified against the live DB:
+  # the real key is paperclipai/paperclip/para-memory-files).
+  - "paperclipai/paperclip/para-memory-files"

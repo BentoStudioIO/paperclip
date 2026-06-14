@@ -17,6 +17,9 @@ services:
     restart: unless-stopped
 
   server:
+    # Tag the built image so the one-shot `import` service can reuse it without a
+    # second build (compose builds `server` once, `import` pins the same tag).
+    image: paperclip-server:local
     build:
       context: .
       dockerfile: Dockerfile
@@ -30,6 +33,14 @@ services:
       SERVE_UI: "true"
       PAPERCLIP_DEPLOYMENT_MODE: authenticated
       PAPERCLIP_DEPLOYMENT_EXPOSURE: private
+      # Durable per-agent AGENT_HOME base on the SSH-remote agent host. The
+      # claude-local adapter rebases AGENT_HOME onto <base>/<agent-id> for remote
+      # runs (server-utils.ts refreshPaperclipWorkspaceEnvForExecution), so
+      # para-memory persists on the agent VPS instead of a phantom control-plane
+      # dir. Only applies when execution is remote; a no-op for local runs.
+      # This makes the AGENT_HOME correct by construction and retires the
+      # post-import DB patch that used to fix it up.
+      PAPERCLIP_AGENT_HOME_BASE: ${PAPERCLIP_AGENT_HOME_BASE:-/home/agent/.paperclip/agents}
       PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -87,6 +98,47 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+
+  # Deploy-time application of the git templates as the single source of truth.
+  # Replaces the manual post-push `paperclipai company import` (and the former
+  # AGENT_HOME re-apply DB patch, now handled by PAPERCLIP_AGENT_HOME_BASE above):
+  # on each deploy this one-shot waits for the server API, then imports
+  # /app/templates/pharmia (company + agents + skills) into the existing company.
+  # Reuses the server image (no second build) and never blocks `server`.
+  import:
+    image: paperclip-server:local
+    environment:
+      # CLI client target + board-actor auth (cli/src/commands/client/common.ts):
+      # PAPERCLIP_API_URL is the API base; PAPERCLIP_API_KEY authenticates the import.
+      PAPERCLIP_API_URL: http://server:3100
+      PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:-}
+    depends_on:
+      server:
+        condition: service_started
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        echo "[import] waiting for server API at http://server:3100 ..."
+        i=0
+        until curl -fsS -o /dev/null http://server:3100/; do
+          i=$$((i+1))
+          if [ "$$i" -ge 30 ]; then
+            echo "[import] FATAL: server API did not become ready within ~60s" >&2
+            exit 1
+          fi
+          sleep 2
+        done
+        echo "[import] server ready; importing templates as SSOT ..."
+        pnpm paperclipai company import /app/templates/pharmia \
+          --target existing \
+          --company-id 57cd0843-fe5a-42d5-a6f6-c4e896fee84e \
+          --collision replace \
+          --include company,agents,skills \
+          --yes \
+          || { echo "[import] FATAL: template import failed" >&2; exit 1; }
+        echo "[import] templates imported successfully"
 
   # Read-only Postgres→Prometheus exporter for per-run agent metrics
   # (cost / latency / outcome counts, by agent + company) from `heartbeat_runs`.

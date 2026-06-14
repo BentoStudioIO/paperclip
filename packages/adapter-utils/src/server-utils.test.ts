@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   applyPaperclipWorkspaceEnv,
   appendWithByteCap,
@@ -1149,6 +1149,77 @@ describe("refreshPaperclipWorkspaceEnvForExecution", () => {
         workspaceId: "workspace-2",
       },
     ]);
+  });
+
+  describe("AGENT_HOME rebasing for remote execution", () => {
+    const ORIGINAL_BASE = process.env.PAPERCLIP_AGENT_HOME_BASE;
+
+    afterEach(() => {
+      if (ORIGINAL_BASE === undefined) {
+        delete process.env.PAPERCLIP_AGENT_HOME_BASE;
+      } else {
+        process.env.PAPERCLIP_AGENT_HOME_BASE = ORIGINAL_BASE;
+      }
+    });
+
+    it("rebases AGENT_HOME onto the remote base when remote and base is set", () => {
+      process.env.PAPERCLIP_AGENT_HOME_BASE = "/home/agent/.paperclip/agents";
+      const env: Record<string, string> = {};
+
+      refreshPaperclipWorkspaceEnvForExecution({
+        env,
+        agentHome: "/paperclip/instances/default/workspaces/abc123",
+        executionTargetIsRemote: true,
+        executionCwd: "/remote/workspace/.paperclip-runtime/runs/run-1/workspace",
+        workspaceCwd: "/host/workspace",
+      });
+
+      expect(env.AGENT_HOME).toBe("/home/agent/.paperclip/agents/abc123");
+    });
+
+    it("tolerates a trailing slash on the remote base", () => {
+      process.env.PAPERCLIP_AGENT_HOME_BASE = "/home/agent/.paperclip/agents/";
+      const env: Record<string, string> = {};
+
+      refreshPaperclipWorkspaceEnvForExecution({
+        env,
+        agentHome: "/paperclip/instances/default/workspaces/abc123",
+        executionTargetIsRemote: true,
+        executionCwd: "/remote/workspace/.paperclip-runtime/runs/run-1/workspace",
+        workspaceCwd: "/host/workspace",
+      });
+
+      expect(env.AGENT_HOME).toBe("/home/agent/.paperclip/agents/abc123");
+    });
+
+    it("leaves the control-plane AGENT_HOME untouched when remote and base is unset", () => {
+      delete process.env.PAPERCLIP_AGENT_HOME_BASE;
+      const env: Record<string, string> = {};
+
+      refreshPaperclipWorkspaceEnvForExecution({
+        env,
+        agentHome: "/paperclip/instances/default/workspaces/abc123",
+        executionTargetIsRemote: true,
+        executionCwd: "/remote/workspace/.paperclip-runtime/runs/run-1/workspace",
+        workspaceCwd: "/host/workspace",
+      });
+
+      expect(env.AGENT_HOME).toBe("/paperclip/instances/default/workspaces/abc123");
+    });
+
+    it("leaves AGENT_HOME untouched for a local run even when the base is set", () => {
+      process.env.PAPERCLIP_AGENT_HOME_BASE = "/home/agent/.paperclip/agents";
+      const env: Record<string, string> = {};
+
+      refreshPaperclipWorkspaceEnvForExecution({
+        env,
+        agentHome: "/paperclip/instances/default/workspaces/abc123",
+        executionTargetIsRemote: false,
+        workspaceCwd: "/host/workspace",
+      });
+
+      expect(env.AGENT_HOME).toBe("/paperclip/instances/default/workspaces/abc123");
+    });
   });
 });
 
