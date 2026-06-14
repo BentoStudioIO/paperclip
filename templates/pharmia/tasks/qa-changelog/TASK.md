@@ -33,7 +33,7 @@ Only `qa` is tracked today (preserves the live n8n behaviour — the n8n Switch 
 2. **Collect commit messages** from `commits[]`. If the list is empty, exit silently.
 3. **Write the changelog** per the rules below — FR-Québec, functional, pharmacist-facing.
 4. **Empty-after-filtering gate.** If every commit is internal/refactor/tooling (nothing user-facing survives the rules), produce NOTHING and exit silently — do not post an empty or filler message.
-5. **Post** the markdown changelog to the mapped Discord channel. One message per push. No phone ping (a changelog is FYI-level, not an alert).
+5. **Post** the markdown changelog to the mapped Discord channel via the bot-REST mechanism in **Output** below. One message per push. No phone ping (a changelog is FYI-level, not an alert).
 
 ## Changelog rules (the contract — do not deviate)
 
@@ -67,5 +67,13 @@ Output:
 
 ## Output
 
-- Post the FR changelog markdown to the mapped Discord channel (#qa-updates for `dev`). Nothing else, no ping.
+- **Deliver** the FR changelog to #qa-updates (`1436126989730975765`) via the Discord bot REST API. The bot token is injected as `$DISCORD_BOT_TOKEN` (company secret "Discord Bot Token" `b49f78a1…`, bound to this routine's project as `env.DISCORD_BOT_TOKEN` — same mechanism as the project's `env.GH_TOKEN`); the bot already has access to the channel:
+  ```bash
+  curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -nc --arg c "<changelog markdown>" '{content:$c}')" \
+    "https://discord.com/api/v10/channels/1436126989730975765/messages"
+  ```
+  Expect `200`. On `401`/`403` the token binding is missing/invalid — report it in your run note, do NOT silently swallow. Use `jq` to JSON-encode (the changelog has newlines/quotes). No phone ping (a changelog is FYI-level).
 - If you exited via a gate (untracked branch / empty / all-internal), say so in one line in your run note and post nothing.
