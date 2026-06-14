@@ -316,7 +316,10 @@ describe("plugin-worker-manager stderr failure context", () => {
         renderEnvironment: null,
       })).rejects.toMatchObject({
         code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
-        message: expect.stringContaining("unknown invocation scope"),
+        // Omitting the id inherits the active company-a origin scope, so the
+        // cross-company company-b request is denied as a scope mismatch (it can
+        // never downgrade to unscoped while a company invocation is in flight).
+        message: expect.stringContaining("company-a"),
       });
     } finally {
       await handle.stop().catch(() => undefined);
@@ -411,6 +414,110 @@ describe("plugin-worker-manager stderr failure context", () => {
           code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
         });
       }
+
+      expect(companiesGet).not.toHaveBeenCalled();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("resolves an unscoped job's nested omit-id host call while a company invocation is active on a different worker", async () => {
+    // The functional bug: scheduled plugin jobs (check-budget-thresholds) are
+    // dispatched via an UNSCOPED host→worker call whose nested worker→host calls
+    // carry no invocation id. They must resolve as unscoped even when an
+    // unrelated company invocation is concurrently active — on a separate worker
+    // handle, which is the real fleet condition (each handle owns its own
+    // invocation table, so a concurrent invocation lives on a different worker).
+    const busyCompaniesGet = vi.fn(
+      () => new Promise<{ id: string }>((resolve) => setTimeout(() => resolve({ id: "company-1" }), 200)),
+    );
+    const busyHandle = createPluginWorkerHandle("busy.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: { ...TEST_MANIFEST, id: "busy.plugin" },
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: createHostClientHandlers({
+        pluginId: "busy.plugin",
+        capabilities: ["companies.read"],
+        services: { companies: { get: busyCompaniesGet } } as unknown as HostServices,
+      }),
+    });
+
+    const jobCompaniesGet = vi.fn(async (params: { companyId: string }) => ({ id: params.companyId }));
+    const jobHandle = createPluginWorkerHandle("job.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: { ...TEST_MANIFEST, id: "job.plugin" },
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: createHostClientHandlers({
+        pluginId: "job.plugin",
+        capabilities: ["companies.read"],
+        services: { companies: { get: jobCompaniesGet } } as unknown as HostServices,
+      }),
+    });
+
+    try {
+      await busyHandle.start();
+      await jobHandle.start();
+
+      // Keep a company-1 invocation in flight on the busy worker for the duration
+      // of the job call (busyCompaniesGet resolves after 200ms).
+      const busyCall = busyHandle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "echo", requestedCompanyId: "company-1" },
+      } as HostToWorkerMethods["getData"][0]);
+
+      // The job: unscoped top-level call (no companyId), nested call omits the id.
+      await expect(jobHandle.call("getData", {
+        key: "probe",
+        params: { mode: "omit", requestedCompanyId: "company-9" },
+      } as HostToWorkerMethods["getData"][0])).resolves.toEqual({ id: "company-9" });
+      // Unscoped: the host passes no invocationScope, so the company-9 lookup runs
+      // unrestricted (a denied call would never reach the service handler — the
+      // resolves.toEqual above is the proof the call was admitted, not blocked).
+      expect(jobCompaniesGet).toHaveBeenCalledTimes(1);
+
+      await expect(busyCall).resolves.toEqual({ id: "company-1" });
+    } finally {
+      await jobHandle.stop().catch(() => undefined);
+      await busyHandle.stop().catch(() => undefined);
+    }
+  });
+
+  it("denies a nested omit-id host call that requests a different company while this worker's company invocation is active", async () => {
+    // Security gate: a worker is UNTRUSTED and can omit the invocation id at will.
+    // While the host has it servicing a company-1 invocation, omitting the id on a
+    // nested company-2 call must NOT downgrade to unscoped — it inherits the active
+    // company-1 origin scope, so the cross-company request is denied. This is the
+    // inverse of the blocked naive fix (which let omit-id resolve to company-2).
+    const companiesGet = vi.fn(async () => ({ id: "company-2" }));
+    const hostHandlers = createHostClientHandlers({
+      pluginId: "test.plugin",
+      capabilities: ["companies.read"],
+      services: { companies: { get: companiesGet } } as unknown as HostServices,
+    });
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers,
+    });
+
+    try {
+      await handle.start();
+
+      await expect(handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "omit", requestedCompanyId: "company-2" },
+      } as HostToWorkerMethods["getData"][0])).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+      });
 
       expect(companiesGet).not.toHaveBeenCalled();
     } finally {

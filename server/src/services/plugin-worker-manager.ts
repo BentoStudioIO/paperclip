@@ -204,8 +204,6 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
   /** Timestamp when the request was sent. */
   sentAt: number;
-  /** Active host-owned invocation id attached to this host→worker call. */
-  invocationId?: string;
 }
 
 interface ActiveInvocation {
@@ -558,14 +556,24 @@ export function createPluginWorkerHandle(
     const invocationId = readNonEmptyString(
       (message as { paperclipInvocationId?: unknown }).paperclipInvocationId,
     );
-    if (!invocationId) {
-      const hasActiveInvocation = activeInvocations.size > 0 ||
-        Array.from(pendingRequests.values()).some((pending) => pending.invocationId);
-      return hasActiveInvocation ? { invalidInvocationScope: true } : {};
+    if (invocationId) {
+      // The worker claims an id: it must match a live host→worker invocation for
+      // THIS worker. A forged/unknown id stays denied.
+      const entry = activeInvocations.get(invocationId);
+      return entry ? { invocationScope: entry.scope } : { invalidInvocationScope: true };
     }
-    const entry = activeInvocations.get(invocationId);
-    if (!entry) return { invalidInvocationScope: true };
-    return { invocationScope: entry.scope };
+    // No claimed id. A worker is untrusted and can omit the id at will, so we
+    // bind scope to what the HOST is currently having this worker do (the live
+    // host→worker invocations in activeInvocations are host-issued, per-worker).
+    // Omitting the id can never escape an active company scope — it only resolves
+    // to unscoped when this worker has no scoped invocation in flight.
+    const scopes = new Map<string, PluginInvocationScope>();
+    for (const entry of activeInvocations.values()) {
+      scopes.set(entry.scope.companyId, entry.scope);
+    }
+    if (scopes.size === 0) return {}; // legitimately unscoped: jobs, lifecycle, startup
+    if (scopes.size === 1) return { invocationScope: [...scopes.values()][0] };
+    return { invalidInvocationScope: true }; // ambiguous: fail closed
   }
 
   /**
@@ -858,7 +866,7 @@ export function createPluginWorkerHandle(
   }
 
   function rejectAllPending(error: Error): void {
-    for (const [id, pending] of pendingRequests) {
+    for (const pending of pendingRequests.values()) {
       clearTimeout(pending.timer);
       pending.resolve(
         createErrorResponse(
@@ -1175,7 +1183,6 @@ export function createPluginWorkerHandle(
         },
         timer,
         sentAt: Date.now(),
-        invocationId: invocation?.id,
       };
 
       pendingRequests.set(id, pending);
