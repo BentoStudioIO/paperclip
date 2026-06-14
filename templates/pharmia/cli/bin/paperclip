@@ -22,6 +22,7 @@
 #   paperclip issues                    issue backlog by status
 #   paperclip reset  <name|id>          clear a stuck/error agent -> idle (mutates)
 #   paperclip import                    reconcile templates -> DB now (mutates)
+#   paperclip deploy [--force]          deploy control plane (refuses while agents run)
 #   paperclip sql    "<select …>"       ad-hoc query (read-only by convention)
 set -euo pipefail
 
@@ -58,6 +59,11 @@ case "$cmd" in
           _sql "UPDATE agents SET status='idle' WHERE id='$id' AND status<>'terminated' RETURNING 'now: '||status";;
   import) echo "reconciling templates -> DB (collision=replace)…"
           ssh "$SSH_HOST" "docker exec $(_srv) sh -c 'cd /app && pnpm paperclipai company import /app/templates/pharmia --target existing --company-id $COMPANY --collision replace --include company,agents,skills --yes'";;
+  deploy) busy=$(_sql "SELECT count(*) FROM agents WHERE status NOT IN ('idle','terminated','error')")
+          if [ "${busy:-0}" != 0 ] && [ "${1:-}" != "--force" ]; then
+            echo "refusing: $busy agent(s) running — a deploy orphans their runs ('Process lost'). Retry when idle, or 'paperclip deploy --force'."; exit 1; fi
+          echo "deploying paperclip control plane (compose mZlb2VtPsxMVClJOs0Zrq)…"
+          dokploy bento compose deploy --composeId mZlb2VtPsxMVClJOs0Zrq;;
   sql)    _sql "$1";;
   *) sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//';;
 esac
