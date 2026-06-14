@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""linkedin-signals — no-KYC, NO-COOKIE LinkedIn signal fetcher for the paperclip growth agents.
+
+Backends are Apify "provider-managed" actors — THEY run the LinkedIn accounts, so we never
+supply a cookie and never manage an account (they wear the ban-risk). Validated 2026-06-14.
+Works on the FREE Apify plan — verified 2026-06-14 (user volitional_cadet, plan=FREE):
+search/profile/posts/reactions/company/jobs all returned data. Each provider-managed actor
+needs a one-time permission approval in the Apify console on first use; runs are pay-per-result
+and draw down the plan's credits (no paid plan required for the API).
+
+  profile   <url...>        harvestapi/linkedin-profile-scraper   rich: about, experience, skills, role, hiring/openToWork
+  posts     <url...>        harvestapi/linkedin-profile-posts     post content + reactions + comments  (the INTENT signal)
+  reactions <url...>        harvestapi/linkedin-profile-reactions what a person reacted to (engagement intent)
+  search    "<query>"       get-leads/linkedin-scraper(search)    discovery: name+title+headline+url
+  company   <url...>        get-leads/linkedin-scraper(companies) firmographics + recent_posts
+  jobs      "<query>"       get-leads/linkedin-scraper(jobs)      hiring signals
+
+Pipeline: OPQ/search (find) -> profile (enrich + confirm owner) -> posts/reactions (score AI-pharmacy intent) -> Twenty.
+
+Creds (env-first, then ~/.config/pharmia-linkedin/creds.env):
+  APIFY_TOKEN   required
+
+Flags: --max N (default 25 search / 10 posts), --location L (search/jobs), --summary, --provider apify.
+"""
+import argparse, json, os, sys, urllib.request, urllib.error
+
+CONFIG = os.environ.get("LINKEDIN_SIGNALS_CONFIG", os.path.expanduser("~/.config/pharmia-linkedin/creds.env"))
+SYNC = "https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items?token={token}"
+
+# subcommand -> (actor, body-builder). Backend isolated here: swap an actor in one line.
+PROFILE_MODE = "Profile details no email ($4 per 1k)"
+BACKENDS = {
+    "profile":   ("harvestapi~linkedin-profile-scraper",  lambda a: {"urls": a.urls, "profileScraperMode": PROFILE_MODE}),
+    "posts":     ("harvestapi~linkedin-profile-posts",    lambda a: {"targetUrls": a.urls, "maxPosts": a.max}),
+    "reactions": ("harvestapi~linkedin-profile-reactions",lambda a: {"targetUrls": a.urls, "maxReactions": a.max}),
+    "search":    ("get-leads~linkedin-scraper",           lambda a: _gl("search", searchQuery=a.query, location=a.location, maxResults=a.max)),
+    "company":   ("get-leads~linkedin-scraper",           lambda a: _gl("companies", urls=a.urls, maxResults=a.max)),
+    "jobs":      ("get-leads~linkedin-scraper",           lambda a: _gl("jobs", searchQuery=a.query, location=a.location, maxResults=a.max)),
+}
+
+
+def _gl(mode, **kw):
+    body = {"mode": mode}
+    body.update({k: v for k, v in kw.items() if v is not None})
+    return body
+
+
+def token():
+    cfg = {}
+    if os.path.exists(CONFIG):
+        for line in open(CONFIG):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip().strip('"').strip("'")
+    t = os.environ.get("APIFY_TOKEN", cfg.get("APIFY_TOKEN", ""))
+    if not t:
+        sys.exit(f"linkedin-signals: missing APIFY_TOKEN (env or {CONFIG})")
+    return t
+
+
+def call(actor, body, tok, timeout=290):
+    req = urllib.request.Request(SYNC.format(actor=actor, token=tok),
+                                 data=json.dumps(body).encode(), method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        rows = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "replace"), strict=False)
+    except urllib.error.HTTPError as e:
+        sys.exit(f"linkedin-signals: Apify {e.code} — {e.read().decode('utf-8','replace')[:200]}")
+    # actors signal per-row errors (approval/free-plan) as {"error": "..."}
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict) and set(rows[0]) == {"error"}:
+        sys.exit(f"linkedin-signals: actor error — {rows[0]['error']}")
+    if isinstance(rows, dict) and rows.get("error"):
+        sys.exit(f"linkedin-signals: {rows.get('error',{}).get('message', rows['error'])}")
+    return [r for r in rows if isinstance(r, dict) and r] if isinstance(rows, list) else rows
+
+
+def summarize(cmd, rows):
+    out = []
+    for r in rows or []:
+        if cmd in ("profile",):
+            out.append({"name": f"{r.get('firstName','')} {r.get('lastName','')}".strip() or r.get("name"),
+                        "headline": r.get("headline"), "role": (r.get("experience") or [{}])[0].get("position"),
+                        "company": (r.get("currentCompany") or {}).get("name") or (r.get("experience") or [{}])[0].get("companyName"),
+                        "location": (r.get("location") or {}).get("linkedinText") if isinstance(r.get("location"), dict) else r.get("location"),
+                        "about": (r.get("about") or "")[:280], "url": r.get("linkedinUrl"),
+                        "openToWork": r.get("openToWork"), "hiring": r.get("hiring")})
+        elif cmd in ("posts",):
+            eng = r.get("engagement") or {}
+            out.append({"posted": (r.get("postedAt") or {}).get("date") if isinstance(r.get("postedAt"), dict) else r.get("postedAt"),
+                        "reactions": eng.get("reactions") or r.get("reactions"), "comments": eng.get("comments"),
+                        "text": (r.get("content") or r.get("text") or "")[:300]})
+        else:
+            out.append({k: r.get(k) for k in ("name", "current_title", "headline", "url", "company_size",
+                        "employee_count", "industry", "followers", "title", "location") if r.get(k) not in (None, "", [])})
+    return [o for o in out if any(v not in (None, "", [], {}) for v in o.values())]
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="linkedin-signals", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("whoami", help="validate token + show Apify account/plan")
+    for name in BACKENDS:
+        sp = sub.add_parser(name)
+        if name in ("search", "jobs"):
+            sp.add_argument("query"); sp.add_argument("--location")
+        else:
+            sp.add_argument("urls", nargs="+")
+        sp.add_argument("--max", type=int, default=(10 if name in ("posts", "reactions") else 25))
+        sp.add_argument("--summary", action="store_true")
+    args = ap.parse_args()
+    tok = token()
+
+    if args.cmd == "whoami":
+        d = json.loads(urllib.request.urlopen(f"https://api.apify.com/v2/users/me?token={tok}", timeout=20).read()).get("data", {})
+        plan = d.get("plan"); plan = plan.get("id") if isinstance(plan, dict) else plan
+        print(json.dumps({"user": d.get("username"), "plan": plan}, indent=2)); return
+
+    actor, build = BACKENDS[args.cmd]
+    rows = call(actor, build(args), tok)
+    print(json.dumps(summarize(args.cmd, rows) if args.summary else rows, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

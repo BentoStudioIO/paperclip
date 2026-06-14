@@ -33,18 +33,25 @@ LinkedIn / known pharmacy names (the repertoire is the universe, ownership is th
   — never DM someone already in an active opportunity.
 - Verify license/city against OPQ before writing (avoid wrong-person).
 
-## Source 3 — online-activity signal (best-effort, fragile)
-The EXISTING n8n + Browserless pipeline (Bento n8n, `http://browserless:3000/scrape`) reads **public
-LinkedIn company pages** without login (works for company pages; **individual profile activity is
-login-walled**). Use it to catch when a target pharmacy/owner posts about practice, workload, or AI.
-- **jina and camofox CANNOT read LinkedIn** (login wall) — do not attempt.
-- Profile-level signals are best-effort: if the pipeline returns nothing, mark the candidate
-  `signal: none` — **never fabricate activity**.
+## Source 3 — online-activity signal (`linkedin-signals` CLI, cookieless)
+Primary tool: **`linkedin-signals`** (`~/.local/bin/linkedin-signals`, Apify-actor-backed, NO cookie/login —
+verified on the FREE Apify plan 2026-06-14). It DOES read individual profiles, posts, and reactions,
+superseding the old "individual LinkedIn activity is login-walled" assumption. Subcommands:
+- `search "<query>"` — discovery: name + title + headline + url (find pharmacists by keyword/role).
+- `profile <url>` — about / experience / role / company → **confirms ownership** (propriétaire).
+- `posts <url>` — their posts incl. reactions + comments → the **intent signal** (workload / AI / practice).
+- `reactions <url>` — what they reacted to · `company <url>` — firmographics · `jobs "<q>"` — hiring.
+Run `linkedin-signals --help` for flags (`--summary`, `--max`, `--location`).
+- **GAP (not yet supported):** NO post-level discovery — there is no `post-search` / `post-comments` /
+  `post-reactions` subcommand, so "find WHO commented on an AI-pharmacy post" (topic→engagers) is not yet
+  available via the CLI; that play is manual until built.
+- The old n8n + Browserless pipeline still exists for **company-page** watching (`http://browserless:3000/scrape`).
+- No signal → mark the candidate `signal: none` — **never fabricate activity**.
 
 ## Source 4 — PLG signups (hottest signal)
 New public-tenant pharmacists who self-served Atlas this week — they already tried the product:
 ```sql
--- pg canary
+-- pg canary app   (the ba_user table is in the `app` database; bare `pg canary` errors)
 SELECT id, name, email, license_number, "createdAt", signup_source
 FROM ba_user
 WHERE role='user' AND NOT is_anonymous
