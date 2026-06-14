@@ -3,8 +3,11 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CompanyPortabilityFileEntry } from "@paperclipai/shared";
+
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
 const companySvc = {
   getById: vi.fn(),
@@ -3804,5 +3807,203 @@ describe("company portability", () => {
 
     const alpha = preview.manifest.agents.find((a) => a.slug === "alpha");
     expect(alpha?.skills).toEqual(["company/abc/extra-one"]);
+  });
+
+  it("resolves explicit per-agent adapter unchanged when no adapterDefaults/model are present", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    const files = {
+      "COMPANY.md": ['---', 'schema: "agentcompanies/v1"', 'name: "Imported Co"', "---", ""].join("\n"),
+      "agents/alpha/AGENTS.md": ["---", 'name: "Alpha"', "---", "", "Alpha body.", ""].join("\n"),
+      ".paperclip.yaml": [
+        "schema: paperclip/v1",
+        "agents:",
+        "  alpha:",
+        '    role: "engineer"',
+        "    adapter:",
+        "      config:",
+        "        dangerouslySkipPermissions: true",
+        '        model: "claude-opus-4-6"',
+        '      type: "claude_local"',
+        "",
+      ].join("\n"),
+    };
+
+    const preview = await portability.previewImport({
+      source: { type: "inline", rootPath: "co-demo", files },
+      include: { company: true, agents: true, projects: false, issues: false, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Co" },
+      agents: "all",
+      collisionStrategy: "rename",
+    });
+
+    const alpha = preview.manifest.agents.find((a) => a.slug === "alpha");
+    expect(alpha?.adapterType).toBe("claude_local");
+    expect(alpha?.adapterConfig).toEqual({
+      dangerouslySkipPermissions: true,
+      model: "claude-opus-4-6",
+    });
+  });
+
+  it("applies company-level adapterDefaults to an agent that declares only role + model", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    const files = {
+      "COMPANY.md": ['---', 'schema: "agentcompanies/v1"', 'name: "Imported Co"', "---", ""].join("\n"),
+      "agents/alpha/AGENTS.md": ["---", 'name: "Alpha"', "---", "", "Alpha body.", ""].join("\n"),
+      ".paperclip.yaml": [
+        "schema: paperclip/v1",
+        "adapterDefaults:",
+        '  type: "claude_local"',
+        "  config:",
+        "    dangerouslySkipPermissions: true",
+        "agents:",
+        "  alpha:",
+        '    role: "engineer"',
+        '    model: "claude-opus-4-6"',
+        "",
+      ].join("\n"),
+    };
+
+    const preview = await portability.previewImport({
+      source: { type: "inline", rootPath: "co-demo", files },
+      include: { company: true, agents: true, projects: false, issues: false, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Co" },
+      agents: "all",
+      collisionStrategy: "rename",
+    });
+
+    const alpha = preview.manifest.agents.find((a) => a.slug === "alpha");
+    expect(alpha?.adapterType).toBe("claude_local");
+    expect(alpha?.adapterConfig).toEqual({
+      dangerouslySkipPermissions: true,
+      model: "claude-opus-4-6",
+    });
+  });
+
+  it("lets an explicit per-agent adapter override adapterDefaults type and config keys", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    const files = {
+      "COMPANY.md": ['---', 'schema: "agentcompanies/v1"', 'name: "Imported Co"', "---", ""].join("\n"),
+      "agents/alpha/AGENTS.md": ["---", 'name: "Alpha"', "---", "", "Alpha body.", ""].join("\n"),
+      ".paperclip.yaml": [
+        "schema: paperclip/v1",
+        "adapterDefaults:",
+        '  type: "claude_local"',
+        "  config:",
+        "    dangerouslySkipPermissions: true",
+        "agents:",
+        "  alpha:",
+        '    role: "engineer"',
+        "    adapter:",
+        '      type: "process"',
+        "      config:",
+        "        dangerouslySkipPermissions: false",
+        "",
+      ].join("\n"),
+    };
+
+    const preview = await portability.previewImport({
+      source: { type: "inline", rootPath: "co-demo", files },
+      include: { company: true, agents: true, projects: false, issues: false, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Co" },
+      agents: "all",
+      collisionStrategy: "rename",
+    });
+
+    const alpha = preview.manifest.agents.find((a) => a.slug === "alpha");
+    expect(alpha?.adapterType).toBe("process");
+    expect(alpha?.adapterConfig).toEqual({ dangerouslySkipPermissions: false });
+  });
+
+  it("falls back to process adapterType when neither adapterDefaults nor per-agent adapter.type is present", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    const files = {
+      "COMPANY.md": ['---', 'schema: "agentcompanies/v1"', 'name: "Imported Co"', "---", ""].join("\n"),
+      "agents/alpha/AGENTS.md": ["---", 'name: "Alpha"', "---", "", "Alpha body.", ""].join("\n"),
+      ".paperclip.yaml": [
+        "schema: paperclip/v1",
+        "agents:",
+        "  alpha:",
+        '    role: "engineer"',
+        "",
+      ].join("\n"),
+    };
+
+    const preview = await portability.previewImport({
+      source: { type: "inline", rootPath: "co-demo", files },
+      include: { company: true, agents: true, projects: false, issues: false, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Co" },
+      agents: "all",
+      collisionStrategy: "rename",
+    });
+
+    const alpha = preview.manifest.agents.find((a) => a.slug === "alpha");
+    expect(alpha?.adapterType).toBe("process");
+    expect(alpha?.adapterConfig).toEqual({});
+  });
+
+  it("round-trips the slimmed pharmia .paperclip.yaml: every agent resolves to the shared claude_local adapter + its model", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    const yamlPath = path.resolve(moduleDir, "../../../templates/pharmia/.paperclip.yaml");
+    const yaml = await fs.readFile(yamlPath, "utf8");
+
+    // Expected per-agent model (verbatim from the pre-DRY .paperclip.yaml). If a model
+    // value changes intentionally, update it here; an accidental adapter regression in the
+    // shorthand/defaults wiring will fail this test instead of shipping silently.
+    const expectedModels: Record<string, string> = {
+      ceo: "claude-opus-4-6",
+      "bug-hunter": "claude-opus-4-6",
+      devops: "claude-sonnet-4-6",
+      e2e: "claude-sonnet-4-6",
+      "engineering-lead": "claude-opus-4-6",
+      implementer: "claude-sonnet-4-6",
+      "quebec-legal": "claude-opus-4-6",
+      "pharmacy-lead": "claude-opus-4-6",
+      reflect: "claude-opus-4-6",
+      planner: "claude-opus-4-6",
+      researcher: "claude-sonnet-4-6",
+      reviewer: "claude-opus-4-6",
+      "security-agent": "claude-sonnet-4-6",
+      "ai-product-observer": "claude-opus-4-6",
+      "clinical-flow-observer": "claude-opus-4-6",
+      "platform-observer": "claude-opus-4-6",
+      "growth-lead": "claude-opus-4-6",
+      "market-intel": "claude-opus-4-6",
+      "lead-scout": "claude-opus-4-6",
+      content: "claude-opus-4-6",
+      "signup-ingest": "claude-sonnet-4-6",
+      "booking-ingest": "claude-sonnet-4-6",
+      "translate-fr": "claude-sonnet-4-6",
+    };
+
+    const files: Record<string, string> = {
+      "COMPANY.md": ['---', 'schema: "agentcompanies/v1"', 'name: "Pharmia"', "---", ""].join("\n"),
+      ".paperclip.yaml": yaml,
+    };
+    for (const slug of Object.keys(expectedModels)) {
+      files[`agents/${slug}/AGENTS.md`] = ["---", `name: "${slug}"`, "---", "", `${slug} body.`, ""].join("\n");
+    }
+
+    const preview = await portability.previewImport({
+      source: { type: "inline", rootPath: "pharmia", files },
+      include: { company: true, agents: true, projects: false, issues: false, skills: false },
+      target: { mode: "new_company", newCompanyName: "Pharmia" },
+      agents: "all",
+      collisionStrategy: "rename",
+    });
+
+    expect(preview.errors).toEqual([]);
+    expect(preview.manifest.agents).toHaveLength(Object.keys(expectedModels).length);
+    for (const agent of preview.manifest.agents) {
+      expect(agent.adapterType, agent.slug).toBe("claude_local");
+      expect(agent.adapterConfig, agent.slug).toEqual({
+        dangerouslySkipPermissions: true,
+        model: expectedModels[agent.slug],
+      });
+    }
   });
 });

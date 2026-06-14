@@ -2616,6 +2616,11 @@ function buildManifestFromPackageFiles(
   const paperclipCompany = isPlainRecord(paperclipExtension.company) ? paperclipExtension.company : {};
   const paperclipSidebar = normalizePortableSidebarOrder(paperclipExtension.sidebar);
   const paperclipAgents = isPlainRecord(paperclipExtension.agents) ? paperclipExtension.agents : {};
+  // Optional company-level adapter defaults: agents that omit `adapter`/`type` inherit
+  // these, so the source package can declare the shared adapter once instead of per agent.
+  const adapterDefaults = isPlainRecord(paperclipExtension.adapterDefaults) ? paperclipExtension.adapterDefaults : null;
+  const adapterDefaultsType = asString(adapterDefaults?.type);
+  const adapterDefaultsConfig = isPlainRecord(adapterDefaults?.config) ? adapterDefaults.config : {};
   const paperclipProjects = isPlainRecord(paperclipExtension.projects) ? paperclipExtension.projects : {};
   const paperclipTasks = isPlainRecord(paperclipExtension.tasks) ? paperclipExtension.tasks : {};
   const paperclipRoutines = isPlainRecord(paperclipExtension.routines) ? paperclipExtension.routines : {};
@@ -2724,9 +2729,16 @@ function buildManifestFromPackageFiles(
     const extensionRuntime = isPlainRecord(extension.runtime) ? extension.runtime : null;
     const extensionPermissions = isPlainRecord(extension.permissions) ? extension.permissions : null;
     const extensionMetadata = isPlainRecord(extension.metadata) ? extension.metadata : null;
-    const adapterConfig = isPlainRecord(extensionAdapter?.config)
-      ? extensionAdapter.config
-      : {};
+    // Precedence (least → most specific): company adapterDefaults.config, then the agent's
+    // explicit adapter.config, then the `model:` shorthand — the shorthand only fills `model`
+    // when an explicit adapter.config.model is absent, so a full adapter block always wins.
+    const extensionAdapterConfig = isPlainRecord(extensionAdapter?.config) ? extensionAdapter.config : {};
+    const modelShorthand = asString(extension.model);
+    const adapterConfig: Record<string, unknown> = {
+      ...adapterDefaultsConfig,
+      ...extensionAdapterConfig,
+      ...(modelShorthand && !hasOwn(extensionAdapterConfig, "model") ? { model: modelShorthand } : {}),
+    };
     const runtimeConfig = extensionRuntime ?? {};
     const title = asString(frontmatter.title);
 
@@ -2742,7 +2754,7 @@ function buildManifestFromPackageFiles(
       reportsToSlug: asString(frontmatter.reportsTo) ?? asString(extension.reportsTo),
       reportsToExistingAgentId: asString(extension.reportsToExistingAgentId),
       reportsToExistingAgentSlug: asString(extension.reportsToExistingAgentSlug),
-      adapterType: asString(extensionAdapter?.type) ?? "process",
+      adapterType: asString(extensionAdapter?.type) ?? adapterDefaultsType ?? "process",
       adapterConfig,
       runtimeConfig,
       permissions: extensionPermissions ?? {},

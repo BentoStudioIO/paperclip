@@ -1,166 +1,81 @@
 schema: "paperclip/v1"
+# Every agent below uses the same claude_local adapter; declare it once here and let
+# each agent override only its model via the `model:` shorthand. Any agent needing a
+# different adapter can still add an explicit `adapter:` block (it overrides these).
+adapterDefaults:
+  type: "claude_local"
+  config:
+    dangerouslySkipPermissions: true
 agents:
   ceo:
     role: "ceo"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   bug-hunter:
     role: "qa"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   devops:
     role: "devops"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-sonnet-4-6"
-      type: "claude_local"
+    model: "claude-sonnet-4-6"
   e2e:
     role: "qa"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-sonnet-4-6"
-      type: "claude_local"
+    model: "claude-sonnet-4-6"
   engineering-lead:
     role: "cto"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   implementer:
     role: "engineer"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-sonnet-4-6"
-      type: "claude_local"
+    model: "claude-sonnet-4-6"
   quebec-legal:
     role: "legal"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   pharmacy-lead:
     role: "pharmacy"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   reflect:
     role: "meta"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   planner:
     role: "pm"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   researcher:
     role: "researcher"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-sonnet-4-6"
-      type: "claude_local"
+    model: "claude-sonnet-4-6"
   reviewer:
     role: "qa"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   security-agent:
     role: "security"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-sonnet-4-6"
-      type: "claude_local"
+    model: "claude-sonnet-4-6"
   ai-product-observer:
     role: "observer"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   clinical-flow-observer:
     role: "observer"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   platform-observer:
     role: "observer"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   growth-lead:
     role: "cmo"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   market-intel:
     role: "analyst"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   lead-scout:
     role: "sdr"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   content:
     role: "marketing"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-opus-4-6"
-      type: "claude_local"
+    model: "claude-opus-4-6"
   signup-ingest:
     role: "sdr"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-sonnet-4-6"
-      type: "claude_local"
+    model: "claude-sonnet-4-6"
   booking-ingest:
     role: "sdr"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-sonnet-4-6"
-      type: "claude_local"
+    model: "claude-sonnet-4-6"
   translate-fr:
     role: "analyst"
-    adapter:
-      config:
-        dangerouslySkipPermissions: true
-        model: "claude-sonnet-4-6"
-      type: "claude_local"
+    model: "claude-sonnet-4-6"
 company:
   attachmentMaxBytes: 10485760
 routines:
