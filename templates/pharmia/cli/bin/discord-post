@@ -11,10 +11,13 @@
 #
 # Usage:
 #   discord-post <channelId> "<message>"     post a message (chunked if >2000 chars)
+#   discord-post <channelId> "<caption>" --image proof.png [--image more.png]
 #   discord-post --help
 #
 # Reads the message from the 2nd arg, or from stdin if the 2nd arg is "-".
 # Messages longer than Discord's 2000-char limit are split into multiple posts.
+# --image/--file attaches a local file (screenshot proof, etc.) via multipart;
+# the first post carries the attachments, any overflow text follows as plain posts.
 set -euo pipefail
 
 API="https://discord.com/api/v10"
@@ -24,14 +27,16 @@ usage() {
   cat <<'EOF'
 Usage: discord-post <channelId> "<message>"
        discord-post <channelId> -        (read message from stdin)
+       discord-post <channelId> "<caption>" --image /path/proof.png
 
 Posts a message to a Discord channel as the bot. Long messages (>2000 chars)
-are split into multiple sequential posts.
+are split into multiple sequential posts. Attach files with --image.
 
 Auth: requires $DISCORD_BOT_TOKEN (the Paperclip bot token). Fail-closed.
 
 Flags:
-  --help    Show this help.
+  --image <path>  Attach a local file (repeatable). Aliased as --file.
+  --help          Show this help.
 EOF
   exit "${1:-1}"
 }
@@ -41,17 +46,37 @@ EOF
 command -v jq   >/dev/null || { echo "discord-post: jq is required" >&2; exit 2; }
 command -v curl >/dev/null || { echo "discord-post: curl is required" >&2; exit 2; }
 
+# Separate --image/--file attachments from positional args (channel + message).
+IMAGES=()
+POS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --image|--file)
+      shift
+      [[ -n "${1:-}" ]] || { echo "discord-post: --image needs a path" >&2; exit 1; }
+      [[ -f "$1" ]]     || { echo "discord-post: attachment not found: $1" >&2; exit 1; }
+      IMAGES+=("$1") ;;
+    --help|-h) usage 0 ;;
+    *) POS+=("$1") ;;
+  esac
+  shift
+done
+set -- "${POS[@]}"
+
 CHANNEL_ID="${1:-}"
 [[ -n "$CHANNEL_ID" ]] || { echo "discord-post: missing <channelId>" >&2; usage 1; }
 [[ "$CHANNEL_ID" =~ ^[0-9]+$ ]] || { echo "discord-post: channelId must be a numeric Discord snowflake (got: $CHANNEL_ID)" >&2; exit 1; }
 
-# Message: 2nd arg, or stdin when 2nd arg is "-" / omitted.
-if [[ "${2:-}" == "-" || $# -lt 2 ]]; then
+# Message: explicit "-" reads stdin; otherwise the 2nd positional (which may be
+# empty when an --image attachment carries the post).
+if [[ "${2:-}" == "-" ]]; then
   MESSAGE="$(cat)"
 else
-  MESSAGE="$2"
+  MESSAGE="${2:-}"
 fi
-[[ -n "$MESSAGE" ]] || { echo "discord-post: empty message" >&2; exit 1; }
+if [[ -z "$MESSAGE" && ${#IMAGES[@]} -eq 0 ]]; then
+  echo "discord-post: empty message (and no --image attachment)" >&2; exit 1
+fi
 
 TOKEN="${DISCORD_BOT_TOKEN:-}"
 [[ -n "$TOKEN" ]] || { echo "discord-post: \$DISCORD_BOT_TOKEN is not set — cannot authenticate as the bot" >&2; exit 1; }
@@ -73,9 +98,32 @@ post_chunk() {
   rm -f /tmp/discord-post.$$
 }
 
+# Post a chunk plus all --image attachments as one multipart message. curl's -F
+# builds multipart/form-data; payload_json carries the (escaped) content.
+post_with_images() {
+  local chunk="$1" code i=0
+  local args=(-sS -o /tmp/discord-post.$$ -w '%{http_code}'
+              -X POST "$API/channels/$CHANNEL_ID/messages"
+              -H "Authorization: Bot $TOKEN"
+              -F "payload_json=$(jq -nc --arg c "$chunk" '{content: $c}')")
+  for img in "${IMAGES[@]}"; do
+    args+=(-F "files[$i]=@$img")
+    i=$((i + 1))
+  done
+  code="$(curl "${args[@]}")"
+  if [[ "$code" != "200" && "$code" != "201" ]]; then
+    echo "discord-post: image POST failed (HTTP $code): $(cat /tmp/discord-post.$$ 2>/dev/null)" >&2
+    rm -f /tmp/discord-post.$$
+    return 1
+  fi
+  rm -f /tmp/discord-post.$$
+}
+
 # Split into <=LIMIT-char chunks (split on the last newline within the window
-# when possible, else hard-split). Posts each chunk in order.
+# when possible, else hard-split). Posts each chunk in order; any --image
+# attachments ride on the first post.
 posted=0
+first=1
 rest="$MESSAGE"
 while [[ -n "$rest" ]]; do
   if (( ${#rest} <= LIMIT )); then
@@ -89,8 +137,23 @@ while [[ -n "$rest" ]]; do
     rest="${rest:${#chunk}}"
     rest="${rest#$'\n'}"   # drop a leading newline left by the split
   fi
-  post_chunk "$chunk"
+  if [[ $first -eq 1 && ${#IMAGES[@]} -gt 0 ]]; then
+    post_with_images "$chunk"
+  else
+    post_chunk "$chunk"
+  fi
+  first=0
   posted=$((posted + 1))
 done
 
-echo "discord-post: posted $posted message(s) to channel $CHANNEL_ID"
+# Attachment(s) with no text caption: still post them once.
+if [[ $posted -eq 0 && ${#IMAGES[@]} -gt 0 ]]; then
+  post_with_images ""
+  posted=1
+fi
+
+if [[ ${#IMAGES[@]} -gt 0 ]]; then
+  echo "discord-post: posted $posted message(s) with ${#IMAGES[@]} attachment(s) to channel $CHANNEL_ID"
+else
+  echo "discord-post: posted $posted message(s) to channel $CHANNEL_ID"
+fi
