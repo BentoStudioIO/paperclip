@@ -48,6 +48,7 @@ All references are lifted from MIT-licensed skill packs; notices retained in `re
 - Clinical/regulatory claims → route to **quebec-legal** (verbatim source) BEFORE writing around them.
 
 ## Publish (human-approved only)
-WordPress via `wp` over `ssh momo`: SCP HTML → `wp post update <ID> /tmp/file.html` (positional arg, never
-`--post_content`, never pipe HTML through shell) → touch `post_modified` to trigger Next.js ISR. Draft by
-default; the human approves every publish.
+WordPress at `wp.pharmia.ca` (Bento prod; the `ssh momo` box is retired) via the **`wp-pharmia`** CLI
+(REST + Application Password): `wp-pharmia draft --title "…" --content-file article.html` → returns the post
+`id` + a `review_url`. Publish only when approved: `wp-pharmia publish <id>` (the `next-revalidate` plugin
+triggers Next.js ISR). Draft by default; the human approves every publish.

@@ -21,7 +21,7 @@ Run the WEEKLY GROWTH BRIEF now, autonomously, against canary. Orchestrate marke
 ## Remediation policy
 
 - **Proactive — fix in-run, no approval (docs + tooling ONLY):** paperclip growth skill/task SSOT (stale query, dead source URL, broken CSS selector), CLI scripts in `~/.local/bin` (`pg`/`threads`/`twenty`/`bx` gaps), the `growth-ssot.md` baselines. Fix at source, verify (200 / query runs / re-fetch), list under **Remediated**.
-- **Ask first — propose, do NOT ship:** any `PharmaMate` repo change, any outbound (DMs, `wp` publishes over `ssh momo` are human-approved only), any Twenty write beyond qualified opportunities. List under **Needs approval** and stop. NEVER send a DM, publish, or push a branch from this task.
+- **Ask first — propose, do NOT ship:** any `PharmaMate` repo change, any outbound (DMs, `wp-pharmia` publishes are human-approved only), any Twenty write beyond qualified opportunities. List under **Needs approval** and stop. NEVER send a DM, publish, or push a branch from this task.
 
 ## Output — terse, one line per item (no prose paragraphs; omit empty sections)
 

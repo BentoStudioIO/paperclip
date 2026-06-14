@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""wp-pharmia — WordPress REST publishing for the Pharmia SEO agent.
+
+Talks to the headless WordPress at wp.pharmia.ca over the REST API using an
+Application Password (no SSH, no wp-cli — the prod WP image has neither, and the
+agents VPS is read-only on prod). This is the durable replacement for the old
+`wp` over `ssh momo` pattern (momo is decommissioned).
+
+Credential resolution (first that exists wins):
+  1. env vars WP_BASE / WP_APP_USER / WP_APP_PASSWORD
+  2. $WP_PHARMIA_CONFIG  (path to an env-style file)
+  3. ~/.config/pharmia-wp/seo-bot.env
+
+Default contract: DRAFTS. The SEO routine drafts by default and a human approves;
+`publish` exists for "publish when needed". The bot user is role=editor.
+
+Examples:
+  wp-pharmia whoami
+  wp-pharmia draft --title "Titre FR" --content-file article.html --excerpt "..." --slug mon-article
+  wp-pharmia draft --title "Titre" --content "<p>...</p>" --tags 12,15 --categories 3
+  wp-pharmia publish 178                     # flip an existing draft live
+  wp-pharmia update 178 --content-file v2.html
+  wp-pharmia get 178 | wp-pharmia list --status draft
+  wp-pharmia media cover.jpg --title "Cover" # -> media id for --featured-media
+  wp-pharmia review-url 178                  # where a human can review the draft
+  wp-pharmia delete 178
+"""
+import argparse, base64, json, os, sys, urllib.request, urllib.error, urllib.parse
+
+CONFIG_DEFAULT = os.path.expanduser("~/.config/pharmia-wp/seo-bot.env")
+
+
+def load_creds():
+    cfg = {}
+    path = os.environ.get("WP_PHARMIA_CONFIG", CONFIG_DEFAULT)
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip().strip('"').strip("'")
+    base = os.environ.get("WP_BASE", cfg.get("WP_BASE", "https://wp.pharmia.ca")).rstrip("/")
+    user = os.environ.get("WP_APP_USER", cfg.get("WP_APP_USER", ""))
+    pw = os.environ.get("WP_APP_PASSWORD", cfg.get("WP_APP_PASSWORD", ""))
+    if not user or not pw:
+        sys.exit(f"wp-pharmia: missing WP_APP_USER/WP_APP_PASSWORD (env or {path})")
+    return base, user, pw.replace(" ", "")  # app passwords are shown space-separated
+
+
+def api(method, path, base, user, pw, body=None):
+    url = base + path if path.startswith("/") else base + "/" + path
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode())
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        resp = urllib.request.urlopen(req, timeout=60)
+        raw = resp.read().decode("utf-8", "replace")
+        # WordPress occasionally emits raw control chars in rendered fields -> strict=False
+        return resp.status, (json.loads(raw, strict=False) if raw.strip() else None)
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        try:
+            return e.code, json.loads(raw, strict=False)
+        except Exception:
+            return e.code, {"error": raw[:500]}
+
+
+def read_content(args):
+    if getattr(args, "content_file", None):
+        with open(args.content_file) as f:
+            return f.read()
+    return getattr(args, "content", None)
+
+
+def post_payload(args, default_status):
+    p = {}
+    if getattr(args, "title", None) is not None:
+        p["title"] = args.title
+    c = read_content(args)
+    if c is not None:
+        p["content"] = c
+    for k in ("excerpt", "slug"):
+        v = getattr(args, k, None)
+        if v is not None:
+            p[k] = v
+    if getattr(args, "featured_media", None):
+        p["featured_media"] = int(args.featured_media)
+    for k in ("tags", "categories"):
+        v = getattr(args, k, None)
+        if v:
+            p[k] = [int(x) for x in str(v).split(",") if x.strip()]
+    p["status"] = getattr(args, "status", None) or default_status
+    return p
+
+
+def out(status, obj, fields=("id", "status", "slug", "link")):
+    if isinstance(obj, dict) and "id" in obj:
+        slim = {k: obj.get(k) for k in fields}
+        slim["review_url"] = None  # filled by caller where useful
+        print(json.dumps({k: v for k, v in slim.items() if v is not None}, ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(obj, ensure_ascii=False, indent=2))
+    if status >= 400:
+        sys.exit(1)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="wp-pharmia", description="WordPress REST publishing for the Pharmia SEO agent.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("whoami", help="verify the credential (GET /users/me)")
+
+    def add_post_args(sp):
+        sp.add_argument("--title")
+        g = sp.add_mutually_exclusive_group()
+        g.add_argument("--content", help="inline HTML body")
+        g.add_argument("--content-file", help="path to an HTML file")
+        sp.add_argument("--excerpt")
+        sp.add_argument("--slug")
+        sp.add_argument("--tags", help="comma-separated tag IDs")
+        sp.add_argument("--categories", help="comma-separated category IDs")
+        sp.add_argument("--featured-media", dest="featured_media", help="media ID for the featured image")
+        sp.add_argument("--status", choices=["draft", "pending", "publish", "private"])
+
+    d = sub.add_parser("draft", help="create a DRAFT post (default workflow)")
+    add_post_args(d)
+    p = sub.add_parser("publish", help="create-and-publish, or publish an existing draft by id")
+    p.add_argument("id", nargs="?", help="existing post id to flip to publish")
+    add_post_args(p)
+    u = sub.add_parser("update", help="update an existing post by id")
+    u.add_argument("id")
+    add_post_args(u)
+
+    g = sub.add_parser("get", help="fetch one post (authored context)")
+    g.add_argument("id")
+    li = sub.add_parser("list", help="list posts")
+    li.add_argument("--status", default="draft,publish,pending")
+    li.add_argument("--search")
+    li.add_argument("--per-page", default="20")
+
+    m = sub.add_parser("media", help="upload a media file, returns its id")
+    m.add_argument("file")
+    m.add_argument("--title")
+
+    r = sub.add_parser("review-url", help="print where a human can review a draft (wp-admin)")
+    r.add_argument("id")
+
+    dl = sub.add_parser("delete", help="delete a post (force)")
+    dl.add_argument("id")
+
+    args = ap.parse_args()
+    base, user, pw = load_creds()
+
+    def review_url(pid):
+        return f"{base}/wp-admin/post.php?post={pid}&action=edit"
+
+    if args.cmd == "whoami":
+        st, o = api("GET", "/wp-json/wp/v2/users/me?context=edit", base, user, pw)
+        print(json.dumps({"status": st, "user": (o or {}).get("slug"), "id": (o or {}).get("id"),
+                          "roles": (o or {}).get("roles"), "base": base}, ensure_ascii=False, indent=2))
+        sys.exit(0 if st == 200 else 1)
+
+    if args.cmd in ("draft", "publish") and not getattr(args, "id", None):
+        default = "publish" if args.cmd == "publish" else "draft"
+        st, o = api("POST", "/wp-json/wp/v2/posts", base, user, pw, post_payload(args, default))
+        if isinstance(o, dict) and o.get("id"):
+            o2 = {"id": o["id"], "status": o.get("status"), "slug": o.get("slug"),
+                  "link": o.get("link"), "review_url": review_url(o["id"])}
+            print(json.dumps(o2, ensure_ascii=False, indent=2))
+            sys.exit(0 if st < 400 else 1)
+        out(st, o)
+    elif args.cmd in ("publish", "update"):
+        body = post_payload(args, "publish" if args.cmd == "publish" else None)
+        if args.cmd == "publish":
+            body["status"] = "publish"
+        body = {k: v for k, v in body.items() if v is not None}
+        st, o = api("POST", f"/wp-json/wp/v2/posts/{args.id}", base, user, pw, body)
+        if isinstance(o, dict) and o.get("id"):
+            print(json.dumps({"id": o["id"], "status": o.get("status"), "link": o.get("link"),
+                              "review_url": review_url(o["id"])}, ensure_ascii=False, indent=2))
+            sys.exit(0 if st < 400 else 1)
+        out(st, o)
+    elif args.cmd == "get":
+        st, o = api("GET", f"/wp-json/wp/v2/posts/{args.id}?context=edit", base, user, pw)
+        out(st, o)
+    elif args.cmd == "list":
+        q = f"/wp-json/wp/v2/posts?status={args.status}&per_page={args.per_page}&context=edit&_fields=id,slug,status,title,link,date"
+        if args.search:
+            q += "&search=" + urllib.parse.quote(args.search)
+        st, o = api("GET", q, base, user, pw)
+        print(json.dumps(o, ensure_ascii=False, indent=2))
+        sys.exit(0 if st < 400 else 1)
+    elif args.cmd == "media":
+        with open(args.file, "rb") as f:
+            blob = f.read()
+        fn = os.path.basename(args.file)
+        req = urllib.request.Request(base + "/wp-json/wp/v2/media", data=blob, method="POST")
+        req.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode())
+        req.add_header("Content-Disposition", f'attachment; filename="{fn}"')
+        req.add_header("Content-Type", "application/octet-stream")
+        try:
+            resp = urllib.request.urlopen(req, timeout=120)
+            o = json.loads(resp.read().decode("utf-8", "replace"), strict=False)
+            print(json.dumps({"id": o.get("id"), "source_url": o.get("source_url")}, ensure_ascii=False, indent=2))
+        except urllib.error.HTTPError as e:
+            print(e.read().decode("utf-8", "replace")[:500]); sys.exit(1)
+    elif args.cmd == "review-url":
+        print(review_url(args.id))
+    elif args.cmd == "delete":
+        st, o = api("DELETE", f"/wp-json/wp/v2/posts/{args.id}?force=true", base, user, pw)
+        print(json.dumps({"deleted": (o or {}).get("deleted"), "status": st}, ensure_ascii=False))
+        sys.exit(0 if st < 400 else 1)
+
+
+if __name__ == "__main__":
+    main()

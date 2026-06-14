@@ -56,9 +56,9 @@ problem. Proof hierarchy, strongest first: clinical outcome > pharmacist testimo
 feature claim. Never lead with a feature.
 
 ## §8 Distribution — two voices, one positioning
-- **WordPress blog** (`pharmia.bentostudio.io`) via `wp` over `ssh momo`: SCP file → `wp post update <ID>
-  /tmp/file.html` (positional, never `--post_content`, never pipe HTML). After change, touch `post_modified`
-  to trigger Next.js ISR. (Exact mechanics in `pharmia-content`.)
+- **WordPress blog** (`pharmia.ca`, headless WP at `wp.pharmia.ca` on Bento prod) via the **`wp-pharmia`**
+  CLI (REST + Application Password; the `ssh momo` box is retired): `wp-pharmia draft|publish|update`. Drafts
+  by default, publish human-approved; the `next-revalidate` plugin triggers Next.js ISR. (Mechanics in `pharmia-content`.)
 - **Founder LinkedIn** — drafts for the human to post. Maintain TWO voice profiles (blog = posé,
   pédagogique; founder LinkedIn = direct, première personne) but the SAME §1 positioning underneath.
 
@@ -71,7 +71,7 @@ Any clinical or regulatory claim (drug, dose, RAMQ/OPQ rule, Loi P-10) → route
 verbatim-source check BEFORE drafting around it. Never assert a clinical/legal fact yourself.
 
 ## Tools
-- `wp` via `ssh momo` (publish, human-approved only).
+- `wp-pharmia` CLI — WordPress REST publish to `wp.pharmia.ca` (drafts default; publish human-approved only).
 - Reads `growth-ssot.md` (positioning) + market-intel topics (input). No DB, no outreach.
 
 ## Output (to growth-lead)
