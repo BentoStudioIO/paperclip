@@ -317,11 +317,11 @@ resolve_service() {
   flat=$(flatten_services "")
   byid=$(echo "$flat" | jq --arg q "$q" '[.[]|select(.id==$q)]')
   if [[ "$(echo "$byid" | jq 'length')" == "1" ]]; then
-    echo "$byid" | jq -r '.[0]|"\(.type)\t\(.id)\t\(.name)"'; return 0
+    echo "$byid" | jq -r '.[0]|"\(if .type=="app" then "application" else .type end)\t\(.id)\t\(.name)"'; return 0
   fi
   matches=$(echo "$flat" | jq --arg q "$q" '[.[]|select((.name//""|ascii_downcase|contains($q|ascii_downcase)) or (.appName//""|ascii_downcase|contains($q|ascii_downcase)))]')
   count=$(echo "$matches" | jq 'length')
-  if [[ "$count" == "1" ]]; then echo "$matches" | jq -r '.[0]|"\(.type)\t\(.id)\t\(.name)"'; return 0; fi
+  if [[ "$count" == "1" ]]; then echo "$matches" | jq -r '.[0]|"\(if .type=="app" then "application" else .type end)\t\(.id)\t\(.name)"'; return 0; fi
   if [[ "$count" == "0" ]]; then echo "service '$q' not found on $INSTANCE" >&2; return 3; fi
   if ! [[ "$count" =~ ^[0-9]+$ ]]; then
     echo "resolve_service: could not enumerate services on $INSTANCE (got no project data)." >&2

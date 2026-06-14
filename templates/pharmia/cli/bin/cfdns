@@ -277,16 +277,17 @@ case "$CMD" in
     ;;
 
   add)
-    [[ $# -lt 4 ]] && die "usage: cfdns add <zone-or-fqdn> <type> <name> <content> [--proxied [true|false]] [--ttl N] [--force-proxy] [--dry-run]"
+    [[ $# -lt 4 ]] && die "usage: cfdns add <zone-or-fqdn> <type> <name> <content> [--proxied [true|false]] [--ttl N] [--priority N] [--force-proxy] [--dry-run]"
     ZNAME=$(resolve_zone_name "$1")
     TYPE="$2"; NAME="$3"; CONTENT="$4"; shift 4
-    PROXIED=false; TTL=1; FORCE_PROXY=0; DRY_RUN=0
+    PROXIED=false; TTL=1; FORCE_PROXY=0; DRY_RUN=0; PRIORITY=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --proxied)
           _pv=$(_proxied_val "${2:-}")
           if [[ -n "$_pv" ]]; then PROXIED="$_pv"; shift 2; else PROXIED=true; shift; fi ;;
         --ttl) TTL="$2"; shift 2 ;;
+        --priority) PRIORITY="$2"; shift 2 ;;
         --force-proxy) FORCE_PROXY=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         *) die "unknown flag: $1" ;;
@@ -295,10 +296,13 @@ case "$CMD" in
     if [[ "$PROXIED" == "true" && $FORCE_PROXY -ne 1 ]]; then
       die "refusing --proxied: CLAUDE.md policy requires Cloudflare DNS to stay unproxied. Pass --force-proxy to override."
     fi
+    # MX/SRV need a priority; default MX to 10 when omitted (CF rejects MX without one).
+    if [[ "$TYPE" == "MX" && -z "$PRIORITY" ]]; then PRIORITY=10; echo "cfdns: MX without --priority -> defaulting priority=10" >&2; fi
     ZID=$(zone_id "$ZNAME")
     BODY=$(jq -cn --arg t "$TYPE" --arg n "$NAME" --arg c "$CONTENT" \
       --argjson p "$PROXIED" --argjson ttl "$TTL" \
       '{type:$t,name:$n,content:$c,proxied:$p,ttl:$ttl}')
+    [[ -n "$PRIORITY" ]] && BODY=$(jq -c --argjson pr "$PRIORITY" '. + {priority:$pr}' <<<"$BODY")
     if (( DRY_RUN )); then
       echo "[dry-run] POST /zones/$ZID/dns_records  $BODY"
       exit 0
