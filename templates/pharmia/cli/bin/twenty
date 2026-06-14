@@ -62,6 +62,7 @@ High-level commands (no hand-written GraphQL; run '<cmd> --help' for flags):
 Enums (discover live with 'twenty fields <obj>' + 'twenty meta'):
   person.source   PHARMIA_SIGNUP INBOUND_MEETING REFERRAL COLD SOCIAL EVENT PARTNER_REFERRAL
   person.group    PHARMACIST_OWNER PHARMACIST VC INFLUENCER MENTOR CLIENT SALES PARTNER
+  person.outreachStatus  NOT_CONTACTED CONTACTED INTERESTED MEETING_BOOKED IN_DISCUSSION CONVERTED NOT_INTERESTED
   opportunity.stage  NEW SCREENING MEETING PROPOSAL DONE CLIENT LATER
   task.status     TODO IN_PROGRESS PLANNED DONE WONT_DO WAITING LATER
 
@@ -476,7 +477,7 @@ EOF
         fi
         ;;
       upsert)
-        first=""; last=""; email=""; phone=""; city=""; jobTitle=""; source=""; tenant=""; group=""; group_set=0; pharmiaUserId=""
+        first=""; last=""; email=""; phone=""; city=""; jobTitle=""; source=""; tenant=""; group=""; group_set=0; pharmiaUserId=""; outreachStatus=""
         while [[ $# -gt 0 ]]; do
           case "$1" in
             --first)     first="$2"; shift 2 ;;
@@ -486,6 +487,7 @@ EOF
             --city)      city="$2"; shift 2 ;;
             --job-title) jobTitle="$2"; shift 2 ;;
             --source)    source="$2"; shift 2 ;;
+            --outreach-status) outreachStatus="$2"; shift 2 ;;
             --tenant)    tenant="$2"; shift 2 ;;
             --pharmia-user-id) pharmiaUserId="$2"; shift 2 ;;
             --group)     group="$2"; group_set=1; shift 2 ;;
@@ -502,6 +504,7 @@ Usage: twenty person upsert --email <email> [flags]
   --city <city>
   --job-title <title>
   --source <enum>       PHARMIA_SIGNUP INBOUND_MEETING REFERRAL COLD SOCIAL EVENT PARTNER_REFERRAL
+  --outreach-status <enum>  NOT_CONTACTED CONTACTED INTERESTED MEETING_BOOKED IN_DISCUSSION CONVERTED NOT_INTERESTED
   --tenant <slug>       pharmiaTenant
   --pharmia-user-id <id>  Pharmia better-auth user id (ba_user.id) — the CRM<->app
                         link. Set it when a person signs up to Pharmia/Atlas so
@@ -542,6 +545,7 @@ EOF
         # enum-as-string for SELECT fields (verified). `enum_fields` (inline) is
         # therefore unused; kept the JSON path as the single source of truth.
         [[ -n "$source" ]] && data=$(echo "$data" | jq --arg v "$source" '. + {source:$v}')
+        [[ -n "$outreachStatus" ]] && data=$(echo "$data" | jq --arg v "$outreachStatus" '. + {outreachStatus:$v}')
         if (( group_set )); then
           if [[ "$group" == "null" ]]; then data=$(echo "$data" | jq '. + {group:null}')
           else data=$(echo "$data" | jq --arg v "$group" '. + {group:$v}'); fi

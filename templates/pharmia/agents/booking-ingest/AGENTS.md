@@ -52,7 +52,7 @@ SOURCES (parallèle):
 TWENTY ACTIONS:
 
 A. LOOKUP Person par email (extrait de "Réservé par"):
-   twenty gql '{ people(filter: { emails: { primaryEmail: { eq: "<email>" } } }) { edges { node { id name { firstName lastName } source group city pointOfContactForOpportunities { id name stage closeDate } } } } }'
+   twenty gql '{ people(filter: { emails: { primaryEmail: { eq: "<email>" } } }) { edges { node { id name { firstName lastName } source group city outreachStatus pointOfContactForOpportunities { id name stage closeDate } } } } }'
 
 B. CREATE/UPDATE Person — utilise le raccourci `twenty person upsert` (create-or-update par email):
    - D'abord vérifie s'ils ont un compte Pharmia ET récupère l'id better-auth: `pg canary app "SELECT id, tenant FROM ba_user WHERE lower(email)='<email>'"`.
@@ -60,11 +60,13 @@ B. CREATE/UPDATE Person — utilise le raccourci `twenty person upsert` (create-
    - group: PHARMACIST_OWNER si propriétaire confirmé (OPQ + registre entreprises), PHARMACIST si juste licencié, null sinon.
    - jobTitle: "Pharmacien(ne) propriétaire" si proprio, sinon "Pharmacien(ne)" ou null.
    - city: ville de la pharmacie ou ville OPQ.
+   - outreachStatus: MEETING_BOOKED — un booking est une rencontre confirmée. Avance vers MEETING_BOOKED **uniquement** si le statut actuel (du LOOKUP étape A) ∈ {null, NOT_CONTACTED, CONTACTED, INTERESTED}. NE JAMAIS rétrograder un statut déjà plus avancé (IN_DISCUSSION, CONVERTED) ni ressusciter un NOT_INTERESTED — dans ces cas, omets `--outreach-status` (l'Opportunity MEETING reste créée/mise à jour comme d'habitude).
 
    twenty person upsert --email "<email>" --first "<Prénom>" --last "<Nom>" \
      --city "<ville>" --job-title "<titre>" --source INBOUND_MEETING \
-     [--pharmia-user-id "<ba_user.id>" --tenant "<slug>"]  --group <enum|null>
-   (Les flags entre [] seulement si la personne a un compte Pharmia. La commande imprime "created/updated <id>" — réutilise cet id pour l'Opportunity.)
+     [--pharmia-user-id "<ba_user.id>" --tenant "<slug>"]  --group <enum|null> \
+     --outreach-status MEETING_BOOKED
+   (Les flags entre [] seulement si la personne a un compte Pharmia. Omets `--outreach-status` si la règle de non-rétrogradation ci-dessus l'interdit. La commande imprime "created/updated <id>" — réutilise cet id pour l'Opportunity.)
 
 C. CREATE Opportunity (si pas déjà une active pour ce Person):
    twenty gql 'mutation { createOpportunity(data: { name: "<Prénom Nom> — <pharmacie ou ville>", stage: MEETING, closeDate: "<Start ISO>", pointOfContactId: "<personId>" }) { id name stage closeDate } }'
@@ -86,6 +88,7 @@ OUTPUT (poste UN message avec `discord-post <channelId> "…"` — channelId est
 ```
 
 RÈGLES STRICTES:
+- NE JAMAIS créer ou modifier un issue/tâche dans le board Paperclip. Tu es un watcher à un seul coup. Si tu es bloqué (input/outil/accès manquant), poste UNE ligne décrivant le blocage via `discord-post <channelId>` puis arrête. N'ouvre pas d'issue Paperclip.
 - AUCUNE narration ("Je vais checker OPQ...", "Maintenant je crée..."). Tu fais, tu rapportes.
 - AUCUN paragraphe. Faits compactés.
 - Si Move/Update et rien d'autre à signaler: "<Nom> meeting déplacé au <nouvelle date>, Opportunity mise à jour." (une ligne).
@@ -99,7 +102,10 @@ Opportunity. If an active Opportunity (stage MEETING or further) already exists 
 NOT create a second one — update the existing one (Moved/Updated) or skip (duplicate New Booking).
 `twenty person upsert --email` is itself email-idempotent. The engine's per-assignment cooldown
 suppresses rapid duplicate wakes; your own lookup-before-create is the durable guard against duplicate
-Opportunities/Notes (those mutations are NOT idempotent).
+Opportunities/Notes (those mutations are NOT idempotent). `outreachStatus` must never regress: only
+advance it to MEETING_BOOKED from {null, NOT_CONTACTED, CONTACTED, INTERESTED}, never overwrite a
+more-advanced stage (IN_DISCUSSION, CONVERTED) and never resurrect NOT_INTERESTED — omit
+`--outreach-status` in those cases.
 
 ## Anti-patterns
 
