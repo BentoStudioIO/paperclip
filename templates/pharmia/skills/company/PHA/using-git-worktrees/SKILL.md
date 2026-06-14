@@ -215,4 +215,6 @@ Ready to implement auth feature
 - Any skill needing isolated workspace
 
 **Pairs with:**
-- **finishing-a-development-branch** - REQUIRED for cleanup after work complete
+- **finishing-a-development-branch** - REQUIRED for cleanup after work complete. A worktree you create is task-scoped: tear it down (`git worktree remove` + `prune`) and delete its branch when done — a leftover worktree at task end is incomplete work, not a convenience.
+
+<!-- Evolution: 2026-06-14 | evidence: same incident — abandoned isolation:worktree spikes. The create gate's teardown pointer was advisory; it didn't convey that a leftover worktree is a defect. | strengthened the finishing-a-development-branch pairing to state teardown is required and a leftover = incomplete work. -->

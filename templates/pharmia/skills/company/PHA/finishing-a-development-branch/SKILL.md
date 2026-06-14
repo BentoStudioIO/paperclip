@@ -107,9 +107,11 @@ Then: Cleanup worktree (Step 5)
 
 #### Option 3: Keep As-Is
 
-Report: "Keeping branch <name>. Worktree preserved at <path>."
+Only when work is genuinely incomplete and will resume in THIS branch, with a real owner who returns to it. Not a parking spot for finished work — finished work takes Option 1 or 2; abandoned work takes Option 4.
 
-**Don't cleanup worktree.**
+Report: "Keeping branch <name>, worktree at <path> — work in progress, will resume."
+
+**Don't cleanup worktree.** For an autonomous agent with no "later," a kept branch/worktree IS abandonment — choose Option 1, 2, or 4 instead.
 
 #### Option 4: Discard
 
@@ -149,13 +151,24 @@ git worktree remove <worktree-path>
 
 **For Option 3:** Keep worktree.
 
+### Step 6: No Stale Artifacts (definition of done)
+
+Worktrees and branches are encouraged for isolation — but they are task-scoped, not durable. At completion, the repo must carry no artifact you created that no longer has an owner:
+
+- **Worth keeping → commit on a named branch** (push if durability matters). Never leave worth-keeping work as a dangling stash or an orphaned worktree.
+- **Stashes:** prefer a commit on a named branch over `git stash`; drop any stash you created (`git stash drop`) — a stash is a private, unlabelled buffer, not a handoff.
+- **Branches:** delete once merged (Option 1) or abandoned (Option 4); don't leave dead WIP branches.
+- **Worktrees:** `git worktree remove <path>` then `git worktree prune`.
+
+An orphaned worktree, an un-merged abandoned branch, or a leftover stash at task end is **incomplete work** — a defect to resolve before declaring done.
+
 ## Quick Reference
 
 | Option | Merge | Push | Keep Worktree | Cleanup Branch |
 |--------|-------|------|---------------|----------------|
 | 1. Merge locally | ✓ | - | - | ✓ |
 | 2. Create PR | - | ✓ | ✓ | - |
-| 3. Keep as-is | - | - | ✓ | - |
+| 3. Keep as-is (WIP only) | - | - | ✓ | - |
 | 4. Discard | - | - | - | ✓ (force) |
 
 ## Common Mistakes
@@ -189,6 +202,7 @@ git worktree remove <worktree-path>
 - Present exactly 4 options
 - Get typed confirmation for Option 4
 - Clean up worktree for Options 1 & 4 only
+- Leave no stale artifact you created — orphaned worktree, dead branch, or stray stash = incomplete work
 
 ## Integration
 
@@ -198,3 +212,5 @@ git worktree remove <worktree-path>
 
 **Pairs with:**
 - **using-git-worktrees** - Cleans up worktree created by that skill
+
+<!-- Evolution: 2026-06-14 | evidence: a local PharmaMate clone had accumulated 3 worktrees (2 abandoned isolation:worktree spikes), 21 stale stashes (labelled "preserved before worktree removal"/"aborted"/"unrelated", ~2wk old), and dead WIP branches from prior autonomous sessions — no lost work, but it manufactured "did we drift?" confusion and cost a cleanup session. The teardown gate sanctioned abandonment: Option 3 was a consequence-free park-it option and no step pruned stashes or required deleting dead branches. | tightened Option 3 to WIP-only-with-owner; added Step 6 No Stale Artifacts (commit-not-stash; remove+prune worktree; delete dead branch; drop stashes; leftover = defect); added Red-Flags line. -->

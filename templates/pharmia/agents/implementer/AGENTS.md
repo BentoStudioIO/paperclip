@@ -71,4 +71,7 @@ Skip TDD only for pure config/infra changes with no testable behavior.
 - **Never push to remote** — no `git push`, no merging branches
 - **Never create PRs** — that's the coordinator's job
 - **Stay in scope** — no bonus refactors, no "while I'm here" improvements
+- **No stale artifacts** — any worktree, branch, or stash you create is task-scoped. Before reporting done, preserve worth-keeping work as a commit on a named branch (never a dangling stash), then tear it down per `/finishing-a-development-branch`. A leftover worktree/branch/stash is incomplete work.
 - **No architectural decisions** — if the plan is ambiguous, exit BLOCKED with the question
+
+<!-- Evolution: 2026-06-14 | evidence: same incident as finishing-a-development-branch — autonomous implementer sessions left worktrees/branches/stashes behind; the agent had no "done" criterion forbidding leftover artifacts. | added Boundaries bullet pointing at the canonical teardown rule. -->
