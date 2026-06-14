@@ -70,6 +70,17 @@ services:
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
       GITHUB_APP_PRIVATE_KEY_B64: ${GITHUB_APP_PRIVATE_KEY_B64:-}
+      # HashiCorp Vault — Paperclip secret provider for machine/dev secrets (Vaultwarden stays for
+      # human logins, outside the app). Defaults keep the local_encrypted provider when Vault env is
+      # unset, so this is safe in any environment. AppRole creds + addr live in Dokploy env only,
+      # never the repo. See server/src/secrets/hashicorp-vault-provider.ts + doc/SECRETS-VAULT-PROVIDER.md.
+      PAPERCLIP_SECRETS_PROVIDER: ${PAPERCLIP_SECRETS_PROVIDER:-local_encrypted}
+      VAULT_ADDR: ${VAULT_ADDR:-}
+      VAULT_KV_MOUNT: ${VAULT_KV_MOUNT:-secret}
+      VAULT_NAMESPACE: ${VAULT_NAMESPACE:-}
+      PAPERCLIP_SECRETS_VAULT_PREFIX: ${PAPERCLIP_SECRETS_VAULT_PREFIX:-paperclip}
+      VAULT_APPROLE_ROLE_ID: ${VAULT_APPROLE_ROLE_ID:-}
+      VAULT_APPROLE_SECRET_ID: ${VAULT_APPROLE_SECRET_ID:-}
     volumes:
       - paperclip-data:/paperclip
     depends_on:
