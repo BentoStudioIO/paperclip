@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# discord-post — post a message to a Discord channel as the Paperclip bot.
+#
+# The back-post path for assignment-awoken agents: an agent woken by a Discord
+# `/clip assign` match has no other way to return its result to the channel
+# (`ctx.agents.invoke` is fire-and-forget). It posts here.
+#
+# Auth: reads the bot token from $DISCORD_BOT_TOKEN (NEVER hardcoded — wired by
+# provision-agent-identity.sh via env-only ensure_secret). Fail-closed: exits
+# non-zero with a clear message if the token is unset.
+#
+# Usage:
+#   discord-post <channelId> "<message>"     post a message (chunked if >2000 chars)
+#   discord-post --help
+#
+# Reads the message from the 2nd arg, or from stdin if the 2nd arg is "-".
+# Messages longer than Discord's 2000-char limit are split into multiple posts.
+set -euo pipefail
+
+API="https://discord.com/api/v10"
+LIMIT=2000   # Discord per-message content cap
+
+usage() {
+  cat <<'EOF'
+Usage: discord-post <channelId> "<message>"
+       discord-post <channelId> -        (read message from stdin)
+
+Posts a message to a Discord channel as the bot. Long messages (>2000 chars)
+are split into multiple sequential posts.
+
+Auth: requires $DISCORD_BOT_TOKEN (the Paperclip bot token). Fail-closed.
+
+Flags:
+  --help    Show this help.
+EOF
+  exit "${1:-1}"
+}
+
+[[ $# -eq 0 || "${1:-}" == "--help" || "${1:-}" == "-h" ]] && usage 0
+
+command -v jq   >/dev/null || { echo "discord-post: jq is required" >&2; exit 2; }
+command -v curl >/dev/null || { echo "discord-post: curl is required" >&2; exit 2; }
+
+CHANNEL_ID="${1:-}"
+[[ -n "$CHANNEL_ID" ]] || { echo "discord-post: missing <channelId>" >&2; usage 1; }
+[[ "$CHANNEL_ID" =~ ^[0-9]+$ ]] || { echo "discord-post: channelId must be a numeric Discord snowflake (got: $CHANNEL_ID)" >&2; exit 1; }
+
+# Message: 2nd arg, or stdin when 2nd arg is "-" / omitted.
+if [[ "${2:-}" == "-" || $# -lt 2 ]]; then
+  MESSAGE="$(cat)"
+else
+  MESSAGE="$2"
+fi
+[[ -n "$MESSAGE" ]] || { echo "discord-post: empty message" >&2; exit 1; }
+
+TOKEN="${DISCORD_BOT_TOKEN:-}"
+[[ -n "$TOKEN" ]] || { echo "discord-post: \$DISCORD_BOT_TOKEN is not set — cannot authenticate as the bot" >&2; exit 1; }
+
+# Post a single chunk; jq builds the JSON body so content is correctly escaped.
+post_chunk() {
+  local chunk="$1" code
+  code="$(jq -n --arg c "$chunk" '{content: $c}' \
+    | curl -sS -o /tmp/discord-post.$$ -w '%{http_code}' \
+        -X POST "$API/channels/$CHANNEL_ID/messages" \
+        -H "Authorization: Bot $TOKEN" \
+        -H "Content-Type: application/json" \
+        --data-binary @-)"
+  if [[ "$code" != "200" && "$code" != "201" ]]; then
+    echo "discord-post: POST failed (HTTP $code): $(cat /tmp/discord-post.$$ 2>/dev/null)" >&2
+    rm -f /tmp/discord-post.$$
+    return 1
+  fi
+  rm -f /tmp/discord-post.$$
+}
+
+# Split into <=LIMIT-char chunks (split on the last newline within the window
+# when possible, else hard-split). Posts each chunk in order.
+posted=0
+rest="$MESSAGE"
+while [[ -n "$rest" ]]; do
+  if (( ${#rest} <= LIMIT )); then
+    chunk="$rest"; rest=""
+  else
+    chunk="${rest:0:LIMIT}"
+    # prefer to break at the last newline within the window
+    if [[ "$chunk" == *$'\n'* ]]; then
+      chunk="${chunk%$'\n'*}"
+    fi
+    rest="${rest:${#chunk}}"
+    rest="${rest#$'\n'}"   # drop a leading newline left by the split
+  fi
+  post_chunk "$chunk"
+  posted=$((posted + 1))
+done
+
+echo "discord-post: posted $posted message(s) to channel $CHANNEL_ID"

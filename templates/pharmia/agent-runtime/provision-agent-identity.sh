@@ -15,6 +15,9 @@
 #   FORGEJO_TOKEN              (bentoadmin site-admin token — required)
 #   AGENT_GATEWAY_TOKEN        (LiteLLM virtual key for CLAUDE_CODE_OAUTH_TOKEN)
 #   PG_DEV_PASSWORD PG_QA_PASSWORD LOKI_DEV_TOKEN LOKI_QA_TOKEN LOKI_CANARY_TOKEN
+#   DISCORD_BOT_TOKEN          (Paperclip Discord bot token for `discord-post` back-posts;
+#                              SAME bot 1515174537153482843 as the plugin — so awoken
+#                              assignment agents reply from the Paperclip bot)
 #   GRAFANA_TOKEN_DEV GRAFANA_TOKEN_QA OUTLINE_API_TOKEN CLOUDFLARE_API_TOKEN  (optional)
 set -euo pipefail
 
@@ -87,6 +90,7 @@ ensure_line ANTHROPIC_BASE_URL "export ANTHROPIC_BASE_URL=\"$GATEWAY_URL\""
 ensure_secret CLAUDE_CODE_OAUTH_TOKEN "${AGENT_GATEWAY_TOKEN:-}"
 ensure_secret PG_DEV_PASSWORD "${PG_DEV_PASSWORD:-}"; ensure_secret PG_QA_PASSWORD "${PG_QA_PASSWORD:-}"
 ensure_secret LOKI_DEV_TOKEN "${LOKI_DEV_TOKEN:-}"; ensure_secret LOKI_QA_TOKEN "${LOKI_QA_TOKEN:-}"; ensure_secret LOKI_CANARY_TOKEN "${LOKI_CANARY_TOKEN:-}"
+ensure_secret DISCORD_BOT_TOKEN "${DISCORD_BOT_TOKEN:-}"   # for `discord-post` (assignment back-posts); same bot as the plugin
 ensure_secret GRAFANA_TOKEN_DEV "${GRAFANA_TOKEN_DEV:-}"; ensure_secret GRAFANA_TOKEN_QA "${GRAFANA_TOKEN_QA:-}"
 ensure_secret OUTLINE_API_TOKEN "${OUTLINE_API_TOKEN:-}"; ensure_secret CLOUDFLARE_API_TOKEN "${CLOUDFLARE_API_TOKEN:-}"
 sudo chmod 600 "$ZE"; log "zshenv structural lines ensured; secrets set where provided in env"
