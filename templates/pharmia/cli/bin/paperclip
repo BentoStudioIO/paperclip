@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# paperclip — ops CLI for the deployed Paperclip AI-company control plane.
+# Wraps the board API (paperclip.bentostudio.io) + the Postgres DB (via `ssh bento`)
+# so common ops are one command instead of raw curl/psql. Read-only by default;
+# `wake`/`reset`/`import` mutate and are called out below.
+#
+# Config (env-overridable):
+#   PAPERCLIP_API      API base   (default https://paperclip.bentostudio.io/api)
+#   PAPERCLIP_COMPANY  company id (default Pharmia 57cd0843-…)
+#   PAPERCLIP_KEY_FILE board token file (default ~/.config/paperclipai/api-key)
+#   PAPERCLIP_SSH      ssh host for the DB/container (default bento)
+#
+# Usage:
+#   paperclip agents                    list claude_local agents (name/status/model/id)
+#   paperclip agent  <name|id>          one agent's detail (status, env, skills)
+#   paperclip wake   <name|id> [--fresh]  wake an agent (mutates: queues a run)
+#   paperclip runs   [since=24h] [grep] recent heartbeat runs
+#   paperclip run    <run-id>           one run's status/error/cost
+#   paperclip envs                      execution environments
+#   paperclip probe  <name|id>          SSH-probe an environment
+#   paperclip plugins                   installed plugins + status
+#   paperclip issues                    issue backlog by status
+#   paperclip reset  <name|id>          clear a stuck/error agent -> idle (mutates)
+#   paperclip import                    reconcile templates -> DB now (mutates)
+#   paperclip sql    "<select …>"       ad-hoc query (read-only by convention)
+set -euo pipefail
+
+API="${PAPERCLIP_API:-https://paperclip.bentostudio.io/api}"
+COMPANY="${PAPERCLIP_COMPANY:-57cd0843-fe5a-42d5-a6f6-c4e896fee84e}"
+KEY_FILE="${PAPERCLIP_KEY_FILE:-$HOME/.config/paperclipai/api-key}"
+SSH_HOST="${PAPERCLIP_SSH:-bento}"
+
+_api() { local m="$1" p="$2"; shift 2
+  curl -fsS -X "$m" "$API$p" -H "Authorization: Bearer $(cat "$KEY_FILE")" -H "content-type: application/json" "$@"; }
+_sql() { { [ "${1:-}" ] && printf '%s\n' "$1" || cat; } \
+  | ssh "$SSH_HOST" 'C=$(docker ps --format "{{.Names}}" | grep -E "paperclip.*db" | head -1); docker exec -i "$C" psql -U paperclip -d paperclip -tA' 2>/dev/null \
+  | grep -vaE "AUTHORIZED|is the property" || true; }
+_aid() { case "$1" in *-*-*-*-*) echo "$1";; *) _sql "SELECT id FROM agents WHERE lower(name)=lower('$1') LIMIT 1";; esac; }
+_srv() { ssh "$SSH_HOST" 'docker ps --format "{{.Names}}" | grep -E "paperclip.*server" | head -1'; }
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  agents) _sql "SELECT rpad(name,22)||rpad(status,11)||rpad(coalesce(adapter_config->>'model','?'),20)||id FROM agents WHERE adapter_type='claude_local' ORDER BY status,name";;
+  agent)  id=$(_aid "$1"); _sql "SELECT 'name   '||name||E'\nstatus '||status||E'\nmodel  '||coalesce(adapter_config->>'model','?')||E'\nenv    '||coalesce(default_environment_id::text,'-')||E'\nhome   '||coalesce(adapter_config#>>'{env,AGENT_HOME}','(computed)')||E'\nskills '||coalesce(adapter_config#>>'{paperclipSkillSync,desiredSkills}','[]') FROM agents WHERE id='$id'";;
+  wake)   id=$(_aid "$1"); fresh=false; [ "${2:-}" = "--fresh" ] && fresh=true
+          _api POST "/agents/$id/wakeup" -d "{\"source\":\"on_demand\",\"forceFreshSession\":$fresh}" | jq -r '"queued run "+.id';;
+  runs)   since="${1:-24 hours}"; pat="${2:-.}"
+          _sql "SELECT to_char(started_at,'MM-DD HH24:MI')||' '||rpad(status,9)||' '||rpad(coalesce(invocation_source,'?'),11)||' '||coalesce((SELECT name FROM agents a WHERE a.id=h.agent_id),'?')||' '||coalesce(left(error,60),'') FROM heartbeat_runs h WHERE started_at > now() - interval '$since' ORDER BY started_at DESC LIMIT 40" | grep -iE "$pat";;
+  run)    _api GET "/heartbeat-runs/$1" | jq '{status,exitCode,error,startedAt,finishedAt,model:.usageJson.model,costUsd:.usageJson.costUsd}';;
+  envs)   _sql "SELECT rpad(name,14)||rpad(driver,7)||rpad(status,8)||coalesce(config->>'username','')||'@'||coalesce(config->>'host','')||':'||coalesce(config->>'remoteWorkspacePath','')||'  '||id FROM environments ORDER BY name";;
+  probe)  e="$1"; case "$e" in *-*-*-*-*) :;; *) e=$(_sql "SELECT id FROM environments WHERE name='$e' LIMIT 1");; esac
+          _api POST "/environments/$e/probe" | jq '{ok,summary,details}';;
+  plugins) _sql "SELECT rpad(plugin_key,30)||rpad(coalesce(version,'?'),9)||rpad(status,10)||coalesce(left(last_error,40),'') FROM plugins ORDER BY status,plugin_key";;
+  issues) _sql "SELECT rpad(status,12)||count(*) FROM issues GROUP BY status ORDER BY 1";;
+  reset)  id=$(_aid "$1"); cur=$(_sql "SELECT status FROM agents WHERE id='$id'")
+          printf 'reset agent %s (%s): %s -> idle? [y/N] ' "$1" "$id" "$cur"; read -r a
+          [ "$a" = y ] || { echo aborted; exit 1; }
+          _sql "UPDATE agents SET status='idle' WHERE id='$id' AND status<>'terminated' RETURNING 'now: '||status";;
+  import) echo "reconciling templates -> DB (collision=replace)…"
+          ssh "$SSH_HOST" "docker exec $(_srv) sh -c 'cd /app && pnpm paperclipai company import /app/templates/pharmia --target existing --company-id $COMPANY --collision replace --include company,agents,skills --yes'";;
+  sql)    _sql "$1";;
+  *) sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//';;
+esac
