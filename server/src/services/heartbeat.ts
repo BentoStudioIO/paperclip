@@ -4524,13 +4524,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
         },
       });
-      publishRunLifecyclePluginEvent(updated);
+      void publishRunLifecyclePluginEvent(updated);
     }
 
     return updated;
   }
 
-  function publishRunLifecyclePluginEvent(run: typeof heartbeatRuns.$inferSelect) {
+  async function publishRunLifecyclePluginEvent(run: typeof heartbeatRuns.$inferSelect) {
     const eventType =
       run.status === "running"
         ? "agent.run.started"
@@ -4542,30 +4542,60 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               ? "agent.run.cancelled"
               : null;
     if (!eventType) return;
-    publishPluginDomainEvent({
-      eventId: randomUUID(),
-      eventType,
-      occurredAt: new Date().toISOString(),
-      actorId: run.agentId,
-      actorType: "agent",
-      entityId: run.id,
-      entityType: "heartbeat_run",
-      companyId: run.companyId,
-      payload: {
-        runId: run.id,
-        agentId: run.agentId,
-        status: run.status,
-        invocationSource: run.invocationSource,
-        triggerDetail: run.triggerDetail,
-        error: run.error ?? null,
-        errorCode: run.errorCode ?? null,
-        issueId: typeof run.contextSnapshot === "object" && run.contextSnapshot !== null
-          ? (run.contextSnapshot as Record<string, unknown>).issueId ?? null
-          : null,
-        startedAt: run.startedAt ? new Date(run.startedAt).toISOString() : null,
-        finishedAt: run.finishedAt ? new Date(run.finishedAt).toISOString() : null,
-      },
-    });
+    try {
+      const snapshot =
+        typeof run.contextSnapshot === "object" && run.contextSnapshot !== null
+          ? (run.contextSnapshot as Record<string, unknown>)
+          : null;
+      const issueId = snapshot && typeof snapshot.issueId === "string" ? snapshot.issueId : null;
+      // Enrich with human-readable context (agent name, issue identifier/title) so
+      // plugin consumers — e.g. the Discord run-lifecycle notification — render
+      // "Content — Task: PHA-6 — QA Changelog" instead of bare UUIDs. Best-effort:
+      // a lookup failure must never block the run-status update.
+      const [agentRow] = await db
+        .select({ name: agents.name })
+        .from(agents)
+        .where(eq(agents.id, run.agentId))
+        .limit(1);
+      let issueIdentifier: string | null = null;
+      let issueTitle: string | null = null;
+      if (issueId) {
+        const [issueRow] = await db
+          .select({ identifier: issues.identifier, title: issues.title })
+          .from(issues)
+          .where(eq(issues.id, issueId))
+          .limit(1);
+        issueIdentifier = issueRow?.identifier ?? null;
+        issueTitle = issueRow?.title ?? null;
+      }
+      publishPluginDomainEvent({
+        eventId: randomUUID(),
+        eventType,
+        occurredAt: new Date().toISOString(),
+        actorId: run.agentId,
+        actorType: "agent",
+        entityId: run.id,
+        entityType: "heartbeat_run",
+        companyId: run.companyId,
+        payload: {
+          runId: run.id,
+          agentId: run.agentId,
+          agentName: agentRow?.name ?? null,
+          status: run.status,
+          invocationSource: run.invocationSource,
+          triggerDetail: run.triggerDetail,
+          error: run.error ?? null,
+          errorCode: run.errorCode ?? null,
+          issueId,
+          issueIdentifier,
+          issueTitle,
+          startedAt: run.startedAt ? new Date(run.startedAt).toISOString() : null,
+          finishedAt: run.finishedAt ? new Date(run.finishedAt).toISOString() : null,
+        },
+      });
+    } catch (err) {
+      logger.warn({ err, runId: run.id }, "failed to publish run-lifecycle plugin event");
+    }
   }
 
   async function setWakeupStatus(
@@ -6729,7 +6759,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         finishedAt: claimed.finishedAt ? new Date(claimed.finishedAt).toISOString() : null,
       },
     });
-    publishRunLifecyclePluginEvent(claimed);
+    void publishRunLifecyclePluginEvent(claimed);
 
     await setWakeupStatus(claimed.wakeupRequestId, "claimed", { claimedAt });
 
