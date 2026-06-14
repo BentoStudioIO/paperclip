@@ -133,6 +133,27 @@ agents:
         dangerouslySkipPermissions: true
         model: "claude-opus-4-6"
       type: "claude_local"
+  signup-ingest:
+    role: "sdr"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-sonnet-4-6"
+      type: "claude_local"
+  booking-ingest:
+    role: "sdr"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-sonnet-4-6"
+      type: "claude_local"
+  translate-fr:
+    role: "analyst"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-sonnet-4-6"
+      type: "claude_local"
 company:
   attachmentMaxBytes: 10485760
 routines:
@@ -390,3 +411,6 @@ sidebar:
     - "market-intel"
     - "lead-scout"
     - "content"
+    - "signup-ingest"
+    - "booking-ingest"
+    - "translate-fr"
