@@ -88,6 +88,41 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Read-only Postgres→Prometheus exporter for per-run agent metrics
+  # (cost / latency / outcome counts, by agent + company) from `heartbeat_runs`.
+  # The Paperclip DB (`db`) is only reachable on this compose's default network,
+  # so the exporter lives here and also joins the Pharmia-dev observability bridge
+  # so the existing Prometheus (pharmia-dev-kwvuth) can scrape it by container name.
+  # Read-only: same DB creds, only runs the SELECTs in the queries file. Not a
+  # fork-core edit (AGENTS.md §12) — compose + SQL only.
+  agent-metrics:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: postgres://paperclip:${POSTGRES_PASSWORD}@db:5432/paperclip?sslmode=disable
+      PG_EXPORTER_DISABLE_DEFAULT_METRICS: "true"
+      PG_EXPORTER_DISABLE_SETTINGS_METRICS: "true"
+      PG_EXPORTER_EXTEND_QUERY_PATH: /etc/postgres-exporter/queries.yaml
+    volumes:
+      - ./docker/paperclip-agent-metrics.queries.yaml:/etc/postgres-exporter/queries.yaml:ro
+    expose:
+      - "9187"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - default
+      - pharmia-dev-monitoring
+    restart: unless-stopped
+
+networks:
+  # External: the Pharmia-dev observability bridge where Prometheus/Grafana/Loki run
+  # (created 2025-12-27, stable across redeploys). Lets Prometheus scrape `agent-metrics`
+  # by container name. If the Pharmia-dev Dokploy project is ever recreated, this hashed
+  # name changes — update here AND in PharmaMate tooling/grafana/prometheus.yml.
+  pharmia-dev-monitoring:
+    external: true
+    name: pharmia-dev-kwvuth
+
 volumes:
   pgdata:
   paperclip-data:

@@ -1,0 +1,84 @@
+# Custom queries for prometheus-community/postgres_exporter.
+#
+# Surfaces per-run Paperclip agent metrics (cost / latency / outcome counts) from
+# the `heartbeat_runs` table into Prometheus, labelled by agent + company. Read-only.
+#
+# Why a sidecar exporter (not a core edit / not ctx.metrics.write):
+#   - The plugin protocol's `ctx.metrics.write` lands in the `plugin_logs` table
+#     (level:"metric"), NOT Prometheus; `telemetry.track` goes to the optional
+#     analytics client. Neither is Prometheus-scrapeable.
+#   - The Bento fork strategy (AGENTS.md §12) forbids editing server/ ui/ packages/db/.
+#     This is infra/compose config + read-only SQL, touching none of those.
+#
+# Counter semantics: `heartbeat_runs` is append-only, so an all-time GROUP BY
+# aggregate is monotonic — safe for COUNTER usage; rate()/increase() work.
+# Cost + model live in usage_json (e.g. {costUsd, model, provider, ...}).
+#
+# Wired via PG_EXPORTER_EXTEND_QUERY_PATH (see docker-compose.yml `agent-metrics`).
+
+# Terminal-outcome counters + cost + duration, by company / agent / status / model.
+paperclip_agent_run:
+  cache_seconds: 30
+  query: |
+    SELECT
+      c.name AS company,
+      a.name AS agent,
+      hr.status AS status,
+      COALESCE(hr.usage_json->>'model', 'unknown') AS model,
+      COUNT(*) AS runs_total,
+      COALESCE(SUM((hr.usage_json->>'costUsd')::double precision), 0) AS cost_usd_total,
+      COALESCE(SUM(EXTRACT(EPOCH FROM (hr.finished_at - hr.started_at))), 0) AS duration_seconds_total
+    FROM heartbeat_runs hr
+    JOIN agents a ON a.id = hr.agent_id
+    JOIN companies c ON c.id = hr.company_id
+    WHERE hr.status IN ('succeeded', 'failed', 'cancelled')
+    GROUP BY c.name, a.name, hr.status, COALESCE(hr.usage_json->>'model', 'unknown')
+  metrics:
+    - company:
+        usage: LABEL
+        description: "Paperclip company name"
+    - agent:
+        usage: LABEL
+        description: "Agent name"
+    - status:
+        usage: LABEL
+        description: "Terminal run status (succeeded|failed|cancelled)"
+    - model:
+        usage: LABEL
+        description: "Model that served the run (from usage_json.model)"
+    - runs_total:
+        usage: COUNTER
+        description: "Cumulative count of terminal agent runs"
+    - cost_usd_total:
+        usage: COUNTER
+        description: "Cumulative agent run cost in USD (usage_json.costUsd)"
+    - duration_seconds_total:
+        usage: COUNTER
+        description: "Cumulative agent run wall-clock duration in seconds"
+
+# Lifecycle gauges, by company / agent: started counter + currently in-progress.
+paperclip_agent_run_lifecycle:
+  cache_seconds: 30
+  query: |
+    SELECT
+      c.name AS company,
+      a.name AS agent,
+      COUNT(*) FILTER (WHERE hr.started_at IS NOT NULL) AS started_total,
+      COUNT(*) FILTER (WHERE hr.status NOT IN ('succeeded', 'failed', 'cancelled')) AS in_progress
+    FROM heartbeat_runs hr
+    JOIN agents a ON a.id = hr.agent_id
+    JOIN companies c ON c.id = hr.company_id
+    GROUP BY c.name, a.name
+  metrics:
+    - company:
+        usage: LABEL
+        description: "Paperclip company name"
+    - agent:
+        usage: LABEL
+        description: "Agent name"
+    - started_total:
+        usage: COUNTER
+        description: "Cumulative count of agent runs that reached started_at"
+    - in_progress:
+        usage: GAUGE
+        description: "Agent runs currently in a non-terminal state"
