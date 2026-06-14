@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Provision the capped `agent` execution identity on the agents VPS (Paperclip's
+# claude_local SSH target). IDEMPOTENT — safe to re-run; converges to the intended
+# state. This is the SSOT for the hand-applied setup so a fresh VPS / home volume
+# reseeds (per PLAN-shared-agent-vps.md + memory paperclip-agent-identity).
+#
+# Run ON the agents VPS as a sudoer (e.g. `ssh bento-agents 'sudo bash provision-agent-identity.sh'`).
+# Harness (~/.claude) is synced from the rendered SSOT staging; render it first with
+# agent-runtime/build.sh (runs scripts/sync-claude-{agents,skills}.mjs) if stale.
+#
+# SECRETS: never hardcoded. Required token files/creds are read from env vars; a line
+# is only (re)written when its env var is set, otherwise the existing value is preserved
+# (so re-running live without secrets in env is a no-op for those lines). Source them
+# from Vaultwarden / the ~/.config escrow before running a FRESH provision:
+#   FORGEJO_TOKEN              (bentoadmin site-admin token — required)
+#   AGENT_GATEWAY_TOKEN        (LiteLLM virtual key for CLAUDE_CODE_OAUTH_TOKEN)
+#   PG_DEV_PASSWORD PG_QA_PASSWORD LOKI_DEV_TOKEN LOKI_QA_TOKEN LOKI_CANARY_TOKEN
+#   GRAFANA_TOKEN_DEV GRAFANA_TOKEN_QA OUTLINE_API_TOKEN CLOUDFLARE_API_TOKEN  (optional)
+set -euo pipefail
+
+AGENT_USER=agent
+AGENT_HOME=/home/$AGENT_USER
+BENTO_EGRESS_IP="${BENTO_EGRESS_IP:-51.222.204.73}"          # Paperclip control-plane egress
+ENV_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBgTH1DrhC+JNKSh8m/ehFUyKZgRE90zjK6d1/qakNTf pharmia-agents-ops"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STAGING_DIR="${STAGING_DIR:-$SCRIPT_DIR/.claude-config-staging}"
+GATEWAY_URL="${ANTHROPIC_BASE_URL:-https://llm.bentostudio.io}"
+FORGEJO_URL="${FORGEJO_URL:-https://git.bentostudio.io}"
+
+log(){ printf '  • %s\n' "$*"; }
+as_agent(){ sudo -u "$AGENT_USER" "$@"; }
+
+echo "== 1) agent user (capped, zsh, no sudo) =="
+if ! id "$AGENT_USER" &>/dev/null; then
+  sudo useradd -m -s /usr/bin/zsh "$AGENT_USER"; log "created $AGENT_USER"
+fi
+sudo gpasswd -d "$AGENT_USER" sudo 2>/dev/null || true     # strip any default sudo
+sudo install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 700 "$AGENT_HOME/.ssh" "$AGENT_HOME/.config" "$AGENT_HOME/workspaces"
+log "user present, no sudo, ~/.ssh ~/.config ~/workspaces ensured"
+
+echo "== 2) inbound SSH: only the Paperclip env key, locked to the control-plane IP =="
+AK="$AGENT_HOME/.ssh/authorized_keys"
+printf 'from="%s" %s\n' "$BENTO_EGRESS_IP" "$ENV_PUBKEY" | sudo tee "$AK" >/dev/null
+sudo chown "$AGENT_USER:$AGENT_USER" "$AK"; sudo chmod 600 "$AK"
+log "authorized_keys = env key from=$BENTO_EGRESS_IP (single key, source-locked)"
+# NOTE: outbound keys (~/.ssh/{bento,pharmia-qa,prod-ro} + config) are per-host identities
+# restored from escrow — not regenerated here (would break the authorized principals).
+
+echo "== 3) ~/.profile sources ~/.zshenv (the ssh driver sources *profile, NOT zshenv) =="
+PROFILE="$AGENT_HOME/.profile"
+sudo touch "$PROFILE"; sudo chown "$AGENT_USER:$AGENT_USER" "$PROFILE"
+if ! sudo grep -q 'zshenv' "$PROFILE"; then
+  printf '\n# Paperclip ssh runs sh: pull the scoped agent env in\n[ -f ~/.zshenv ] && . ~/.zshenv\n' | sudo tee -a "$PROFILE" >/dev/null
+  log "appended zshenv sourcing"
+fi
+
+echo "== 4) Forgejo token (SSOT file) + git credential helper + identity =="
+CFG="$AGENT_HOME/.config/forgejo"
+sudo install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 700 "$CFG"
+if [ -n "${FORGEJO_TOKEN:-}" ]; then
+  printf '%s' "$FORGEJO_TOKEN" | sudo tee "$CFG/token" >/dev/null
+  sudo chown "$AGENT_USER:$AGENT_USER" "$CFG/token"; sudo chmod 600 "$CFG/token"; log "wrote token file"
+elif ! sudo test -s "$CFG/token"; then
+  echo "  ! FORGEJO_TOKEN not set and $CFG/token absent — Forgejo git will fail"; fi
+sudo tee "$CFG/git-credential-bentoadmin" >/dev/null <<'HELPER'
+#!/bin/sh
+[ "$1" = "get" ] || exit 0
+echo username=bentoadmin
+echo "password=$(cat /home/agent/.config/forgejo/token)"
+HELPER
+sudo chown "$AGENT_USER:$AGENT_USER" "$CFG/git-credential-bentoadmin"; sudo chmod 750 "$CFG/git-credential-bentoadmin"
+as_agent git config --global user.name  bentoadmin
+as_agent git config --global user.email bentoadmin@bentostudio.io
+as_agent git config --global "credential.$FORGEJO_URL.helper" "$CFG/git-credential-bentoadmin"
+log "git helper bound to $FORGEJO_URL"
+
+echo "== 5) ~/.zshenv: structural lines + secrets (only when provided in env) =="
+ZE="$AGENT_HOME/.zshenv"
+sudo touch "$ZE"; sudo chown "$AGENT_USER:$AGENT_USER" "$ZE"; sudo chmod 600 "$ZE"
+ensure_line(){ local k="$1" line="$2"; sudo grep -q "^export $k=" "$ZE" || echo "$line" | sudo tee -a "$ZE" >/dev/null; }
+ensure_secret(){ local k="$1" v="${2:-}"; [ -n "$v" ] && { sudo sed -i "/^export $k=/d" "$ZE"; echo "export $k=$v" | sudo tee -a "$ZE" >/dev/null; }; }
+# guards (dash-safe; the ssh driver runs sh, not zsh)
+sudo grep -q 'ZSH_VERSION.*_bun' "$ZE" || true   # bun completion is guarded at author time
+ensure_line FORGEJO_URL "export FORGEJO_URL=\"$FORGEJO_URL\""
+sudo grep -q 'config/forgejo/token' "$ZE" || echo '[ -r ~/.config/forgejo/token ] && export FORGEJO_TOKEN="$(cat ~/.config/forgejo/token)"' | sudo tee -a "$ZE" >/dev/null
+ensure_line ANTHROPIC_BASE_URL "export ANTHROPIC_BASE_URL=\"$GATEWAY_URL\""
+ensure_secret CLAUDE_CODE_OAUTH_TOKEN "${AGENT_GATEWAY_TOKEN:-}"
+ensure_secret PG_DEV_PASSWORD "${PG_DEV_PASSWORD:-}"; ensure_secret PG_QA_PASSWORD "${PG_QA_PASSWORD:-}"
+ensure_secret LOKI_DEV_TOKEN "${LOKI_DEV_TOKEN:-}"; ensure_secret LOKI_QA_TOKEN "${LOKI_QA_TOKEN:-}"; ensure_secret LOKI_CANARY_TOKEN "${LOKI_CANARY_TOKEN:-}"
+ensure_secret GRAFANA_TOKEN_DEV "${GRAFANA_TOKEN_DEV:-}"; ensure_secret GRAFANA_TOKEN_QA "${GRAFANA_TOKEN_QA:-}"
+ensure_secret OUTLINE_API_TOKEN "${OUTLINE_API_TOKEN:-}"; ensure_secret CLOUDFLARE_API_TOKEN "${CLOUDFLARE_API_TOKEN:-}"
+sudo chmod 600 "$ZE"; log "zshenv structural lines ensured; secrets set where provided in env"
+
+echo "== 6) harness ~/.claude from SSOT staging ($STAGING_DIR) =="
+if [ -d "$STAGING_DIR" ]; then
+  sudo install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 700 "$AGENT_HOME/.claude"
+  sudo rsync -a "$STAGING_DIR/CLAUDE.md" "$STAGING_DIR/skills" "$STAGING_DIR/agents" "$AGENT_HOME/.claude/" 2>/dev/null || true
+  [ -d "$STAGING_DIR/rules" ] && sudo rsync -a "$STAGING_DIR/rules/" "$AGENT_HOME/.claude/rules/" 2>/dev/null || true
+  # platform rules SSOT (Dockerfile copies these into the staging rules at build)
+  sudo rsync -a "$SCRIPT_DIR/../rules/" "$AGENT_HOME/.claude/rules/" 2>/dev/null || true
+  sudo chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.claude"
+  log "synced CLAUDE.md + skills($(sudo -u $AGENT_USER ls $AGENT_HOME/.claude/skills 2>/dev/null | wc -l)) + agents + rules (memory preserved)"
+else
+  echo "  ! staging dir $STAGING_DIR not found — render it (agent-runtime/build.sh) or set STAGING_DIR"
+fi
+
+echo "== 7) host: ssh banner-off + ufw allow for the control-plane IP =="
+sudo tee /etc/ssh/sshd_config.d/99-paperclip-no-banner.conf >/dev/null <<EOF
+Match Address $BENTO_EGRESS_IP
+    Banner none
+EOF
+sudo grep -qE "^AllowUsers.*\b$AGENT_USER\b" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/* 2>/dev/null \
+  || echo "  ! ensure sshd AllowUsers includes '$AGENT_USER' (left to host policy)"
+sudo sshd -t && sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || true
+command -v ufw >/dev/null && sudo ufw insert 1 allow from "$BENTO_EGRESS_IP" to any port 22 proto tcp >/dev/null 2>&1 || true
+log "banner suppressed + ufw rate-limit bypass for $BENTO_EGRESS_IP"
+
+echo "== 8) per-agent memory dir + MCP servers (grafana read-only + context7) =="
+# AGENT_HOME is set PER-AGENT in Paperclip (agents.adapter_config.env.AGENT_HOME =
+# /home/agent/.paperclip/agents/<id>) so para-memory-files persists on this durable home.
+sudo -u "$AGENT_USER" mkdir -p "$AGENT_HOME/.paperclip/agents"
+# mcp-grafana binary (read-only) on the agent PATH (/opt/bento-cli is world-readable + on PATH)
+if [ ! -x /opt/bento-cli/bin/mcp-grafana ]; then
+  curl -fsSL "https://github.com/grafana/mcp-grafana/releases/download/v0.15.2/mcp-grafana_Linux_x86_64.tar.gz" \
+    | sudo tar -xz -C /opt/bento-cli/bin mcp-grafana && sudo chmod 755 /opt/bento-cli/bin/mcp-grafana
+fi
+# The live SSH run reads /home/agent/.claude.json NATIVELY (no --mcp-config; NOT the build staging).
+# Literal creds: claude 2.1.x does not expand ${VAR} at MCP spawn. Token read from env, never committed.
+if [ -n "${GRAFANA_TOKEN_DEV:-}" ]; then
+  sudo -u "$AGENT_USER" env GU="${GRAFANA_URL_DEV:-https://grafana.dev.pharmia.ca}" GT="$GRAFANA_TOKEN_DEV" python3 - <<'PY'
+import json, os
+p = os.path.expanduser("~/.claude.json")
+try: d = json.load(open(p))
+except Exception: d = {}
+d.setdefault("mcpServers", {})
+d["mcpServers"]["grafana"]  = {"command":"mcp-grafana","args":["-t","stdio","--disable-write"],
+                               "env":{"GRAFANA_URL":os.environ["GU"],"GRAFANA_SERVICE_ACCOUNT_TOKEN":os.environ["GT"]}}
+d["mcpServers"]["context7"] = {"command":"npx","args":["-y","@upstash/context7-mcp"]}
+json.dump(d, open(p,"w"), indent=2)
+print("  mcpServers:", list(d["mcpServers"]))
+PY
+  sudo chmod 600 "$AGENT_HOME/.claude.json"
+else
+  echo "  ! GRAFANA_TOKEN_DEV unset — skipped grafana MCP (set it to provision the read-only grafana server)"
+fi
+
+echo "== DONE — agent identity provisioned/converged =="

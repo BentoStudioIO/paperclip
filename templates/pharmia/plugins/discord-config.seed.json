@@ -1,0 +1,27 @@
+{
+  "_comment": "Durability seed for paperclip-plugin-discord (Pharmia company). The live config lives ONLY in DB plugin_config.config_json — a reseed/company-import WIPES it. Restore: POST /api/plugins/88682096-ad88-49e3-adf1-fd7c5f598ec8/config {configJson: <below minus _comment>}, then /enable, then restart the paperclip-server container. The two *Ref fields point at company_secrets rows (bot token + Paperclip board API key) — those secret VALUES must be re-created/escrowed separately (Discord dev portal token + a Paperclip board API key); update the refs if their UUIDs change. Channel/guild IDs are the live #paperclip + 💊┃Pharmia scan set.",
+  "enableInbound": true,
+  "defaultGuildId": "1354213528097132585",
+  "enableCommands": true,
+  "errorsChannelId": "1515177543207096332",
+  "defaultChannelId": "1515177543207096332",
+  "paperclipBaseUrl": "https://paperclip.bentostudio.io",
+  "enableEscalations": true,
+  "notifyOnIssueDone": false,
+  "approvalsChannelId": "1515177543207096332",
+  "discordBotTokenRef": "b49f78a1-98c3-4c0d-a3f6-ad4d565a5ffa",
+  "enableIntelligence": true,
+  "notifyOnAgentError": true,
+  "bdPipelineChannelId": "1515177543207096332",
+  "enableMediaPipeline": false,
+  "escalationChannelId": "1515177543207096332",
+  "enableCustomCommands": true,
+  "notifyOnIssueCreated": false,
+  "intelligenceChannelIds": [
+    "1354216906441363477", "1484471292626210846", "1484688053837500488", "1481511735532851364",
+    "1423469520437252157", "1436126989730975765", "1425931232054743130", "1421242477733482648"
+  ],
+  "notifyOnApprovalCreated": true,
+  "paperclipBoardApiKeyRef": "911765f3-b768-4d56-a211-09e4446756f2",
+  "enableProactiveSuggestions": false
+}
