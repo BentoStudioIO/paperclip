@@ -72,3 +72,10 @@ operating guide; workspace-environment facts live in `rules/workspace-context.md
 ## CLAUDE.md hygiene
 
 Any CLAUDE.md / AGENTS.md you edit stays **≤200 lines**. If over, trim in the same commit.
+
+## Reference Docs
+
+- **bento-docs** (`/home/agent/bento-docs`) — Bento Studio's SSOT for durable
+  legal / compliance / regulatory knowledge (verbatim primary sources + frozen TGV
+  evidence). Consult it verbatim-first before any legal/compliance/TGV claim. See
+  `rules/bento-docs.md` for structure, when to use it, and the Comp AI split.

@@ -88,7 +88,16 @@ echo "== 5) ~/.zshenv: structural lines + secrets (only when provided in env) ==
 ZE="$AGENT_HOME/.zshenv"
 sudo touch "$ZE"; sudo chown "$AGENT_USER:$AGENT_USER" "$ZE"; sudo chmod 600 "$ZE"
 ensure_line(){ local k="$1" line="$2"; sudo grep -q "^export $k=" "$ZE" || echo "$line" | sudo tee -a "$ZE" >/dev/null; }
-ensure_secret(){ local k="$1" v="${2:-}"; [ -n "$v" ] && { sudo sed -i "/^export $k=/d" "$ZE"; echo "export $k=$v" | sudo tee -a "$ZE" >/dev/null; }; }
+# Atomic upsert into the SHARED ~/.zshenv: render the full new file to a temp and mv
+# it into place (atomic rename, same fs) instead of a non-atomic `sed -i` + `tee -a`.
+# The old two-step raced when secrets were ensured back-to-back/concurrently on the
+# shared file — a partial sed/tee interleave dropped or corrupted lines.
+ensure_secret(){
+  local k="$1" v="${2:-}"; [ -n "$v" ] || return 0
+  local tmp="${ZE}.tmp.$$"
+  { sudo grep -v "^export $k=" "$ZE" 2>/dev/null || true; echo "export $k=$v"; } | sudo tee "$tmp" >/dev/null
+  sudo chown "$AGENT_USER:$AGENT_USER" "$tmp"; sudo chmod 600 "$tmp"; sudo mv -f "$tmp" "$ZE"
+}
 # guards (dash-safe; the ssh driver runs sh, not zsh)
 sudo grep -q 'ZSH_VERSION.*_bun' "$ZE" || true   # bun completion is guarded at author time
 ensure_line FORGEJO_URL "export FORGEJO_URL=\"$FORGEJO_URL\""
@@ -154,5 +163,34 @@ PY
 else
   echo "  ! GRAFANA_TOKEN_DEV unset — skipped grafana MCP (set it to provision the read-only grafana server)"
 fi
+
+echo "== 9) standing bento-docs reference clone + daily ff-only refresh cron =="
+# Bento Studio's durable legal/compliance/TGV SSOT (verbatim primary sources). Cloned AS
+# the `agent` user so the Forgejo bentoadmin credential helper (step 4) authenticates and
+# files stay agent-owned. Idempotent: pull --ff-only if already cloned, else fresh clone.
+# The harness awareness rule ships in rules/bento-docs.md (synced into ~/.claude/rules above).
+BENTO_DOCS_DIR="$AGENT_HOME/bento-docs"
+BENTO_DOCS_URL="$FORGEJO_URL/BentoStudio/bento-docs.git"
+if sudo test -d "$BENTO_DOCS_DIR/.git"; then
+  as_agent git -C "$BENTO_DOCS_DIR" pull --ff-only >/dev/null 2>&1 \
+    && log "bento-docs present — pulled --ff-only" \
+    || echo "  ! bento-docs pull failed (check Forgejo token / network) — leaving existing clone"
+else
+  as_agent git clone "$BENTO_DOCS_URL" "$BENTO_DOCS_DIR" >/dev/null 2>&1 \
+    && log "cloned bento-docs -> $BENTO_DOCS_DIR (as $AGENT_USER)" \
+    || echo "  ! bento-docs clone failed (FORGEJO_TOKEN unset/invalid?) — skipped"
+fi
+# Daily ff-only refresh as `agent` (verbatim from the live box). HOME=/home/agent so the
+# global git config + credential helper resolve for the cron user.
+sudo tee /etc/cron.d/bento-docs-refresh >/dev/null <<'CRON'
+# Daily ff-only refresh of the standing bento-docs reference clone (Paperclip agents read it).
+# Runs as `agent` so the Forgejo bentoadmin credential helper authenticates and files stay agent-owned.
+SHELL=/bin/sh
+PATH=/usr/local/bin:/usr/bin:/bin
+HOME=/home/agent
+17 6 * * * agent git -C /home/agent/bento-docs pull --ff-only >> /home/agent/bento-docs/.refresh.log 2>&1
+CRON
+sudo chmod 644 /etc/cron.d/bento-docs-refresh
+log "installed /etc/cron.d/bento-docs-refresh (daily 06:17 ff-only pull as $AGENT_USER)"
 
 echo "== DONE — agent identity provisioned/converged =="
