@@ -1,5 +1,12 @@
 schema: "paperclip/v1"
 agents:
+  ceo:
+    role: "ceo"
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "claude-opus-4-6"
+      type: "claude_local"
   bug-hunter:
     role: "qa"
     adapter:
@@ -198,7 +205,7 @@ routines:
   # ── n8n → paperclip migrations (2026-06-13) ───────────────────────────────
   # Replace live n8n workflows with paperclip routines. PAUSED + every trigger
   # enabled:false until the Forgejo webhook secret and the content agent's
-  # deployed-runtime capabilities (Discord post, wp via ssh momo) are wired.
+  # deployed-runtime capabilities (Discord post, WordPress via the wp-pharmia CLI) are wired.
   # Prompt SSOT in tasks/<name>/TASK.md; assignee binds there.
   #
   # assignee: content — replaces n8n "Pharmia Github Notifications" (XqWpwDlBJwxbdQCi).
@@ -217,8 +224,8 @@ routines:
   #   g6sl2x0XV15ao3dP + Relevance rOjfyJYMXgmBOChS + SEO+LinkedIn 3zhDw1vfDRfomPfZ
   #   + Templated 4IbUiJx7Xly8Hvad). Weekly: QC-health RSS → PLG-SEO relevance gate →
   #   WordPress + LinkedIn DRAFTS → Discord approval. Scheduled 2h before weekly-growth-brief
-  #   (0 13) which reports what it shipped. Carousel render, LinkedIn auto-post, and
-  #   wp-over-ssh-momo reachability are capability-gaps — see tasks/seo-content-run/TASK.md.
+  #   (0 13) which reports what it shipped. Research=bx+Jina, WordPress=wp-pharmia CLI (both wired 2026-06-14).
+  #   Carousel render + LinkedIn auto-post remain capability-gaps — see tasks/seo-content-run/TASK.md.
   seo-content-run:
     status: "paused"
     triggers:
@@ -392,6 +399,7 @@ routines:
         enabled: false
 sidebar:
   agents:
+    - "ceo"
     - "engineering-lead"
     - "bug-hunter"
     - "devops"
