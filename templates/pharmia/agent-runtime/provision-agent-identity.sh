@@ -48,6 +48,13 @@ sudo chown "$AGENT_USER:$AGENT_USER" "$AK"; sudo chmod 600 "$AK"
 log "authorized_keys = env key from=$BENTO_EGRESS_IP (single key, source-locked)"
 # NOTE: outbound keys (~/.ssh/{bento,pharmia-qa,prod-ro} + config) are per-host identities
 # restored from escrow — not regenerated here (would break the authorized principals).
+# The `prod-ro` alias (HostName 167.114.2.32, User pg-ro, forced-command
+# `sudo /usr/local/bin/canary-pg-ro-query`) is what powers READ-ONLY canary access:
+# `pg canary app|mastra` detects this box has `prod-ro` but no full `prod` alias and
+# routes through it (SELECT-only, NOSUPERUSER). Do NOT add `PG_CANARY_*` here — the
+# RO path needs no client-side canary password (it lives root-only on prod). If a
+# fresh box lacks the `prod-ro` alias/key in escrow, `pg canary` RO will not work
+# until the escrowed ssh identity is restored.
 
 echo "== 3) ~/.profile sources ~/.zshenv (the ssh driver sources *profile, NOT zshenv) =="
 PROFILE="$AGENT_HOME/.profile"

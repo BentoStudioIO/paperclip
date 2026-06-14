@@ -19,6 +19,25 @@ SECRETS_FILE="${HOME}/.config/pg/secrets.env"
 [[ -f "$SECRETS_FILE" ]] && source "$SECRETS_FILE"
 
 # -----------------------------------------------------------------------------
+# Context detection for canary. The agent VPS has ONLY the read-only SSH alias
+# `prod-ro` (forced-command `sudo /usr/local/bin/canary-pg-ro-query`, SELECT-only,
+# NOSUPERUSER) and NO full `prod` alias; human ops boxes have the full `prod`
+# alias (ssh+sudo+docker, prod superuser). We gate canary access by which alias
+# resolves: agent → read-only forced-command path; human → legacy superuser path.
+#
+# `ssh -G <alias>` echoes the effective config. If the alias is NOT in
+# ~/.ssh/config, libssh leaves HostName equal to the literal alias name; if it
+# IS configured, HostName becomes the real host/IP. So "resolves to a real host"
+# == HostName differs from the alias literal. This positively identifies the
+# agent (prod-ro present, prod absent) without misfiring on a human box.
+# -----------------------------------------------------------------------------
+ssh_alias_resolves(){
+  local alias="$1" hn
+  hn=$(ssh -G "$alias" 2>/dev/null | awk 'tolower($1)=="hostname"{print $2; exit}')
+  [[ -n "$hn" && "$hn" != "$alias" ]]
+}
+
+# -----------------------------------------------------------------------------
 # Flag parsing. Positional: <env> [database] [query]. Flags may appear anywhere.
 # -----------------------------------------------------------------------------
 WRITE_MODE=0
@@ -82,6 +101,13 @@ Safety defaults (non-interactive queries):
   - statement timeout: 60s                                  (override with --timeout, disable with --timeout none)
 
 Interactive pgcli sessions inherit the same guards via PGOPTIONS.
+
+Canary access is context-gated:
+  - Agent VPS (prod-ro SSH alias, no prod alias): canary routes through the
+    read-only forced-command (SELECT-only, no superuser). --write is refused;
+    a SQL query is required (no interactive pgcli). app + mastra only.
+  - Human box (full prod SSH alias): canary uses the existing superuser path
+    (docker exec psql -U postgres), unchanged. --write allowed.
 
 Examples:
   pg dev                                        # interactive pgcli on dev (read-only)
@@ -159,6 +185,49 @@ case "$DB" in
 esac
 
 CONTAINER="${APP_NAME}-${SERVICE}-1"
+
+# -----------------------------------------------------------------------------
+# Canary in AGENT context → route through the prod-ro read-only forced-command.
+# Detected by: `prod-ro` alias resolves AND full `prod` alias does NOT (agent VPS
+# layout). The forced-command is inherently read-only (SELECT-only, NOSUPERUSER,
+# rejects writes + psql backslash metacommands server-side), so a `--write`
+# request here cannot be honoured and HARD-ERRORS. Human boxes (full `prod`
+# resolves) fall through to the legacy superuser path below, byte-unchanged.
+# -----------------------------------------------------------------------------
+if [[ "$ENV" == "canary" ]] && ssh_alias_resolves prod-ro && ! ssh_alias_resolves prod; then
+  if [[ "$WRITE_MODE" -eq 1 ]]; then
+    echo "Error: canary is read-only via the prod-ro path; --write is not permitted in this context." >&2
+    exit 1
+  fi
+  case "$DB" in
+    app|mastra) RO_DB="$DB" ;;
+    *)
+      echo "Error: canary read-only path supports only 'app' or 'mastra' (got '$DB')." >&2
+      exit 1
+      ;;
+  esac
+
+  # Statement-timeout prelude still applies (read-only is enforced server-side by
+  # the forced-command, so no default_transaction_read_only prelude is needed).
+  RO_PRELUDE=""
+  [[ "$TIMEOUT" != "none" ]] && RO_PRELUDE="SET statement_timeout = '${TIMEOUT}';"$'\n'
+
+  if [[ -z "$QUERY" ]]; then
+    echo "Error: canary read-only path requires a SQL query (interactive pgcli is not available via the forced-command)." >&2
+    echo "Usage: pg canary ${DB} \"SELECT ...\"  (or pipe SQL on stdin)" >&2
+    exit 1
+  fi
+
+  # Pass the DB target as the remote command (`-- --db <app|mastra>`); the `--`
+  # stops the ssh client from consuming `--db` as its own flag. Pipe the SQL on
+  # stdin via base64 to preserve literal bytes (quotes, newlines, backslashes),
+  # matching the docker-exec path below. The forced-command reads stdin SQL and
+  # (post Task 5.1) routes by --db; today it reads app and ignores the target.
+  FULL_QUERY="${RO_PRELUDE}${QUERY}"
+  B64_QUERY=$(printf '%s' "$FULL_QUERY" | base64 -w0)
+  echo "$B64_QUERY" | base64 -d | ssh prod-ro -- --db "$RO_DB"
+  exit $?
+fi
 
 # -----------------------------------------------------------------------------
 # Build safety prelude. For non-interactive queries we prepend SQL SET
