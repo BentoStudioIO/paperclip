@@ -9647,6 +9647,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const promotedContinuationAttempt = readContinuationAttempt(
           promotedContextSnapshot.livenessContinuationAttempt,
         );
+        const promotedAdhoc = promotedContextSnapshot.adhoc === true;
         const now = new Date();
         const newRun = await tx
           .insert(heartbeatRuns)
@@ -9657,7 +9658,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             triggerDetail: promotedTriggerDetail,
             status: "queued",
             wakeupRequestId: deferred.id,
-            contextSnapshot: promotedContextSnapshot,
+            contextSnapshot: promotedAdhoc
+              ? redactAdhocContext(promotedContextSnapshot)
+              : promotedContextSnapshot,
             sessionIdBefore: sessionBefore,
             continuationAttempt: promotedContinuationAttempt,
           })
@@ -9882,8 +9885,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const payload = opts.payload ?? null;
     const adhoc = opts.adhoc === true;
     // For an adhoc/no-persist wake, derive redacted copies for the durable sinks
-    // (wake-request payload/reason and run context_snapshot) while the unredacted
-    // values keep driving routing/skipped-writes and the live agent run (R3).
+    // (every wake-request payload/reason and run context_snapshot — including the
+    // skip-path rows) while the unredacted values keep driving routing decisions
+    // and the live agent run (R3).
     const persistPayload = adhoc ? redactWakePayload(payload) : payload;
     const persistReason = adhoc ? null : reason;
     const persistedContext = (ctx: Record<string, unknown>) =>
@@ -9915,7 +9919,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         source,
         triggerDetail,
         reason: skipReason,
-        payload,
+        // Redact the prompt/clinical body under adhoc — skip rows (budget/
+        // not-invokable/wakeOnDemand/inactive/...) are routine in a live
+        // control plane and must not durably hold PHI. (reason is already a
+        // fixed skip-reason string.)
+        payload: persistPayload,
         status: "skipped",
         requestedByActorType: opts.requestedByActorType ?? null,
         requestedByActorId: opts.requestedByActorId ?? null,
@@ -10115,7 +10123,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             source,
             triggerDetail,
             reason: "issue_execution_issue_not_found",
-            payload,
+            payload: persistPayload,
             status: "skipped",
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
@@ -10315,7 +10323,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             triggerDetail,
             reason: "issue_dependencies_blocked",
             payload: {
-              ...(payload ?? {}),
+              ...(persistPayload ?? {}),
               issueId,
               unresolvedBlockerIssueIds: dependencyReadiness.unresolvedBlockerIssueIds,
             },
@@ -10339,12 +10347,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             normalizeAgentNameKey(executionAgent?.name);
           const isSameExecutionAgent =
             Boolean(executionAgentNameKey) && executionAgentNameKey === agentNameKey;
+          // R4: only coalesce into the active run when it shares the incoming
+          // adhoc mode. On mismatch this is false, so we fall through to the
+          // deferred path (lock preserved) instead of merging an adhoc body into
+          // a persisted run — or flipping a persisted run to redact-mode.
+          const coalesceModeMatches =
+            selectAdhocCoalesceTarget(activeExecutionRun, adhoc) !== null;
           const shouldQueueFollowupForRunningWake =
             shouldQueueFollowupForRunningIssueWake({ contextSnapshot: enrichedContextSnapshot, wakeCommentId }) &&
             activeExecutionRun.status === "running" &&
             isSameExecutionAgent;
 
-          if (isSameExecutionAgent && !shouldQueueFollowupForRunningWake) {
+          if (isSameExecutionAgent && coalesceModeMatches && !shouldQueueFollowupForRunningWake) {
             const mergedContextSnapshot = mergeCoalescedContextSnapshot(
               activeExecutionRun.contextSnapshot,
               enrichedContextSnapshot,

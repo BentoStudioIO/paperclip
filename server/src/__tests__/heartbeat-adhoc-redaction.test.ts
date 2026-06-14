@@ -7,6 +7,7 @@ import {
   companies,
   createDb,
   heartbeatRuns,
+  issues,
 } from "@paperclipai/db";
 import {
   redactAdhocContext,
@@ -307,5 +308,144 @@ describeEmbeddedPostgres("enqueueWakeup adhoc persistence", () => {
     const ctx = (persisted!.contextSnapshot ?? {}) as Record<string, unknown>;
     expect(ctx.wakeReason).toBe(CLINICAL_REASON);
     expect(ctx.adhoc).toBeUndefined();
+  });
+
+  it("redacts the prompt from an adhoc SKIP-path row (wakeOnDemand disabled)", async () => {
+    const heartbeat = heartbeatService(db);
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `SK${Math.floor(Math.random() * 9000) + 1000}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    // wakeOnDemand:false → an automation wake is skipped (returns null) and
+    // writeSkippedRequest persists the row. Under adhoc it must carry no prompt.
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "process",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: false } },
+      permissions: {},
+    });
+
+    const run = await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: CLINICAL_REASON,
+      payload: { prompt: PHI_PROMPT },
+      requestedByActorType: "system",
+      requestedByActorId: "plugin:test",
+      adhoc: true,
+    });
+    expect(run).toBeNull();
+
+    const skipped = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, agentId))
+      .then((rows) => rows[0]);
+    expect(skipped).toBeDefined();
+    expect(skipped!.status).toBe("skipped");
+    expect(skipped!.reason).toBe("heartbeat.wakeOnDemand.disabled");
+    const payload = (skipped!.payload ?? {}) as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("prompt");
+    expect(JSON.stringify(payload)).not.toContain("chest pain");
+    expect(payload.adhoc).toBe(true);
+  });
+
+  it("does not cross-mode coalesce an adhoc wake into a persisted running issue run (R4)", async () => {
+    const heartbeat = heartbeatService(db);
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    const issuePrefix = `CM${Math.floor(Math.random() * 9000) + 1000}`;
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CEO",
+      role: "ceo",
+      status: "running",
+      adapterType: "process",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    // A persisted (non-adhoc) execution run already locks the issue.
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "running",
+      contextSnapshot: {
+        issueId,
+        taskId: issueId,
+        wakeReason: "issue_assigned",
+        paperclipTaskMarkdown: "persisted clinical body",
+      },
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Locked issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      executionRunId: runId,
+      executionAgentNameKey: "ceo",
+      executionLockedAt: new Date(),
+      issueNumber: 1,
+      identifier: `${issuePrefix}-1`,
+    });
+
+    // An adhoc wake for the SAME issue+agent must NOT merge into the persisted run.
+    const result = await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: CLINICAL_REASON,
+      payload: { prompt: PHI_PROMPT, issueId },
+      contextSnapshot: { issueId, taskId: issueId },
+      requestedByActorType: "system",
+      requestedByActorId: "plugin:test",
+      adhoc: true,
+    });
+    // Cross-mode coalesce is refused → the wake is deferred behind the lock, not merged.
+    expect(result).toBeNull();
+
+    // The persisted running run is untouched: no clinical body re-merged, no marker flip.
+    const lockedRun = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0]);
+    const lockedCtx = (lockedRun!.contextSnapshot ?? {}) as Record<string, unknown>;
+    expect(lockedCtx.adhoc).toBeUndefined();
+    expect(lockedCtx.paperclipTaskMarkdown).toBe("persisted clinical body");
+
+    // The deferred adhoc row stores a redacted context (no prompt, marked adhoc).
+    const deferred = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.status, "deferred_issue_execution"))
+      .then((rows) => rows[0]);
+    expect(deferred).toBeDefined();
+    const deferredPayload = (deferred!.payload ?? {}) as Record<string, unknown>;
+    expect(deferredPayload).not.toHaveProperty("prompt");
+    expect(JSON.stringify(deferredPayload)).not.toContain("chest pain");
+    expect(deferredPayload.adhoc).toBe(true);
   });
 });
