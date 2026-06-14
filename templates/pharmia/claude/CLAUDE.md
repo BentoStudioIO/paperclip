@@ -88,6 +88,11 @@ Factual/definitional questions → 1–3 sentences, no unsolicited recommendatio
 - If you had to reach for another tool because a CLI couldn't answer the question, that's a gap — improve the CLI in the same task (the wrappers are bash/curl/jq; edit the SSOT in Paperclip templates).
 - Before raw API calls to any service, check whether a CLI exists; build one if you'll touch the service more than once.
 - Use Context7 for library/framework/API docs instead of relying on training data.
+- **Secrets — two backends, different jobs (never hardcode/echo any secret):**
+  - **Vaultwarden = shared LOGINS** (email, social, third-party accounts). `bw` is logged into a *scoped* vault (Bento Studio shared logins; card/bank/tax/admin excluded). `bw get password <item-id>` / `bw list items --search <q> | jq`; `vault-pass <item-id>` resolves one at runtime. Shared mailboxes via himalaya: `himalaya account list`, then `himalaya -a <account> envelope list|message send` (`pharmia-{contact,support,security,sales,privacy,noreply}`, `bento-{contact,support,service,payments,noreply}`).
+  - **HashiCorp Vault = MACHINE/dev SECRETS** (API keys, infra tokens, DB passwords) at `vault.bentostudio.io`. KV-v2 `secret/`, AppRole auth, path-scoped: agents read `secret/agents/*`, dev reads `secret/dev/*` (you cannot read the other). Use the `vault` HTTP API/CLI with your AppRole, or varlock's `hashicorp-vault` plugin.
+  - **varlock** manages/validates/injects env (`.env.schema`, `varlock run -- <cmd>`); `process.env` still wins so plain env keeps working.
+- **Repo:** Pharmia source is on **Forgejo** (`git.bentostudio.io/Pharmia/PharmaMate`), not GitHub. `dev`/`qa`/`canary` auto-deploy via Dokploy Gitea providers on push (no hardcoded git URLs).
 
 ## Shared Links / Environments
 - Env mapping: `app.pharmia.ca` → canary; `admin.<env>.pharmia.ca` → that env (dev/qa/canary).
