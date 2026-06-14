@@ -2160,13 +2160,17 @@ export function buildHostServices(
         await ensurePluginAvailableForCompany(companyId);
         const agent = await agents.getById(params.agentId);
         requireInCompany("Agent", agent, companyId);
+        const adhoc = params.adhoc === true;
         const run = await heartbeat.wakeup(params.agentId, {
           source: "automation",
           triggerDetail: "system",
-          reason: params.reason ?? null,
+          // Under adhoc, drop the caller-supplied reason — it can carry clinical
+          // free text that the redaction layer would otherwise have to scrub.
+          reason: adhoc ? null : (params.reason ?? null),
           payload: { prompt: params.prompt },
           requestedByActorType: "system",
           requestedByActorId: pluginId,
+          adhoc,
         });
         if (!run) throw new Error("Agent wakeup was skipped by heartbeat policy");
         return { runId: run.id };
@@ -2636,10 +2640,11 @@ export function buildHostServices(
           .then((rows) => rows[0] ?? null);
         if (!session) throw new Error(`Session not found: ${params.sessionId}`);
 
+        const adhoc = params.adhoc === true;
         const run = await heartbeat.wakeup(session.agentId, {
           source: "automation",
           triggerDetail: "system",
-          reason: params.reason ?? null,
+          reason: adhoc ? null : (params.reason ?? null),
           payload: { prompt: params.prompt },
           contextSnapshot: {
             taskKey: session.taskKey,
@@ -2648,6 +2653,7 @@ export function buildHostServices(
           },
           requestedByActorType: "system",
           requestedByActorId: pluginId,
+          adhoc,
         });
         if (!run) throw new Error("Agent wakeup was skipped by heartbeat policy");
 

@@ -218,6 +218,20 @@ const LIVENESS_BOOKKEEPING_ACTIVITY_ACTIONS = [
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const WAKE_COMMENT_IDS_KEY = "wakeCommentIds";
 const PAPERCLIP_WAKE_PAYLOAD_KEY = "paperclipWake";
+// Context-snapshot keys that carry the (potentially clinical) prompt body.
+// Under an adhoc/no-persist wake these are stripped from the persisted copy so
+// nothing durable holds PHI, while the in-memory context still feeds the live run.
+const ADHOC_SENSITIVE_CONTEXT_KEYS = [
+  PAPERCLIP_WAKE_PAYLOAD_KEY,
+  "paperclipWakeComment",
+  "paperclipTaskMarkdown",
+  "paperclipIssue",
+  "wakeReason",
+  "paperclipContinuationSummary",
+] as const;
+// Wake-request payload keys that may carry free-text/clinical body. Everything
+// not listed here is treated as structural routing metadata and preserved.
+const ADHOC_SENSITIVE_PAYLOAD_KEYS = ["prompt", "message", "text", "body"] as const;
 const PAPERCLIP_HARNESS_CHECKOUT_KEY = "paperclipHarnessCheckedOut";
 const DETACHED_PROCESS_ERROR_CODE = "process_detached";
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
@@ -1373,6 +1387,12 @@ interface WakeupOptions {
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   contextSnapshot?: Record<string, unknown>;
+  /**
+   * When true the run is ephemeral: the prompt and clinical context are NOT
+   * persisted (wake-request payload/reason and run context_snapshot are
+   * redacted), while run-tracking metadata (status/usage/lifecycle) is kept.
+   */
+  adhoc?: boolean;
 }
 
 type UsageTotals = {
@@ -2365,6 +2385,58 @@ export function mergeCoalescedContextSnapshot(
     clearInteractionContinuationWakeContext(merged);
   }
   return merged;
+}
+
+/**
+ * Redact a wake-request payload for an adhoc/no-persist run: drop the prompt and
+ * any free-text body keys (which may carry clinical PHI) while keeping the
+ * structural routing keys (issueId/taskId/commentId/mutation/...) the queue needs.
+ * Returns a fresh object marked `adhoc:true`; never mutates the input.
+ */
+export function redactWakePayload(
+  payload: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  const redacted: Record<string, unknown> = { ...(payload ?? {}) };
+  for (const key of ADHOC_SENSITIVE_PAYLOAD_KEYS) {
+    delete redacted[key];
+  }
+  redacted.adhoc = true;
+  return redacted;
+}
+
+/**
+ * Redact a run context_snapshot for an adhoc/no-persist run: strip the
+ * clinical-bearing keys before the value is handed to the DB persist call.
+ * Returns a fresh object (the live in-memory context is left untouched so the
+ * running agent still receives the full prompt — see R3/REQ-009) marked
+ * `adhoc:true`. Operational keys (environment, workspace, model profile, source,
+ * taskKey, status/usage) are preserved for observability (REQ-007).
+ */
+export function redactAdhocContext(
+  ctx: Record<string, unknown>,
+): Record<string, unknown> {
+  const redacted: Record<string, unknown> = { ...ctx };
+  for (const key of ADHOC_SENSITIVE_CONTEXT_KEYS) {
+    delete redacted[key];
+  }
+  redacted.adhoc = true;
+  return redacted;
+}
+
+/**
+ * Coalescing guard (R4): an adhoc wake must not merge into a persisted run and a
+ * persisted wake must not merge into an adhoc run — otherwise the redacted body
+ * could be merged into a persisted context (or vice-versa). Returns the candidate
+ * run only when its persisted adhoc mode matches the incoming wake; otherwise null
+ * (forcing a fresh run instead of a cross-mode coalesce).
+ */
+export function selectAdhocCoalesceTarget<T extends { contextSnapshot: unknown }>(
+  candidate: T | null | undefined,
+  adhoc: boolean,
+): T | null {
+  if (!candidate) return null;
+  const candidateAdhoc = parseObject(candidate.contextSnapshot).adhoc === true;
+  return candidateAdhoc === adhoc ? candidate : null;
 }
 
 export async function buildPaperclipWakePayload(input: {
@@ -7684,6 +7756,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     const runtime = await ensureRuntimeState(agent);
     const context = parseObject(run.contextSnapshot);
+    // Adhoc runs were marked at enqueue time; the marker survives in the persisted
+    // context, so the executor keeps every DB context_snapshot write redacted while
+    // the in-memory `context` still carries the full prompt for the live adapter run.
+    const adhoc = context.adhoc === true;
+    const persistRunContext = (ctx: Record<string, unknown>) =>
+      adhoc ? redactAdhocContext(ctx) : ctx;
     const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
     const sessionCodec = getAdapterSessionCodec(agent.adapterType);
     const issueId = readNonEmptyString(context.issueId);
@@ -8330,7 +8408,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await db
         .update(heartbeatRuns)
         .set({
-          contextSnapshot: context,
+          contextSnapshot: persistRunContext(context),
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id));
@@ -8398,7 +8476,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     await db
       .update(heartbeatRuns)
       .set({
-        contextSnapshot: context,
+        contextSnapshot: persistRunContext(context),
         updatedAt: new Date(),
       })
       .where(eq(heartbeatRuns.id, run.id));
@@ -8559,7 +8637,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .set({
           startedAt,
           sessionIdBefore: runtimeForAdapter.sessionDisplayId ?? runtimeForAdapter.sessionId,
-          contextSnapshot: context,
+          contextSnapshot: persistRunContext(context),
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id))
@@ -8709,7 +8787,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         await db
           .update(heartbeatRuns)
           .set({
-            contextSnapshot: context,
+            contextSnapshot: persistRunContext(context),
             updatedAt: new Date(),
           })
           .where(eq(heartbeatRuns.id, run.id));
@@ -8865,7 +8943,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         await db
           .update(heartbeatRuns)
           .set({
-            contextSnapshot: context,
+            contextSnapshot: persistRunContext(context),
             updatedAt: new Date(),
           })
           .where(eq(heartbeatRuns.id, run.id));
@@ -9802,6 +9880,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const contextSnapshot: Record<string, unknown> = { ...(opts.contextSnapshot ?? {}) };
     const reason = opts.reason ?? null;
     const payload = opts.payload ?? null;
+    const adhoc = opts.adhoc === true;
+    // For an adhoc/no-persist wake, derive redacted copies for the durable sinks
+    // (wake-request payload/reason and run context_snapshot) while the unredacted
+    // values keep driving routing/skipped-writes and the live agent run (R3).
+    const persistPayload = adhoc ? redactWakePayload(payload) : payload;
+    const persistReason = adhoc ? null : reason;
+    const persistedContext = (ctx: Record<string, unknown>) =>
+      adhoc ? redactAdhocContext(ctx) : ctx;
     const {
       contextSnapshot: enrichedContextSnapshot,
       issueIdFromPayload,
@@ -10266,7 +10352,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             const mergedRun = await tx
               .update(heartbeatRuns)
               .set({
-                contextSnapshot: mergedContextSnapshot,
+                contextSnapshot: persistedContext(mergedContextSnapshot),
                 updatedAt: new Date(),
               })
               .where(eq(heartbeatRuns.id, activeExecutionRun.id))
@@ -10279,7 +10365,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               source,
               triggerDetail,
               reason: "issue_execution_same_name",
-              payload,
+              payload: persistPayload,
               status: "coalesced",
               coalescedCount: 1,
               requestedByActorType: opts.requestedByActorType ?? null,
@@ -10293,9 +10379,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           }
 
           const deferredPayload = {
-            ...(payload ?? {}),
+            ...(persistPayload ?? {}),
             issueId,
-            [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot,
+            [DEFERRED_WAKE_CONTEXT_KEY]: persistedContext(enrichedContextSnapshot),
           };
 
           const existingDeferred = await tx
@@ -10322,9 +10408,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             );
             const mergedDeferredPayload = {
               ...existingDeferredPayload,
-              ...(payload ?? {}),
+              ...(persistPayload ?? {}),
               issueId,
-              [DEFERRED_WAKE_CONTEXT_KEY]: mergedDeferredContext,
+              [DEFERRED_WAKE_CONTEXT_KEY]: persistedContext(mergedDeferredContext),
             };
 
             await tx
@@ -10362,8 +10448,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             agentId,
             source,
             triggerDetail,
-            reason,
-            payload,
+            reason: persistReason,
+            payload: persistPayload,
             status: "queued",
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
@@ -10381,7 +10467,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             triggerDetail,
             status: "queued",
             wakeupRequestId: wakeupRequest.id,
-            contextSnapshot: enrichedContextSnapshot,
+            contextSnapshot: persistedContext(enrichedContextSnapshot),
             sessionIdBefore: sessionBefore,
             continuationAttempt,
           })
@@ -10446,10 +10532,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       !sameScopeQueuedRun &&
       shouldQueueFollowupForRunningIssueWake({ contextSnapshot: enrichedContextSnapshot, wakeCommentId });
 
-    const coalescedTargetRun =
+    const coalescedTargetRun = selectAdhocCoalesceTarget(
       sameScopeQueuedRun ??
-      sameScopeScheduledRetryRun ??
-      (shouldQueueFollowupForRunningWake ? null : sameScopeRunningRun ?? null);
+        sameScopeScheduledRetryRun ??
+        (shouldQueueFollowupForRunningWake ? null : sameScopeRunningRun ?? null),
+      adhoc,
+    );
 
     if (coalescedTargetRun) {
       const mergedContextSnapshot = mergeCoalescedContextSnapshot(
@@ -10459,7 +10547,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const mergedRun = await db
         .update(heartbeatRuns)
         .set({
-          contextSnapshot: mergedContextSnapshot,
+          contextSnapshot: persistedContext(mergedContextSnapshot),
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, coalescedTargetRun.id))
@@ -10471,8 +10559,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         agentId,
         source,
         triggerDetail,
-        reason,
-        payload,
+        reason: persistReason,
+        payload: persistPayload,
         status: "coalesced",
         coalescedCount: 1,
         requestedByActorType: opts.requestedByActorType ?? null,
@@ -10491,8 +10579,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         agentId,
         source,
         triggerDetail,
-        reason,
-        payload,
+        reason: persistReason,
+        payload: persistPayload,
         status: "queued",
         requestedByActorType: opts.requestedByActorType ?? null,
         requestedByActorId: opts.requestedByActorId ?? null,
@@ -10510,7 +10598,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         triggerDetail,
         status: "queued",
         wakeupRequestId: wakeupRequest.id,
-        contextSnapshot: enrichedContextSnapshot,
+        contextSnapshot: persistedContext(enrichedContextSnapshot),
         sessionIdBefore: sessionBefore,
         continuationAttempt,
       })

@@ -1484,7 +1484,15 @@ export interface PluginAgentsClient {
   /** Resume a paused agent (sets status to idle). Throws if terminated, pending_approval, or not found. Requires `agents.resume`. */
   resume(agentId: string, companyId: string): Promise<Agent>;
   /** Invoke (wake up) an agent with a prompt payload. Throws if paused, terminated, pending_approval, or not found. Requires `agents.invoke`. */
-  invoke(agentId: string, companyId: string, opts: { prompt: string; reason?: string }): Promise<{ runId: string }>;
+  invoke(
+    agentId: string,
+    companyId: string,
+    /**
+     * When `adhoc` is true, the run is ephemeral — the prompt and clinical context
+     * are not persisted; only run-tracking metadata is kept.
+     */
+    opts: { prompt: string; reason?: string; adhoc?: boolean },
+  ): Promise<{ runId: string }>;
   /** Resolve and reconcile manifest-declared plugin-managed agents by stable key. Requires `agents.managed`. */
   managed: {
     get(agentKey: string, companyId: string): Promise<PluginManagedAgentResolution>;
@@ -1557,6 +1565,11 @@ export interface PluginAgentSessionsClient {
   sendMessage(sessionId: string, companyId: string, opts: {
     prompt: string;
     reason?: string;
+    /**
+     * When true, the run is ephemeral — the prompt and clinical context are not
+     * persisted; only run-tracking metadata is kept.
+     */
+    adhoc?: boolean;
     onEvent?: (event: AgentSessionEvent) => void;
   }): Promise<AgentSessionSendResult>;
 

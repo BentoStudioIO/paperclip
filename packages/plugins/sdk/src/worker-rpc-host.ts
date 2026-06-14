@@ -1025,8 +1025,8 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           return callHost("agents.resume", { agentId, companyId });
         },
 
-        async invoke(agentId: string, companyId: string, opts: { prompt: string; reason?: string }) {
-          return callHost("agents.invoke", { agentId, companyId, prompt: opts.prompt, reason: opts.reason });
+        async invoke(agentId: string, companyId: string, opts: { prompt: string; reason?: string; adhoc?: boolean }) {
+          return callHost("agents.invoke", { agentId, companyId, prompt: opts.prompt, reason: opts.reason, adhoc: opts.adhoc });
         },
 
         managed: {
@@ -1060,6 +1060,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           async sendMessage(sessionId: string, companyId: string, opts: {
             prompt: string;
             reason?: string;
+            adhoc?: boolean;
             onEvent?: (event: AgentSessionEvent) => void;
           }) {
             if (opts.onEvent) {
@@ -1071,6 +1072,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
                 companyId,
                 prompt: opts.prompt,
                 reason: opts.reason,
+                adhoc: opts.adhoc,
               });
             } catch (err) {
               sessionEventCallbacks.delete(sessionId);
