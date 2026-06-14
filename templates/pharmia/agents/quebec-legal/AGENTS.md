@@ -1,6 +1,7 @@
 ---
 name: "Quebec Legal"
 title: "Legal & Compliance"
+reportsTo: "ceo"
 ---
 
 ---

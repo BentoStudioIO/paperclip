@@ -1,6 +1,7 @@
 ---
 name: "Engineering Lead"
 title: "Engineering Lead"
+reportsTo: "ceo"
 skills:
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/workflow"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pragmatic-programmer"

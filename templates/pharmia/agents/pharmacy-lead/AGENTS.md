@@ -1,6 +1,7 @@
 ---
 name: "Pharmacy Lead"
 title: "Pharmacy, Billing & Standards-of-Practice"
+reportsTo: "ceo"
 skills:
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-cli"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-agents"
