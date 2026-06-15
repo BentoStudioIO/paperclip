@@ -39,12 +39,18 @@ $SUDO apt-get install -y --no-install-recommends \
   python3 python3-pip ripgrep less unzip xz-utils bzip2 build-essential \
   tmux screen
 if [ "${WITH_BROWSERS:-0}" = "1" ]; then
-  say "apt: browser/X11 runtime deps"
+  say "apt: browser/X11 runtime deps (resilient: Debian bookworm + Ubuntu 24.04 noble t64)"
+  # Names common to bookworm + noble (best-effort; do not abort the whole provisioner):
   $SUDO apt-get install -y --no-install-recommends \
-    libgtk-3-0 libdbus-glib-1-2 libxt6 libasound2 libx11-xcb1 libxcomposite1 \
-    libxcursor1 libxdamage1 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 \
-    libxtst6 libegl1-mesa libgl1-mesa-dri libgbm1 xvfb \
-    fonts-liberation fonts-noto-color-emoji fontconfig
+    libdbus-glib-1-2 libx11-xcb1 libxcomposite1 libxcursor1 libxdamage1 \
+    libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 \
+    libgl1-mesa-dri libgbm1 xvfb fonts-liberation fonts-noto-color-emoji fontconfig || true
+  # t64-renamed on Ubuntu 24.04 (noble): try the noble name, fall back to the bookworm name.
+  apt_one(){ for p in "$@"; do $SUDO apt-get install -y --no-install-recommends "$p" >/dev/null 2>&1 && return 0; done; echo "WARN: browser dep unavailable (tried: $*)"; }
+  apt_one libasound2t64 libasound2
+  apt_one libgtk-3-0t64 libgtk-3-0
+  apt_one libxt6t64 libxt6
+  apt_one libegl1 libegl1-mesa
 fi
 
 # 2) Node (install only if absent — the Docker base image already ships it) ----------------
