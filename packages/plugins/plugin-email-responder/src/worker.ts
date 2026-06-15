@@ -219,6 +219,14 @@ async function processInbox(ctx: PluginContext, cfg: ResolvedConfig, inbox: Inbo
           { model: cfg.model, baseUrl: cfg.gatewayBaseUrl, token: gatewayToken },
         );
 
+        if (decision.transient) {
+          // Transient gateway error (429/5xx): do NOT advance the cursor — stop this
+          // tick's batch and retry from this message next tick once the gateway has
+          // capacity. A rate-limit hits every message equally, so processing the rest
+          // now is pointless and would skip them.
+          ctx.logger.warn("Transient gateway error; retrying next tick", { inbox: inbox.address, uid, reason: decision.reason });
+          break;
+        }
         if (!decision.shouldReply || !decision.draft) {
           ctx.logger.info("No draft produced", { inbox: inbox.address, uid, reason: decision.reason });
           await writeCursor(ctx, inbox.address, { uidValidity, lastUid: uid });

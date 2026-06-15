@@ -13,6 +13,8 @@ export interface DraftDecision {
   shouldReply: boolean;
   reason: string;
   draft?: { subject: string; body: string };
+  /** True when the failure was a transient gateway error (429 / 5xx) worth retrying. */
+  transient?: boolean;
 }
 
 export interface IncomingEmailForDraft {
@@ -83,9 +85,12 @@ export async function draftReply(email: IncomingEmailForDraft, opts: DraftOption
     }
     return { shouldReply: out.shouldReply, reason: out.reason ?? "", draft: out.draft };
   } catch (err) {
+    const status = (err as { status?: number } | undefined)?.status;
+    const transient = status === 429 || (typeof status === "number" && status >= 500);
     return {
       shouldReply: false,
       reason: `gateway error: ${err instanceof Error ? err.message : String(err)}`,
+      transient,
     };
   }
 }
