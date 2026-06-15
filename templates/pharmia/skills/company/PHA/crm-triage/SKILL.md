@@ -65,8 +65,9 @@ twenty person upsert --email X --first .. --last .. --phone +1.. --city .. \
   --pharmia-user-id <ba_user.id>     # CRM<->app link → marks them an Atlas user.
                                      # Set whenever they have a Pharmia account; get
                                      # id via `pg canary app "SELECT id FROM ba_user
-                                     # WHERE lower(email)='<email>'"`. (Daily
-                                     # pharmia-twenty-atlas-sync backfills by email.)
+                                     # WHERE lower(email)='<email>'"`. No scheduled sync
+                                     # sets this — pharmia-twenty-atlas-sync is a manual
+                                     # helper that fills pharmiaUserId only; set it yourself.
 twenty opportunity get --person <id>                 # dedupe before creating
 twenty opportunity create --name ".." --stage MEETING --close-date <ISO> --person <id>
 twenty note add --title ".." --md ".." --link person:<id> [--link opportunity:<id>]

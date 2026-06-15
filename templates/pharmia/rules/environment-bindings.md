@@ -1,9 +1,10 @@
-# Environment Bindings — Pharmia agent sandbox
+# Environment Bindings — Pharmia agents-VPS runtime
 
-Tool and CLI bindings available **inside the Daytona agent sandbox**. This is a trimmed
-copy of the host `~/.claude/rules/environment-bindings.md` — only the tools that are baked
-into the agent-runtime image (or whose creds are injected at runtime) are listed here.
-Trading/music/personal host-only tools are intentionally omitted.
+Tool and CLI bindings available in the **agents-VPS runtime** — where the Paperclip agents run via
+SSH (user `agent`, harness `/home/agent/.claude` on the agents box). This is a trimmed copy of the
+host `~/.claude/rules/environment-bindings.md` — only the tools present on the agents-VPS runtime (or
+whose creds are injected at runtime) are listed here. Trading/music/personal host-only tools are
+intentionally omitted.
 
 ## CLI Maintenance
 
@@ -47,21 +48,21 @@ Observability (prod is READ-ONLY — canary tokens / read-only PG role):
 
 Pharmia dev / data:
 - **pg** — `pg <env> <db>` Postgres over SSH tunnel. dev/qa read-write; canary/prod is the READ-ONLY role.
-- **threads** — agent-thread inspector. `threads <admin-url>` (auto-detect env) or `threads <env> <id>`; default RCA-grade; `--rca` `--summary` `--tools` `--last` `--raw` `--json`; `modelmix <env>`. Backed by `pg <env> mastra`.
-- **langfuse** — `langfuse api traces list --limit 20 --tags atlas --json`. Always `--limit`/time filters (unfiltered list 422s). Use `--fields core,metrics`; `observations-v2s` not `observations`. No server-side text search — pipe through jq.
+- **threads** — agent-thread inspector. `threads <admin-url>` (auto-detect env) or `threads <env> <id>`; default RCA-grade, plus `--rca`/`--summary`/`--tools`/per-thread modes and `modelmix <env>` for the fleet model split; see `threads --help`. Backed by `pg <env> mastra`.
+- **langfuse** — AI trace inspection. `langfuse api traces list …`; **always** pass `--limit` or a time filter (unfiltered list 422s); no server-side text search — pipe through jq. Output-shaping flags and the `observations-v2s` gotcha: `langfuse --help`.
 
 Knowledge / compliance:
 - **ol** — Outline wiki (`search`, `doc get|update|create|list`, `verify`, `linkcheck`). Quebec docs + agent skills live there.
-- **comp** — Comp AI GRC (policies/controls/frameworks/tasks/evidence; `sql` escape hatch). **read-write** in the sandbox.
+- **comp** — Comp AI GRC (policies/controls/frameworks/tasks/evidence; `sql` escape hatch). **read-write** on this runtime.
 
 Services / billing:
 - **twenty** — `twenty gql '...'` / `twenty objects|fields` Twenty CRM (auto-JWT).
 - **autumn** — Autumn billing (customers/products/check/track/attach). Reads `AUTUMN_SECRET_KEY` from env (live key — read commands only).
 - **shlink** — short links + visit analytics + QR.
-- **cfdns** — Cloudflare DNS (always `proxied:false`). dev-scoped token only in the sandbox.
-- **dokploy** — Dokploy ops (`apps`, `status`, `logs`, `env-set`). Only the bento dev/qa instance config in the sandbox.
+- **cfdns** — Cloudflare DNS (always `proxied:false`). dev-scoped token only on this runtime.
+- **dokploy** — Dokploy ops (`apps`, `status`, `logs`, `env-set`). Only the bento dev/qa instance config on this runtime.
 - **pharmia-git** — git/release workflow (`topology`, `extra`, `ff-all`, `confine`, `deploy-status`).
-- **pharmia-tenant** / **pharmia-rc** — tenant provisioning / host Remote Control (prod-capable; dev/qa-scoped in the sandbox).
+- **pharmia-tenant** / **pharmia-rc** — tenant provisioning / host Remote Control (prod-capable; dev/qa-scoped on this runtime).
 
 Security:
 - **gh** — GitHub CLI for issues, PRs, checks, releases, API. Requires `GITHUB_APP_*`/token (injected).
@@ -69,7 +70,7 @@ Security:
 - **oha** — HTTP load testing. Validate perf fixes / reproduce load issues.
 
 Web / scraping (two browser engines — both baked, do NOT run both heavy in parallel; 4 GB RAM ceiling):
-- **bx** — Brave Search CLI. `bx web "query"` (use `web` mode; `context` mode is broken). Requires `BRAVE_SEARCH_API_KEY` (injected). Parse JSON with python3/jq.
+- **bx** — Brave Search CLI. `bx web "query"`. Requires `BRAVE_SEARCH_API_KEY` (injected). Parse JSON with python3/jq; modes/flags via `bx --help`.
 - **curl_cffi** — Python (`from curl_cffi.requests import Session`) forging TLS fingerprints to bypass WAF/Cloudflare. `Session(impersonate='chrome136')`. Try before a headless browser — faster, zero RAM overhead.
 - **camofox** — anti-detect Firefox (Camoufox), the **anti-detect browser** for bot-protected sites (Cloudflare/Akamai/DataDome). `camofox start`, `camofox tab <url>`, `camofox snap <tabId>`, `camofox click <tabId> <ref>`, `camofox screenshot <tabId>`, `camofox stop`. Uses Xvfb for full anti-detection.
 - **agent-browser** — compatibility shim that **delegates to `camofox`** (no separate binary). Use camofox directly when you can; agent-browser exists for callers that use its verb names.

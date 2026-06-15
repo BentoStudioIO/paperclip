@@ -21,11 +21,11 @@ based on their online activity?** You produce a ranked DM list and write qualifi
 **The HUMAN sends the DMs** — founder-led sales. You never send a message — no DM, no email (ETHOS: outbound communication is human-authorized).
 
 ## The four signal sources (cross them — the full method is in `lead-scouting`)
-1. **OPQ repertoire** — `curl -s 'https://www.opq.org/wp-content/uploads/pharmacist-search/pharmacists_index.json'`
-   → JSON array (`fullName`, `licenseNumber`, `city`, `isStudent`). Filter to **pharmacien-propriétaires**
-   (owner-operators — the ICP with purchasing power). Drop students.
-2. **Twenty CRM** — `twenty gql '<query>'` to dedupe against existing people/companies. Never DM someone
-   already in an active opportunity. Discover schema with `twenty objects` / `twenty fields person`.
+1. **OPQ repertoire** — the OPQ pharmacists index (JSON: `fullName`, `licenseNumber`, `city`, `isStudent`).
+   Filter to **pharmacien-propriétaires** (owner-operators — the ICP with purchasing power). Drop students.
+   (The exact OPQ fetch + jq filter is in the `crm-triage` skill → "OPQ classify".)
+2. **Twenty CRM** — dedupe against existing people/companies; never DM someone already in an active
+   opportunity. Use the high-level `twenty` subcommands; discover live schema with `twenty fields person`.
 3. **Online-activity signals** — the EXISTING n8n + Browserless LinkedIn pipeline (see `lead-scouting` for
    the workflow ref). It surfaces key-people LinkedIn posts/activity. **LinkedIn is login-walled — jina and
    camofox CANNOT read it; only the n8n+Browserless pipeline can, and it is fragile/best-effort.** When it
@@ -56,9 +56,10 @@ LINKEDIN PIPELINE: <ran ok | empty | unavailable — honest status>
   never hand-crafted UUIDs. Dedupe first (`person get` / `opportunity get --person`). Enrich with title/city/OPQ
   license before writing. Confirm against OPQ before asserting ownership.
 - **Link to the app**: if the prospect already has a Pharmia account, set `twenty person upsert … --pharmia-user-id <ba_user.id>`
-  (`pg canary app "SELECT id FROM ba_user WHERE lower(email)='<email>'"`) — that's what marks them an **Atlas user**
-  in the CRM (a pharmacist owner who's already trialing Atlas is the hottest possible lead). The daily
-  `pharmia-twenty-atlas-sync` cron backfills this by email, but set it explicitly when you know it.
+  — that's what marks them an **Atlas user** in the CRM (a pharmacist owner who's already trialing Atlas is the
+  hottest possible lead). Get the `ba_user.id` by email from canary (the lookup is in `crm-triage`). There is **no
+  scheduled sync** that backfills this today (`pharmia-twenty-atlas-sync` is a manual/unscheduled helper, and it only
+  fills `pharmiaUserId`, never `atlasUsage`) — so set it explicitly whenever you know the account.
 
 ## Rules
 - You rank and write to CRM; you NEVER send a DM. Output is a human action list.
