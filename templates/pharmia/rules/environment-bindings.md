@@ -20,6 +20,13 @@ call, raw SQL, web search, …) to answer the question, that's a gap in the firs
 same task so the next zero-context agent gets the answer from one invocation. The default
 invocation should answer the headline question without follow-up calls.
 
+## Secrets & Vaults
+
+**Never hardcode a secret** in code / a CLI / a compose file — push-protection blocks it. Read from injected env or a vault. Two backends, deliberate split:
+- **HashiCorp Vault** (`vault.bentostudio.io`, KV-v2 + AppRole, path-scoped `secret/{agents,dev,paperclip}/*`) = MACHINE / dev / service secrets (API keys, infra tokens, PG passwords). Consume via varlock's `hashicorp-vault` plugin or the `vault` HTTP API.
+- **Vaultwarden** (`vaultwarden.bentostudio.io`, SSO-only) = HUMAN / shared logins. The agents' scoped service account reads its org collections (NOT card/bank/tax) → **`vault-pass <item-id>`** fetches one password non-interactively (used by himalaya + varlock `exec()`).
+- **varlock** validates + injects env at runtime (`.env.schema` with `@required`/`@sensitive`; `varlock run -- <cmd>` injects + redacts). `process.env` always wins, so Dokploy-injected env keeps working as a fallback.
+
 ## Research Toolkit
 
 Priority-ordered sources for investigations. Work top-down, stop when covered.

@@ -75,13 +75,6 @@ dokploy bento env-rollback <app> [<sha>]         # restore prior env from git hi
 - **Container registry** = the same Forgejo (`git.bentostudio.io`). Private images only; never push to a public registry.
 - Git discipline (no `--force`/`--force-with-lease`/`--no-verify`, fetch + verify fast-forward before push) is in ETHOS → "Linear git history". The one sanctioned exception (CTO-directed canary force-push) is operator-only — agents run prod **read-only**.
 
-## Secrets model
-
-Two backends, deliberate split — **never hardcode a secret** in code/CLI/compose (push-protection blocks it; read from env or a vault):
-- **HashiCorp Vault** (`vault.bentostudio.io`, on devops; KV-v2 + AppRole; path-scoped `secret/{agents,dev,paperclip}/*`; manual-unseal) = MACHINE / dev / service secrets (API keys, infra tokens, PG passwords).
-- **Vaultwarden** (`vaultwarden.bentostudio.io`, SSO-only) = HUMAN / shared logins. Agents have a scoped read-write service account (Bento Studio org collections; NOT card/bank/tax) → **`vault-pass <item-id>`** fetches one password non-interactively (used by himalaya + varlock).
-- **varlock** validates + injects env at runtime (`.env.schema`, `varlock run -- <cmd>`); `process.env` always wins, so non-varlock (Dokploy-injected) paths keep working as a fallback.
-
 ## Backups
 
 - **Off-host WORM** — clinical Postgres + mastra + blobs back up to MinIO with **Object Lock** (immutable), least-priv `pharmia-backup-svc` key, ILM 35d.
