@@ -1,4 +1,5 @@
 import { ImapFlow } from "imapflow";
+import { simpleParser } from "mailparser";
 import {
   definePlugin,
   runWorker,
@@ -55,13 +56,6 @@ async function getConfig(ctx: PluginContext): Promise<ResolvedConfig> {
   };
 }
 
-function firstHeader(headers: Map<string, string[] | string> | undefined, name: string): string {
-  if (!headers) return "";
-  const v = headers.get(name);
-  if (Array.isArray(v)) return v[0] ?? "";
-  return v ?? "";
-}
-
 /** Resolve the IMAP password for one inbox and build a connected client. */
 async function connectInbox(ctx: PluginContext, cfg: ResolvedConfig, inbox: InboxConfig): Promise<ImapFlow> {
   const pass = await ctx.secrets.resolve(inbox.passwordRef);
@@ -93,57 +87,50 @@ async function writeCursor(ctx: PluginContext, address: string, cursor: CursorSt
   await ctx.state.set({ scopeKind: "company", namespace: address, stateKey: CURSOR_STATE_KEY }, cursor);
 }
 
+/** Cap the body fed to the LLM + the Discord snippet — full HTML mails can be huge. */
+const MAX_BODY_CHARS = 4000;
+
+/** mailparser header values may be string | string[] | structured — flatten to a string. */
+function headerString(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(headerString).join(", ");
+  if (typeof value === "object" && "text" in (value as Record<string, unknown>)) {
+    return String((value as { text?: unknown }).text ?? "");
+  }
+  return String(value);
+}
+
 /**
- * Fetch every incoming-mail view the pipeline needs in a single UID-range pass:
- * envelope (subject/from), the headers the noise filter + threading need, and the
- * raw source (for the plain-text body). Doing it in one pass means all IMAP reads
- * happen while INBOX is locked; the slow LLM/Discord/append work runs after.
+ * Fetch every incoming message past the cursor and parse it with mailparser, which
+ * yields clean HTML-stripped plain text + properly decoded headers (RFC2047 words,
+ * multipart, quoted-printable). All IMAP reads happen while INBOX is locked; the
+ * slow LLM/Discord/append work runs after.
  */
 async function fetchIncoming(client: ImapFlow, lastUid: number): Promise<IncomingMail[]> {
   const out: IncomingMail[] = [];
   // imapflow treats `<n>:*` as inclusive, so start at lastUid+1.
   // selectUidsToProcess re-filters defensively (> lastUid).
   const range = `${lastUid + 1}:*`;
-  for await (const msg of client.fetch(
-    range,
-    {
-      uid: true,
-      envelope: true,
-      source: true,
-      headers: ["message-id", "from", "reply-to", "subject", "date", "auto-submitted", "list-unsubscribe", "precedence"],
-    },
-    { uid: true },
-  )) {
-    const headerMap = msg.headers ? parseHeaderLines(msg.headers.toString()) : {};
-    const envFrom = msg.envelope?.from?.[0]?.address ?? "";
-    const replyTo = headerMap["reply-to"] ?? "";
+  for await (const msg of client.fetch(range, { uid: true, source: true }, { uid: true })) {
+    if (!msg.source) continue;
+    const parsed = await simpleParser(msg.source);
+    const from = parsed.replyTo?.value?.[0]?.address || parsed.from?.value?.[0]?.address || "";
     out.push({
       uid: Number(msg.uid),
-      from: replyTo || headerMap["from"] || envFrom,
-      subject: msg.envelope?.subject ?? headerMap["subject"] ?? "",
-      messageId: headerMap["message-id"] ?? (msg.envelope?.messageId ?? ""),
-      headers: headerMap,
-      body: msg.source ? extractPlainText(msg.source.toString()) : "",
+      from,
+      subject: parsed.subject ?? "",
+      messageId: parsed.messageId ?? "",
+      headers: {
+        "auto-submitted": headerString(parsed.headers.get("auto-submitted")),
+        "list-unsubscribe": headerString(parsed.headers.get("list-unsubscribe")),
+        precedence: headerString(parsed.headers.get("precedence")),
+        date: parsed.date ? parsed.date.toISOString() : "",
+      },
+      body: (parsed.text ?? "").slice(0, MAX_BODY_CHARS),
     });
   }
   return out;
-}
-
-/** Parse a raw header block into a lowercased-name -> value map (first wins). */
-function parseHeaderLines(block: string): Record<string, string> {
-  const map: Record<string, string> = {};
-  for (const line of block.split(/\r?\n/)) {
-    const m = line.match(/^([A-Za-z-]+):\s?(.*)$/);
-    if (m && !(m[1]!.toLowerCase() in map)) map[m[1]!.toLowerCase()] = m[2]!.trim();
-  }
-  return map;
-}
-
-/** Crude text/plain extraction from a raw RFC822 source (good enough for snippet + LLM). */
-function extractPlainText(raw: string): string {
-  const sepIndex = raw.search(/\r?\n\r?\n/);
-  const body = sepIndex >= 0 ? raw.slice(sepIndex).trim() : raw;
-  return body.replace(/=\r?\n/g, "").trim();
 }
 
 async function postDiscord(
@@ -210,48 +197,72 @@ async function processInbox(ctx: PluginContext, cfg: ResolvedConfig, inbox: Inbo
       const mail = byUid.get(uid);
       if (!mail) continue;
 
-      if (isMachineNoise(mail)) {
-        ctx.logger.info("Skipped machine noise", { inbox: inbox.address, uid, from: mail.from });
+      try {
+        if (isMachineNoise(mail)) {
+          ctx.logger.info("Skipped machine noise", { inbox: inbox.address, uid, from: mail.from });
+          await writeCursor(ctx, inbox.address, { uidValidity, lastUid: uid });
+          continue;
+        }
+
+        const decision = await draftReply(
+          { inboxAddress: inbox.address, from: mail.from, subject: mail.subject, date: mail.headers["date"] ?? "", body: mail.body },
+          cfg.model,
+        );
+
+        if (!decision.shouldReply || !decision.draft) {
+          ctx.logger.info("No draft produced", { inbox: inbox.address, uid, reason: decision.reason });
+          await writeCursor(ctx, inbox.address, { uidValidity, lastUid: uid });
+          continue;
+        }
+
+        const raw = buildReplyRfc822({
+          fromAddress: inbox.address,
+          incomingFrom: mail.from,
+          incomingSubject: mail.subject,
+          incomingMessageId: mail.messageId,
+          body: decision.draft.body,
+          signature: inbox.signature,
+        });
+
+        // APPEND targets Drafts; it does not require INBOX to be the locked mailbox.
+        const appended = await client.append(DRAFTS_FOLDER, raw, ["\\Draft"]);
+        const appendUid = appended && typeof appended === "object" ? appended.uid : undefined;
+
+        // The draft is the durable deliverable: advance the cursor IMMEDIATELY after
+        // APPEND, BEFORE the Discord post, so a Discord failure can never cause a
+        // re-APPEND (duplicate draft) on the next tick.
         await writeCursor(ctx, inbox.address, { uidValidity, lastUid: uid });
-        continue;
-      }
+        ctx.logger.info("Drafted reply", { inbox: inbox.address, uid, appendUid });
 
-      const decision = await draftReply(
-        { inboxAddress: inbox.address, from: mail.from, subject: mail.subject, date: mail.headers["date"] ?? "", body: mail.body },
-        cfg.model,
-      );
-
-      if (!decision.shouldReply || !decision.draft) {
-        ctx.logger.info("No draft produced", { inbox: inbox.address, uid, reason: decision.reason });
+        // Discord notification is best-effort — its failure must not re-trigger drafting.
+        try {
+          const fullBody = `${decision.draft.body}\n\n${inbox.signature}\n`;
+          const embed = buildDiscordEmbed({
+            incomingFrom: mail.from,
+            incomingSubject: mail.subject,
+            snippet: mail.body,
+            draftSubject: singleReSubject(mail.subject),
+            draftFullBody: fullBody,
+            deepLink: roundcubeDeepLink(inbox.address, appendUid ?? ""),
+          });
+          await postDiscord(ctx, cfg, botToken, embed);
+        } catch (notifyError) {
+          ctx.logger.error("Discord notify failed (draft saved)", {
+            inbox: inbox.address,
+            uid,
+            error: notifyError instanceof Error ? notifyError.message : String(notifyError),
+          });
+        }
+      } catch (msgError) {
+        // One bad message must not wedge the inbox or abandon the rest of the batch:
+        // log and advance past it (the email stays in the inbox for a human).
+        ctx.logger.error("Message processing failed; skipping", {
+          inbox: inbox.address,
+          uid,
+          error: msgError instanceof Error ? msgError.message : String(msgError),
+        });
         await writeCursor(ctx, inbox.address, { uidValidity, lastUid: uid });
-        continue;
       }
-
-      const raw = buildReplyRfc822({
-        fromAddress: inbox.address,
-        incomingFrom: mail.from,
-        incomingSubject: mail.subject,
-        incomingMessageId: mail.messageId,
-        body: decision.draft.body,
-        signature: inbox.signature,
-      });
-
-      // APPEND targets Drafts; it does not require INBOX to be the locked mailbox.
-      const appended = await client.append(DRAFTS_FOLDER, raw, ["\\Draft"]);
-      const appendUid = appended && typeof appended === "object" ? appended.uid : undefined;
-      const fullBody = `${decision.draft.body}\n\n${inbox.signature}\n`;
-      const embed = buildDiscordEmbed({
-        incomingFrom: mail.from,
-        incomingSubject: mail.subject,
-        snippet: mail.body,
-        draftSubject: singleReSubject(mail.subject),
-        draftFullBody: fullBody,
-        deepLink: roundcubeDeepLink(inbox.address, appendUid ?? ""),
-      });
-      await postDiscord(ctx, cfg, botToken, embed);
-
-      ctx.logger.info("Drafted reply", { inbox: inbox.address, uid, appendUid });
-      await writeCursor(ctx, inbox.address, { uidValidity, lastUid: uid });
     }
   } finally {
     await client.logout().catch(() => {});

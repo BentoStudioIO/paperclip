@@ -42,7 +42,10 @@ export function isMachineNoise(mail: Pick<IncomingMail, "from" | "headers">): bo
   if (precedence === "bulk" || precedence === "list") return true;
 
   const from = (mail.from ?? "").toLowerCase();
-  if (/mailer-daemon@|postmaster@|no-?reply/.test(from)) return true;
+  if (/mailer-daemon@|postmaster@/.test(from)) return true;
+  // Anchor no-reply to the address local-part so a display name like
+  // "Jean Noreply Tremblay <jean@x.com>" isn't dropped.
+  if (/\bno-?reply[^@\s]*@/.test(from)) return true;
 
   return false;
 }
@@ -54,10 +57,20 @@ export function singleReSubject(subject: string): string {
 }
 
 /**
+ * Strip CR/LF/tab from a header value so attacker-controlled input — a crafted or
+ * RFC2047-encoded Subject/From that decodes to contain newlines — cannot inject
+ * extra headers (e.g. a `Bcc:`) into the saved draft.
+ */
+function sanitizeHeaderValue(value: string): string {
+  return value.replace(/[\r\n\t]+/g, " ").trim();
+}
+
+/**
  * Build a raw RFC822 reply ready to APPEND to Drafts.
  * - Subject de-duplicated via {@link singleReSubject}
  * - In-Reply-To / References only when we have a source Message-ID
  * - signature appended in code (the LLM never writes it)
+ * - every header value is CRLF-sanitized to prevent header injection
  */
 export function buildReplyRfc822(args: {
   fromAddress: string;
@@ -67,14 +80,14 @@ export function buildReplyRfc822(args: {
   body: string;
   signature: string;
 }): string {
-  const subject = singleReSubject(args.incomingSubject);
+  const subject = sanitizeHeaderValue(singleReSubject(args.incomingSubject));
   const fullBody = `${args.body}\n\n${args.signature}\n`;
   const headers = [
-    `From: ${args.fromAddress}`,
-    `To: ${args.incomingFrom}`,
+    `From: ${sanitizeHeaderValue(args.fromAddress)}`,
+    `To: ${sanitizeHeaderValue(args.incomingFrom)}`,
     `Subject: ${subject}`,
   ];
-  const mid = args.incomingMessageId.trim();
+  const mid = sanitizeHeaderValue(args.incomingMessageId);
   if (mid) {
     headers.push(`In-Reply-To: ${mid}`);
     headers.push(`References: ${mid}`);
@@ -152,6 +165,7 @@ export function buildDiscordEmbed(args: {
   deepLink: string;
 }): unknown {
   return {
+    allowed_mentions: { parse: [] },
     embeds: [
       {
         title: "📧 Nouveau courriel — brouillon prêt à réviser",

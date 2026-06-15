@@ -83,6 +83,15 @@ describe("buildReplyRfc822", () => {
     expect(raw).toContain("From: contact@pharmia.ca\r\n");
     expect(raw).toContain("To: marie@pharmacie.ca\r\n");
   });
+
+  it("strips CR/LF from the subject so headers cannot be injected (no Bcc smuggling)", () => {
+    const raw = buildReplyRfc822({
+      ...base,
+      incomingSubject: "Hi\r\nBcc: attacker@evil.com\r\nX-Injected: pwned",
+    });
+    expect(raw).not.toMatch(/^Bcc:/im);
+    expect(raw).not.toMatch(/^X-Injected:/im);
+  });
 });
 
 describe("deep-link interpolation", () => {

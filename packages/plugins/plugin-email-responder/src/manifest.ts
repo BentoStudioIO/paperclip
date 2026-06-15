@@ -80,7 +80,7 @@ const manifest: PaperclipPluginManifestV1 = {
       batchCapPerRun: {
         type: "number",
         title: "Max emails drafted per run",
-        description: "Caps newest-first processing per tick so a backlog drains over successive runs.",
+        description: "Caps oldest-first processing per tick so a backlog drains over successive runs.",
         default: DEFAULT_CONFIG.batchCapPerRun,
       },
     },
