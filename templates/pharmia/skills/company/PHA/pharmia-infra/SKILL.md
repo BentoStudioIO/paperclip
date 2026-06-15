@@ -68,6 +68,26 @@ dokploy bento env-rollback <app> [<sha>]         # restore prior env from git hi
 - Pharmia canary (admin.canary.pharmia.ca, api.canary.pharmia.ca) with full LGTM stack
 - PocketID SSO (auth.pharmia.ca), Chatwoot (chatwoot.pharmia.ca), Outline (outline.pharmia.ca), MongoDB (internal only)
 
+## Git & CI/CD topology
+
+- **Git origin is Forgejo** (`git.bentostudio.io/Pharmia/PharmaMate`), NOT GitHub — `github.com/BentoStudioIO/PharmaMate` is a **mirror** only. Fleet-wide, Bento services deploy from Dokploy **Gitea (Forgejo) git providers**, not hardcoded GitHub URLs.
+- **Push → autodeploy**, no manual deploy for a normal push: `dev`→dev env, `qa`→qa, `canary`→canary (**canary IS prod**), `main`→prod. Validate locally (`check-types` + tests) and confirm fast-forward before any push to a shared branch — a bad push deploys. Per-compose webhook: `/api/deploy/compose/<refreshToken>`.
+- **Container registry** = the same Forgejo (`git.bentostudio.io`). Private images only; never push to a public registry.
+- Git discipline (no `--force`/`--force-with-lease`/`--no-verify`, fetch + verify fast-forward before push) is in ETHOS → "Linear git history". The one sanctioned exception (CTO-directed canary force-push) is operator-only — agents run prod **read-only**.
+
+## Secrets model
+
+Two backends, deliberate split — **never hardcode a secret** in code/CLI/compose (push-protection blocks it; read from env or a vault):
+- **HashiCorp Vault** (`vault.bentostudio.io`, on devops; KV-v2 + AppRole; path-scoped `secret/{agents,dev,paperclip}/*`; manual-unseal) = MACHINE / dev / service secrets (API keys, infra tokens, PG passwords).
+- **Vaultwarden** (`vaultwarden.bentostudio.io`, SSO-only) = HUMAN / shared logins. Agents have a scoped read-write service account (Bento Studio org collections; NOT card/bank/tax) → **`vault-pass <item-id>`** fetches one password non-interactively (used by himalaya + varlock).
+- **varlock** validates + injects env at runtime (`.env.schema`, `varlock run -- <cmd>`); `process.env` always wins, so non-varlock (Dokploy-injected) paths keep working as a fallback.
+
+## Backups
+
+- **Off-host WORM** — clinical Postgres + mastra + blobs back up to MinIO with **Object Lock** (immutable), least-priv `pharmia-backup-svc` key, ILM 35d.
+- **Business DBs** (twenty / comp-ai / autumn / documenso / n8n / authentik / outline / formbricks / pocketid / vaultwarden / mongo) — `pharmia-backup` systemd-daily on bento/devops/prod/orange → WORM `business/` prefix. Dokploy's own backup is **silent-fail**; do not rely on it.
+- Open risk: single-MinIO SPOF (no off-host replica yet).
+
 ## Critical Rules
 
 1. **ALWAYS deploy via Dokploy** — Never `docker compose up` on the server. Dokploy wraps compose with project naming, Traefik labels, and env injection.

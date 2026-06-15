@@ -74,6 +74,31 @@ function cleanFrontmatter(fm) {
 
 function pathExists(p) { try { lstatSync(p); return true; } catch { return false; } }
 
+// Relative paths of every file under `dir` (recursive), excluding the top-level SKILL.md
+// (which is rewritten separately). Used to detect reference/support-file-only edits.
+function listSupportFiles(dir, base = dir, acc = []) {
+  if (!existsSync(dir)) return acc;
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) listSupportFiles(p, base, acc);
+    else { const rel = p.slice(base.length + 1); if (rel !== "SKILL.md") acc.push(rel); }
+  }
+  return acc;
+}
+
+// Whether dest already holds byte-identical copies of every non-SKILL.md file in srcDir
+// (and no extra/missing ones). cpSync copies these verbatim, so a plain Buffer compare is valid.
+function supportFilesMatch(srcDir, dest) {
+  const src = listSupportFiles(srcDir).sort();
+  const dst = listSupportFiles(dest).sort();
+  if (src.length !== dst.length || src.some((f, i) => f !== dst[i])) return false;
+  for (const f of src) {
+    try { if (!readFileSync(join(srcDir, f)).equals(readFileSync(join(dest, f)))) return false; }
+    catch { return false; }
+  }
+  return true;
+}
+
 function isGenerated(dir) {
   try { return new RegExp(`^${MARKER}$`, "m").test(readFileSync(join(dir, "SKILL.md"), "utf8").slice(0, 600)); }
   catch { return false; }
@@ -102,7 +127,7 @@ for (const [name, { srcDir, skillMd }] of generated) {
   // Only treat as "unchanged" when dest is a real dir whose SKILL.md already matches.
   const isRealDir = pathExists(dest) && lstatSync(dest).isDirectory() && !lstatSync(dest).isSymbolicLink();
   const prev = isRealDir && existsSync(destMd) ? readFileSync(destMd, "utf8") : null;
-  if (prev === skillMd) { unchanged++; if (VERBOSE) console.log(`  = ${name}`); continue; }
+  if (prev === skillMd && supportFilesMatch(srcDir, dest)) { unchanged++; if (VERBOSE) console.log(`  = ${name}`); continue; }
   if (DRY) { console.log(`  ${pathExists(dest) ? "~ update" : "+ create"} ${name}/`); written++; continue; }
   if (pathExists(dest)) rmSync(dest, { recursive: true, force: true }); // drop stale symlink or dir
   cpSync(srcDir, dest, { recursive: true, dereference: true });
