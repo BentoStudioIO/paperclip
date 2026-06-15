@@ -15,6 +15,11 @@ key: "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/vitest"
 
 Comprehensive performance optimization and best practices guide for Vitest testing framework. Contains 44 rules across 8 categories, prioritized by impact to guide test writing, refactoring, and code review.
 
+## Pharmia overrides (read first — these win over the generic rules below)
+
+- **No frontend unit tests.** Do NOT write Vitest for `apps/web*/` or `packages/ui*/`. Frontend is covered by Playwright e2e only (see `pharmia-app`). Backend (`packages/api/**`) keeps full TDD red-green discipline.
+- **Global setup uses `vi.clearAllMocks()`, never `vi.restoreAllMocks()`.** This overrides `setup-restore-mocks`: `restoreAllMocks` in global/shared setup destroys persistent `vi.fn().mockImplementation(...)` defined in module-scope `vi.mock()` factories, silently breaking unrelated suites. If mock-state pollution is *evidenced*, reach for `clearAllMocks`, not `restoreAllMocks`.
+
 ## When to Apply
 
 Reference these guidelines when:

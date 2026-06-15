@@ -3,6 +3,12 @@
 Reference for **content** (positioning / "competitive alternatives") and **market-intel** (competitive digest).
 Competitors to Pharmia (AI for QC pharmacists — Atlas research · Echo scribe · NoteGen · patient consultations).
 
+## Partners — NOT competitors (never pitch against; never log as competitive threats)
+**SGP / pharmacy-management-system vendors** own dispensing / inventory / POS / act-submission; Pharmia does AI intake + clinical analysis + documentation — **complementary, not overlapping.** Treat them as integration/distribution partners.
+- **McKesson** (ReflexRx, Propel Rx) — **reached out for partnership (Mar 2026)**; they own the SGP layer and see Pharmia as filling the AI clinical-documentation gap. Route partnership signals to growth-lead, NOT the competitive digest.
+- **TELUS Health** (Kroll, Ubik) — SGP incumbent = integration partner.
+- Positioning corollary: "unlike existing pharmacy management systems" means Pharmia *adds what they lack*, not *replaces them*. Prioritize SGP integration (data exchange, act submission) over building PMS features. Rule of thumb: owns the dispensary/PMS or distribution rail → **partner**; sells AI clinical assistance to the pharmacist (research/scribe/decision-support) → **competitor** (below).
+
 ## Direct competitors
 - **Clinixio (clinixio.ca) — the main direct competitor.** Broadest QC feature-parity (AI intake + in-consult
   clinical support w/ sources + note/fax/Rx/lab-req gen + billing optimization), browser-native, no PMS
