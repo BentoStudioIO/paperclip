@@ -5,8 +5,8 @@
 # reseeds (per PLAN-shared-agent-vps.md + memory paperclip-agent-identity).
 #
 # Run ON the agents VPS as a sudoer (e.g. `ssh bento-agents 'sudo bash provision-agent-identity.sh'`).
-# Harness (~/.claude) is synced from the rendered SSOT staging; render it first with
-# agent-runtime/build.sh (runs scripts/sync-claude-{agents,skills}.mjs) if stale.
+# Harness (~/.claude) is rendered fresh from the SSOT by agent-runtime/sync-agent-harness.sh
+# (§6 below) — the SAME script the post-merge hook + systemd timer use to keep it current.
 #
 # SECRETS: never hardcoded. Required token files/creds are read from env vars; a line
 # is only (re)written when its env var is set, otherwise the existing value is preserved
@@ -111,18 +111,11 @@ ensure_secret GRAFANA_TOKEN_DEV "${GRAFANA_TOKEN_DEV:-}"; ensure_secret GRAFANA_
 ensure_secret OUTLINE_API_TOKEN "${OUTLINE_API_TOKEN:-}"; ensure_secret CLOUDFLARE_API_TOKEN "${CLOUDFLARE_API_TOKEN:-}"
 sudo chmod 600 "$ZE"; log "zshenv structural lines ensured; secrets set where provided in env"
 
-echo "== 6) harness ~/.claude from SSOT staging ($STAGING_DIR) =="
-if [ -d "$STAGING_DIR" ]; then
-  sudo install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 700 "$AGENT_HOME/.claude"
-  sudo rsync -a "$STAGING_DIR/CLAUDE.md" "$STAGING_DIR/skills" "$STAGING_DIR/agents" "$AGENT_HOME/.claude/" 2>/dev/null || true
-  [ -d "$STAGING_DIR/rules" ] && sudo rsync -a "$STAGING_DIR/rules/" "$AGENT_HOME/.claude/rules/" 2>/dev/null || true
-  # platform rules SSOT (Dockerfile copies these into the staging rules at build)
-  sudo rsync -a "$SCRIPT_DIR/../rules/" "$AGENT_HOME/.claude/rules/" 2>/dev/null || true
-  sudo chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.claude"
-  log "synced CLAUDE.md + skills($(sudo -u $AGENT_USER ls $AGENT_HOME/.claude/skills 2>/dev/null | wc -l)) + agents + rules (memory preserved)"
-else
-  echo "  ! staging dir $STAGING_DIR not found — render it (agent-runtime/build.sh) or set STAGING_DIR"
-fi
+echo "== 6) harness ~/.claude (single canonical agent harness) =="
+# DRY: the ONE harness-sync codepath, shared with the post-merge hook + systemd timer.
+# Renders the SSOT fresh into /home/agent/.claude (no docker, no staging dependency).
+AGENT_USER="$AGENT_USER" bash "$SCRIPT_DIR/sync-agent-harness.sh" \
+  || echo "  ! harness sync failed (node/repo?) — re-run $SCRIPT_DIR/sync-agent-harness.sh"
 
 echo "== 7) host: ssh banner-off + ufw allow for the control-plane IP =="
 sudo tee /etc/ssh/sshd_config.d/99-paperclip-no-banner.conf >/dev/null <<EOF

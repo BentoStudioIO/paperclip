@@ -1,0 +1,16 @@
+# Refresh the live `agent` runtime harness (/home/agent/.claude) from the paperclip SSOT.
+# Pairs with paperclip-agent-harness.timer. Runs as `ubuntu` (passwordless sudo on the
+# agents VPS); the script pulls the repo ff-only then renders+rsyncs into /home/agent.
+# Install on the agents VPS:
+#   sudo cp templates/pharmia/agent-runtime/paperclip-agent-harness.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now paperclip-agent-harness.timer
+[Unit]
+Description=Sync paperclip agent runtime harness (/home/agent/.claude) from SSOT
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/paperclip/templates/pharmia/agent-runtime/sync-agent-harness.sh
+Nice=10

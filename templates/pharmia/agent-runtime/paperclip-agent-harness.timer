@@ -1,0 +1,12 @@
+# Periodic backstop that keeps /home/agent/.claude current even with no manual `git pull`
+# (the post-merge hook covers the on-pull case). Every 6h + shortly after boot.
+[Unit]
+Description=Periodic refresh of the paperclip agent runtime harness
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
