@@ -14,9 +14,10 @@ command -v node >/dev/null 2>&1 || exit 0
 
 # Agents VPS: the ONE canonical harness is the `agent` runtime's (/home/agent/.claude).
 # Refresh it directly and SKIP the operator-self render — single source of truth, no
-# parallel ubuntu copy to drift. (Gated on the paperclip agent-runtime marker so this
-# branch never fires on a normal dev workstation.)
-if id agent >/dev/null 2>&1 && [ -d /home/agent/.claude ]; then
+# parallel ubuntu copy to drift. Gated on the installed harness unit (world-readable in
+# /etc, present only on the agents VPS) — the puller `ubuntu` cannot stat the mode-700
+# /home/agent, so the marker must live outside it.
+if [ -f /etc/systemd/system/paperclip-agent-harness.service ]; then
   sh "$TOP/templates/pharmia/agent-runtime/sync-agent-harness.sh" || true
   exit 0
 fi

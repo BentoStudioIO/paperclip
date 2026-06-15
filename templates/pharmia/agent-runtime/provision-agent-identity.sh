@@ -117,6 +117,13 @@ echo "== 6) harness ~/.claude (single canonical agent harness) =="
 AGENT_USER="$AGENT_USER" bash "$SCRIPT_DIR/sync-agent-harness.sh" \
   || echo "  ! harness sync failed (node/repo?) — re-run $SCRIPT_DIR/sync-agent-harness.sh"
 
+echo "== 6b) harness auto-sync timer (keeps /home/agent/.claude current; also the hook's marker) =="
+sudo cp "$SCRIPT_DIR/paperclip-agent-harness.service" "$SCRIPT_DIR/paperclip-agent-harness.timer" /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now paperclip-agent-harness.timer >/dev/null 2>&1 \
+  && log "harness timer enabled (6h backstop; post-merge hook keys off /etc/systemd/system/paperclip-agent-harness.service)" \
+  || echo "  ! could not enable paperclip-agent-harness.timer"
+
 echo "== 7) host: ssh banner-off + ufw allow for the control-plane IP =="
 sudo tee /etc/ssh/sshd_config.d/99-paperclip-no-banner.conf >/dev/null <<EOF
 Match Address $BENTO_EGRESS_IP
