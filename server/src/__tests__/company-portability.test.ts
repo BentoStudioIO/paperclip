@@ -3977,7 +3977,6 @@ describe("company portability", () => {
       content: "claude-opus-4-8",
       "signup-ingest": "claude-sonnet-4-6",
       "booking-ingest": "claude-sonnet-4-6",
-      "translate-fr": "claude-sonnet-4-6",
     };
 
     const files: Record<string, string> = {

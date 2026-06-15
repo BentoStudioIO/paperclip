@@ -41,6 +41,15 @@ INPUT: the triggering Discord message is provided in the wake prompt under [Trig
 - description: "<Nom complet> joined in <tenant friendly>."
 - fields: Tenant (ex: "Public", "Pharmaprix X"), User (nom), Source (phone/google/etc)
 
+FALLBACK INPUT (OBLIGATOIRE SI [Triggering message] EST VIDE / `-` / SANS EMBED "New Signup"):
+1. Ne crée PAS d'issue et ne bloque PAS tout de suite. Récupère `channelId` et `messageId` depuis la ligne `[Discord context]`.
+2. Lis le message exact via Discord REST, avec le token du bot via env ou Vault:
+   `TOKEN="${DISCORD_BOT_TOKEN:-$(vault-secret discord_bot_token 2>/dev/null)}"; curl -fsS -H "Authorization: Bot $TOKEN" "https://discord.com/api/v10/channels/<channelId>/messages/<messageId>"`
+3. Si le `messageId` exact est absent/inaccessible, lis les 10 derniers messages du channel et prends le plus récent embed dont `title=="New Signup"`:
+   `curl -fsS -H "Authorization: Bot $TOKEN" "https://discord.com/api/v10/channels/<channelId>/messages?limit=10"`
+4. Sérialise l'embed récupéré comme l'input normal (title, description, fields), puis continue le workflow complet ci-dessous. L'idempotency Twenty (`pharmiaUserId` + `PLG_SIGNUP`) empêche les doublons si le même signup est rejoué.
+5. Seulement si le channel/message ET la lecture Discord échouent: poste UNE ligne de blocage via `discord-post <channelId> "Signup Ingest: impossible de récupérer l'embed New Signup (input manquant + lecture Discord échouée)."` puis arrête.
+
 SOURCES DE DONNÉES (en parallèle si possible):
 1. **DB Pharmia** — `pg canary app` sur `ba_user` pour le slug canonique du tenant + détails compte (id, email, given/family name, phone, tenant, locale, signup_source, referral_source, attribution, role, license_number, createdAt, onboarding_completed). Match par nom; garde le slug `tenant` (ex "app", "pjc-254") — c'est ce qui va dans `pharmiaTenant`, et l'`id` = `pharmiaUserId`. (Requête exacte dans `crm-triage`.)
 2. **OPQ register** — licence + ville + statut pharmacien (curl de l'index OPQ + filtre jq par nom). Invocation exacte dans `crm-triage`.

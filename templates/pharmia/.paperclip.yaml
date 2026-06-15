@@ -99,10 +99,6 @@ agents:
     role: "sdr"
     model: "claude-sonnet-4-6"
     capabilities: 'Single-shot Discord-triggered watcher — on a "New Booking" match, enriches the lead and upserts the MEETING Opportunity in Twenty, attaches a Note, and posts ONE summary back; never narrates, never general work.'
-  translate-fr:
-    role: "analyst"
-    model: "claude-sonnet-4-6"
-    capabilities: 'Single-shot Discord-triggered watcher — translates an Arabic Atlas Q&A embed into French and posts ONE formatted message back; pure-LLM (no canary/Twenty/web), never narrates.'
 company:
   attachmentMaxBytes: 10485760
 routines:
@@ -363,4 +359,3 @@ sidebar:
     - "content"
     - "signup-ingest"
     - "booking-ingest"
-    - "translate-fr"
