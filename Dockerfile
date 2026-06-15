@@ -40,6 +40,7 @@ COPY packages/plugins/paperclip-plugin-fake-sandbox/package.json packages/plugin
 COPY packages/plugins/plugin-llm-wiki/package.json packages/plugins/plugin-llm-wiki/
 COPY packages/plugins/plugin-workspace-diff/package.json packages/plugins/plugin-workspace-diff/
 COPY packages/plugins/plugin-chat/package.json packages/plugins/plugin-chat/
+COPY packages/plugins/plugin-email-responder/package.json packages/plugins/plugin-email-responder/
 COPY patches/ patches/
 COPY scripts/link-plugin-dev-sdk.mjs scripts/
 
@@ -61,6 +62,7 @@ RUN pnpm --filter @paperclipai/plugin-sdk build
 RUN pnpm --filter @paperclipai/plugin-llm-wiki build
 RUN pnpm --filter @paperclipai/plugin-workspace-diff build
 RUN pnpm --filter @paperclipai/plugin-chat build
+RUN pnpm --filter @paperclipai/plugin-email-responder build
 # Daytona sandbox-provider plugin: excluded from the pnpm workspace (see
 # pnpm-workspace.yaml "!packages/plugins/sandbox-providers/**") so it is NOT
 # installed/built by the frozen workspace install above. Install its standalone

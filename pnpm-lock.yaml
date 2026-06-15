@@ -547,6 +547,31 @@ importers:
         specifier: ^5.7.3
         version: 5.9.3
 
+  packages/plugins/plugin-email-responder:
+    dependencies:
+      '@anthropic-ai/claude-agent-sdk':
+        specifier: ^0.3.177
+        version: 0.3.177(@anthropic-ai/sdk@0.81.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
+      imapflow:
+        specifier: ^1.4.0
+        version: 1.4.0
+    devDependencies:
+      '@paperclipai/plugin-sdk':
+        specifier: workspace:*
+        version: link:../sdk
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.0
+      esbuild:
+        specifier: ^0.28.0
+        version: 0.28.0
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.8
+        version: 4.1.8(@types/node@24.12.0)(jsdom@28.1.0(@noble/hashes@2.0.1))(vite@7.3.1(@types/node@24.12.0)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.21.0))
+
   packages/plugins/plugin-llm-wiki:
     dependencies:
       react:
@@ -1006,8 +1031,18 @@ packages:
     cpu: [arm64]
     os: [darwin]
 
+  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.177':
+    resolution: {integrity: sha512-u9Ty+KPllm2nw0RatdPF0zcPRquNZjVptmyLG0DqduGbgZDLQpfPFMF5hffFIRnVaXhx7+jkUmEdw0jrda0UcA==}
+    cpu: [arm64]
+    os: [darwin]
+
   '@anthropic-ai/claude-agent-sdk-darwin-x64@0.2.121':
     resolution: {integrity: sha512-lIXdqKj+bpfDxCk/eU1F1TXNqsIsLTRrkUG/wx19WIGZ8gLUmmVSveUKGlNegTs7S6evMvuezprJzDJT4TcvPA==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.177':
+    resolution: {integrity: sha512-ona6Jv54XFwBTqOj3MzLWfKtc2m7Rdh58wOAX9Hnue/6FcWfyeuz/UDcidVTXQ7Xytz//Tb0JJgFtiQjO7FbIA==}
     cpu: [x64]
     os: [darwin]
 
@@ -1016,8 +1051,18 @@ packages:
     cpu: [arm64]
     os: [linux]
 
+  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.177':
+    resolution: {integrity: sha512-v6PMDD3h2erLuTK5S2ZvExqdL3v44OyC70XpKhyqIUnyPaGR9YAMjh//EKdWC+mNvt6mIbRZpaDcHtbASVW8Rw==}
+    cpu: [arm64]
+    os: [linux]
+
   '@anthropic-ai/claude-agent-sdk-linux-arm64@0.2.121':
     resolution: {integrity: sha512-AQSnJzaiFvQpUPfO1tWLvsHgb6KNar4QYEQ/5/sk1itfgr3Fx9gxTreq43wX7AXSvkBX1QlDaP1aR1sfM/g/lQ==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.177':
+    resolution: {integrity: sha512-wBCbklkaDb483Ab4DUFfmJjZJKXz58YXPv+CiGsyjq1St19mbKEma5KKz3Ya9mlV8aLyh4zmLK2mEHPnF//Ipg==}
     cpu: [arm64]
     os: [linux]
 
@@ -1026,8 +1071,18 @@ packages:
     cpu: [x64]
     os: [linux]
 
+  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.177':
+    resolution: {integrity: sha512-1cdEO06WoEsl1JnnLCPIlg/8x37GtBsTuj65gIpSjdrImNBjgIuMWVyceP4qaXhFjtQgYK1nx3TpaxEFVDOrDg==}
+    cpu: [x64]
+    os: [linux]
+
   '@anthropic-ai/claude-agent-sdk-linux-x64@0.2.121':
     resolution: {integrity: sha512-DJUgpm7au086WaQV/S7BGOt2M8D90spGZRizT3twYsacf1BxzK1qsXqB/Pw1lUjPy6pI107pml/TaPzWuS/Vzg==}
+    cpu: [x64]
+    os: [linux]
+
+  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.177':
+    resolution: {integrity: sha512-WDP6puwPHscggNAfvIxyUSHSAjfUEkGRfnMXEPBHOqO+qjX2KGxeE13/ih3EVioeBVOUIqPui6VB05vXLa6T9Q==}
     cpu: [x64]
     os: [linux]
 
@@ -1036,8 +1091,18 @@ packages:
     cpu: [arm64]
     os: [win32]
 
+  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.177':
+    resolution: {integrity: sha512-xLgDWnZaYohtFrkgEIkGZdP+rp4sXxAMbbpEvEp0LK1vAYmJam/ztT2yoK6gfI58IbToJq1WGUEX2HVnE65yOg==}
+    cpu: [arm64]
+    os: [win32]
+
   '@anthropic-ai/claude-agent-sdk-win32-x64@0.2.121':
     resolution: {integrity: sha512-v2/R918/t94cCwc6rmbxk+UYeQPtF2oBLtQAk+cT0M60hvqmCZO2noyZx5uTp8TQncOlG4MkINIeNY2yfmWSoQ==}
+    cpu: [x64]
+    os: [win32]
+
+  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.177':
+    resolution: {integrity: sha512-SIdQLbtF//rYK4KDBNpUPyjyui7NwCFPZ2/3vyW3TR8R8xynkNq3cLis90FnPSgxaSshi38vkJYWh+9kGDB7zg==}
     cpu: [x64]
     os: [win32]
 
@@ -1045,6 +1110,14 @@ packages:
     resolution: {integrity: sha512-hwZNYTkGLKVixd/V/OCJwfH/SdfxZXGV0m6wvy5EBq6qfB+lvJTRz/MSOSa7dHqo4/F7zJY68crEEca68Wrxpw==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
+      zod: ^4.0.0
+
+  '@anthropic-ai/claude-agent-sdk@0.3.177':
+    resolution: {integrity: sha512-CBzXnzR661q3AlfZzBjmIFQx0cxr36iJV3PExTYmPyGQX32qxtiFQgnxTcF8wB4hcSVf2hnoy/gprVJdkNx7cw==}
+    engines: {node: '>=18.0.0'}
+    peerDependencies:
+      '@anthropic-ai/sdk': '>=0.93.0'
+      '@modelcontextprotocol/sdk': ^1.29.0
       zod: ^4.0.0
 
   '@anthropic-ai/sdk@0.81.0':
@@ -4572,6 +4645,9 @@ packages:
     resolution: {integrity: sha512-0d7gRzOiYTgDmIyh783mCcq50h3mdOg/TtKdLfBIghOLushpQRwhuLjKK8Q9hxZfNlPL0Ua56DoPjnsW8amf8g==}
     hasBin: true
 
+  '@zone-eu/mailsplit@5.4.12':
+    resolution: {integrity: sha512-w7Gy+NvjZ0MiXm8F6zfjImAqcTONKDImgWVBjDKQVFUXWuz3VFM5levNArkL2M877ajql5+bkS2pDV56injlmg==}
+
   abbrev@1.1.1:
     resolution: {integrity: sha512-nne9/IiQ/hzIhY6pdDnbBtz7DjPTKrY00P/zvPSm5pOFkl6xuGrGnXn/VtTNNfNtAfZ9/1RtehkszU9qcTii0Q==}
 
@@ -5507,6 +5583,10 @@ packages:
     resolution: {integrity: sha512-Q0n9HRi4m6JuGIV1eFlmvJB7ZEVxu93IrMyiMsGC0lrMJMWzRgx6WGquyfQgZVb31vhGgXnfmPNNXmxnOkRBrg==}
     engines: {node: '>= 0.8'}
 
+  encoding-japanese@2.2.0:
+    resolution: {integrity: sha512-EuJWwlHPZ1LbADuKTClvHtwbaFn4rOD+dRAbWysqEOXRc2Uui0hJInNJrsdH0c+OhJA4nrCBdSkW4DD5YxAo6A==}
+    engines: {node: '>=8.10.0'}
+
   encoding@0.1.13:
     resolution: {integrity: sha512-ETBauow1T35Y/WZMkio9jiM0Z5xjHHmJ4XmjZOq1l/dXz3lr2sRn87nJy20RupqSh1F2m3HHPSp8ShIPQJrJ3A==}
 
@@ -5904,6 +5984,9 @@ packages:
   ieee754@1.2.1:
     resolution: {integrity: sha512-dcyqhDvX1C46lXZcVqCpK+FtMRQVdIMN6/Df5js2zouUsqG7I6sFxitIC+7KYK29KdXOLHdu9zL4sFnoVQnqaA==}
 
+  imapflow@1.4.0:
+    resolution: {integrity: sha512-bpNWv3AwzZryMMYoKiqPebcxmldCQwWxqhBQ5b/nTlJYAgexCzDIpN0LdhVJpJp6H25lAmwvShX+Fu/9AU5Spg==}
+
   imurmurhash@0.1.4:
     resolution: {integrity: sha512-JmXMZ6wuvDmLiHEml9ykzqO6lwFbof0GG4IkcGaENdCRDDmMVnny7s5HsIgHCbaq0w2MyPhDqkhTUgS2LU2PHA==}
     engines: {node: '>=0.8.19'}
@@ -6090,6 +6173,15 @@ packages:
     resolution: {integrity: sha512-DeXj9X5xDCjgKLU/7RR+/HQEVzuuEUiwldwOGsHK/sfAfELGWEyTcf0x+uOvCvK3O2zPmZePXWL85vtia6GyZw==}
     engines: {node: '>=16'}
     hasBin: true
+
+  libbase64@1.3.0:
+    resolution: {integrity: sha512-GgOXd0Eo6phYgh0DJtjQ2tO8dc0IVINtZJeARPeiIJqge+HdsWSuaDTe8ztQ7j/cONByDZ3zeB325AHiv5O0dg==}
+
+  libmime@5.3.8:
+    resolution: {integrity: sha512-ZrCY+Q66mPvasAfjsQ/IgahzoBvfE1VdtGRpo1hwRB1oK3wJKxhKA3GOcd2a6j7AH5eMFccxK9fBoCpRZTf8ng==}
+
+  libqp@2.1.1:
+    resolution: {integrity: sha512-0Wd+GPz1O134cP62YU2GTOPNA7Qgl09XwCqM5zpBv87ERCXdfDtyKXvV7c9U22yWJh44QZqBocFnXN11K96qow==}
 
   lightningcss-android-arm64@1.32.0:
     resolution: {integrity: sha512-YK7/ClTt4kAK0vo6w3X+Pnm0D2cf2vPHbhOXdoNti1Ga0al1P4TBZhwjATvjNwLEBCnKvjJc2jQgHXH0NEwlAg==}
@@ -6549,6 +6641,10 @@ packages:
   node-releases@2.0.27:
     resolution: {integrity: sha512-nmh3lCkYZ3grZvqcCH+fjmQ7X+H0OeZgP40OierEaAptX4XofMh5kwNbWh7lBduUzCcV/8kZ+NDLCwm2iorIlA==}
 
+  nodemailer@8.0.10:
+    resolution: {integrity: sha512-BLFuSth7QtHOkBzyqTehWWyub0NTRDuK2Q2SQfnGLsrJnzyU+Yeh4WpV1eZGuARFj1xQJHIdnTuJZLP+b9R1GQ==}
+    engines: {node: '>=6.0.0'}
+
   nopt@5.0.0:
     resolution: {integrity: sha512-Tbj67rffqceeLpcRXrT7vKAN8CwfPeIBgM7E6iBkmKLV7bEMwpGgYLGv0jACUsECaa/vuxP0IjEont6umdMgtQ==}
     engines: {node: '>=6'}
@@ -6703,6 +6799,10 @@ packages:
 
   pino-std-serializers@7.1.0:
     resolution: {integrity: sha512-BndPH67/JxGExRgiX1dX0w1FvZck5Wa4aal9198SrRhZjH3GxKQUKIBnYJTdj2HDN3UQAS06HlfcSbQj2OHmaw==}
+
+  pino@10.3.1:
+    resolution: {integrity: sha512-r34yH/GlQpKZbU1BvFFqOjhISRo1MNx1tWYsYvmj6KIRHSPMT2+yHOEb1SG6NMvRoHRF0a07kCOox/9yakl1vg==}
+    hasBin: true
 
   pino@9.14.0:
     resolution: {integrity: sha512-8OEwKp5juEvb/MjpIc4hjqfgCNysrS94RIOMXYvpYCdm/jglrKEiAYmiumbmGhCvs+IcInsphYDFwqrjr7398w==}
@@ -6973,6 +7073,9 @@ packages:
   real-require@0.2.0:
     resolution: {integrity: sha512-57frrGM/OCTLqLOAh0mhVA9VBMHd+9U7Zb2THMGdBUoZVOtGbJzjxsYGDJ3A9AYYCP4hn6y1TVbaOfzWtm5GFg==}
     engines: {node: '>= 12.13.0'}
+
+  real-require@1.0.0:
+    resolution: {integrity: sha512-P4nbQYQfePJxRSmY+v/KINxVucm4NF3p3s7pJveMTtom52FR4YGltUQLB8idDXwDDWW+eYrWDFbuzUnjoWHF7g==}
 
   recast@0.23.11:
     resolution: {integrity: sha512-YTUo+Flmw4ZXiWfQKGcwwc11KnoRAYgzAE2E7mXKCjSviTKShtxBsN6YUUBB2gtaBzKzeKunxhUwNHQuRryhWA==}
@@ -7333,6 +7436,10 @@ packages:
 
   thread-stream@3.1.0:
     resolution: {integrity: sha512-OqyPZ9u96VohAyMfJykzmivOrY2wfMSf3C5TtFJVgN+Hm6aj+voFhlK+kZEIv2FBh1X6Xp3DlnCOfEQ3B2J86A==}
+
+  thread-stream@4.2.0:
+    resolution: {integrity: sha512-e2zZ96wSChazBsbENf/Pcm/4swHt2cEKQ92rhUjkL9GCKiTDJIaTBenjE/m9DXi0QBmTMDkFDdOomUy20A1tDQ==}
+    engines: {node: '>=20'}
 
   tiny-invariant@1.3.3:
     resolution: {integrity: sha512-+FbBPE1o9QAYvviau/qC5SE3caw21q3xkvWKBtja5vgqOWIHHJ3ioaq1VPfn/Szqctz2bU/oYeKd9/z5BL+PVg==}
@@ -7859,25 +7966,49 @@ snapshots:
   '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.2.121':
     optional: true
 
+  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.177':
+    optional: true
+
   '@anthropic-ai/claude-agent-sdk-darwin-x64@0.2.121':
+    optional: true
+
+  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.177':
     optional: true
 
   '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.2.121':
     optional: true
 
+  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.177':
+    optional: true
+
   '@anthropic-ai/claude-agent-sdk-linux-arm64@0.2.121':
+    optional: true
+
+  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.177':
     optional: true
 
   '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.2.121':
     optional: true
 
+  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.177':
+    optional: true
+
   '@anthropic-ai/claude-agent-sdk-linux-x64@0.2.121':
+    optional: true
+
+  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.177':
     optional: true
 
   '@anthropic-ai/claude-agent-sdk-win32-arm64@0.2.121':
     optional: true
 
+  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.177':
+    optional: true
+
   '@anthropic-ai/claude-agent-sdk-win32-x64@0.2.121':
+    optional: true
+
+  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.177':
     optional: true
 
   '@anthropic-ai/claude-agent-sdk@0.2.121(zod@3.25.76)':
@@ -7898,11 +8029,32 @@ snapshots:
       - '@cfworker/json-schema'
       - supports-color
 
+  '@anthropic-ai/claude-agent-sdk@0.3.177(@anthropic-ai/sdk@0.81.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)':
+    dependencies:
+      '@anthropic-ai/sdk': 0.81.0(zod@4.4.3)
+      '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
+      zod: 4.4.3
+    optionalDependencies:
+      '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.177
+      '@anthropic-ai/claude-agent-sdk-darwin-x64': 0.3.177
+      '@anthropic-ai/claude-agent-sdk-linux-arm64': 0.3.177
+      '@anthropic-ai/claude-agent-sdk-linux-arm64-musl': 0.3.177
+      '@anthropic-ai/claude-agent-sdk-linux-x64': 0.3.177
+      '@anthropic-ai/claude-agent-sdk-linux-x64-musl': 0.3.177
+      '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.177
+      '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.177
+
   '@anthropic-ai/sdk@0.81.0(zod@3.25.76)':
     dependencies:
       json-schema-to-ts: 3.1.1
     optionalDependencies:
       zod: 3.25.76
+
+  '@anthropic-ai/sdk@0.81.0(zod@4.4.3)':
+    dependencies:
+      json-schema-to-ts: 3.1.1
+    optionalDependencies:
+      zod: 4.4.3
 
   '@asamuzakjp/css-color@5.0.1':
     dependencies:
@@ -10019,6 +10171,28 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  '@modelcontextprotocol/sdk@1.29.0(zod@4.4.3)':
+    dependencies:
+      '@hono/node-server': 1.19.13(hono@4.12.12)
+      ajv: 8.18.0
+      ajv-formats: 3.0.1(ajv@8.18.0)
+      content-type: 1.0.5
+      cors: 2.8.6
+      cross-spawn: 7.0.6
+      eventsource: 3.0.7
+      eventsource-parser: 3.0.6
+      express: 5.2.1
+      express-rate-limit: 8.3.2(express@5.2.1)
+      hono: 4.12.12
+      jose: 6.1.3
+      json-schema-typed: 8.0.2
+      pkce-challenge: 5.0.1
+      raw-body: 3.0.2
+      zod: 4.4.3
+      zod-to-json-schema: 3.25.2(zod@4.4.3)
+    transitivePeerDependencies:
+      - supports-color
+
   '@noble/ciphers@2.1.1': {}
 
   '@noble/hashes@1.8.0': {}
@@ -11944,6 +12118,12 @@ snapshots:
       '@zed-industries/codex-acp-win32-arm64': 0.12.0
       '@zed-industries/codex-acp-win32-x64': 0.12.0
 
+  '@zone-eu/mailsplit@5.4.12':
+    dependencies:
+      libbase64: 1.3.0
+      libmime: 5.3.8
+      libqp: 2.1.1
+
   abbrev@1.1.1:
     optional: true
 
@@ -12776,6 +12956,8 @@ snapshots:
 
   encodeurl@2.0.0: {}
 
+  encoding-japanese@2.2.0: {}
+
   encoding@0.1.13:
     dependencies:
       iconv-lite: 0.6.3
@@ -13363,6 +13545,18 @@ snapshots:
 
   ieee754@1.2.1: {}
 
+  imapflow@1.4.0:
+    dependencies:
+      '@zone-eu/mailsplit': 5.4.12
+      encoding-japanese: 2.2.0
+      iconv-lite: 0.7.2
+      libbase64: 1.3.0
+      libmime: 5.3.8
+      libqp: 2.1.1
+      nodemailer: 8.0.10
+      pino: 10.3.1
+      socks: 2.8.9
+
   imurmurhash@0.1.4:
     optional: true
 
@@ -13391,8 +13585,7 @@ snapshots:
 
   ip-address@10.1.0: {}
 
-  ip-address@10.2.0:
-    optional: true
+  ip-address@10.2.0: {}
 
   ipaddr.js@1.9.1: {}
 
@@ -13520,6 +13713,17 @@ snapshots:
   lib0@0.2.117:
     dependencies:
       isomorphic.js: 0.2.5
+
+  libbase64@1.3.0: {}
+
+  libmime@5.3.8:
+    dependencies:
+      encoding-japanese: 2.2.0
+      iconv-lite: 0.7.2
+      libbase64: 1.3.0
+      libqp: 2.1.1
+
+  libqp@2.1.1: {}
 
   lightningcss-android-arm64@1.32.0:
     optional: true
@@ -14280,6 +14484,8 @@ snapshots:
 
   node-releases@2.0.27: {}
 
+  nodemailer@8.0.10: {}
+
   nopt@5.0.0:
     dependencies:
       abbrev: 1.1.1
@@ -14453,6 +14659,20 @@ snapshots:
       strip-json-comments: 5.0.3
 
   pino-std-serializers@7.1.0: {}
+
+  pino@10.3.1:
+    dependencies:
+      '@pinojs/redact': 0.4.0
+      atomic-sleep: 1.0.0
+      on-exit-leak-free: 2.1.2
+      pino-abstract-transport: 3.0.0
+      pino-std-serializers: 7.1.0
+      process-warning: 5.0.0
+      quick-format-unescaped: 4.0.4
+      real-require: 0.2.0
+      safe-stable-stringify: 2.5.0
+      sonic-boom: 4.2.1
+      thread-stream: 4.2.0
 
   pino@9.14.0:
     dependencies:
@@ -14794,6 +15014,8 @@ snapshots:
 
   real-require@0.2.0: {}
 
+  real-require@1.0.0: {}
+
   recast@0.23.11:
     dependencies:
       ast-types: 0.16.1
@@ -15083,8 +15305,7 @@ snapshots:
       - bare-buffer
       - react-native-b4a
 
-  smart-buffer@4.2.0:
-    optional: true
+  smart-buffer@4.2.0: {}
 
   socks-proxy-agent@6.2.1:
     dependencies:
@@ -15099,7 +15320,6 @@ snapshots:
     dependencies:
       ip-address: 10.2.0
       smart-buffer: 4.2.0
-    optional: true
 
   sonic-boom@4.2.1:
     dependencies:
@@ -15317,6 +15537,10 @@ snapshots:
   thread-stream@3.1.0:
     dependencies:
       real-require: 0.2.0
+
+  thread-stream@4.2.0:
+    dependencies:
+      real-require: 1.0.0
 
   tiny-invariant@1.3.3: {}
 
@@ -15795,6 +16019,10 @@ snapshots:
   zod-to-json-schema@3.25.2(zod@3.25.76):
     dependencies:
       zod: 3.25.76
+
+  zod-to-json-schema@3.25.2(zod@4.4.3):
+    dependencies:
+      zod: 4.4.3
 
   zod@3.25.76: {}
 
