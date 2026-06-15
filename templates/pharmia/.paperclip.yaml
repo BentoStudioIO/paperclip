@@ -9,10 +9,10 @@ adapterDefaults:
 agents:
   ceo:
     role: "ceo"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   bug-hunter:
     role: "qa"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   devops:
     role: "devops"
     model: "claude-sonnet-4-6"
@@ -21,52 +21,52 @@ agents:
     model: "claude-sonnet-4-6"
   engineering-lead:
     role: "cto"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   implementer:
     role: "engineer"
     model: "claude-sonnet-4-6"
   quebec-legal:
     role: "legal"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   pharmacy-lead:
     role: "pharmacy"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   reflect:
     role: "meta"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   planner:
     role: "pm"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   researcher:
     role: "researcher"
     model: "claude-sonnet-4-6"
   reviewer:
     role: "qa"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   security-agent:
     role: "security"
     model: "claude-sonnet-4-6"
   ai-product-observer:
     role: "observer"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   clinical-flow-observer:
     role: "observer"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   platform-observer:
     role: "observer"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   growth-lead:
     role: "cmo"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   market-intel:
     role: "analyst"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   lead-scout:
     role: "sdr"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   content:
     role: "marketing"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-8"
   signup-ingest:
     role: "sdr"
     model: "claude-sonnet-4-6"
