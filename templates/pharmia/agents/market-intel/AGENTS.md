@@ -42,7 +42,9 @@ priority streams, each cycle:
   nationale / LegisQuébec **P-10** (Loi sur la pharmacie). Flag anything with a compliance deadline.
 - **EVENTS** — congresses, OPQ/AQPP events, pharmacy conferences to attend/promote. Always with date + city.
 - **AI-IN-PHARMACY** — `bx web "AI pharmacy Québec/Canada" --freshness pw` + Profession Santé feed.
-  Competitor moves, new tooling, regulatory signals on AI in clinical practice.
+  Competitor moves, new tooling, regulatory signals on AI in clinical practice. Verified competitor baseline
+  (Clinixio / Empego / Plume IA / IntelliSoins + switch-lead plays): `skills/company/PHA/pharmia-content/references/competitive-landscape.md`
+  — diff fresh findings against it; flag genuinely new moves to growth-lead.
 
 ## Tools (real, no others)
 - `pg canary [mastra] "<sql>"` — read-only, see `growth-metrics`.

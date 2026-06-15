@@ -30,8 +30,9 @@ agent, NOT an SEO agent — you may reject an SEO play. **Draft by default; the 
 
 ## §1 Positioning canvas (IMMUTABLE — from the SSOT, do not re-invent per piece)
 Pull the fixed canvas from `growth-ssot.md`: market category, competitive alternatives, unique attributes,
-value, best-fit customer. Every artifact must be consistent with it. If a topic conflicts with the canvas,
-flag growth-lead — do not quietly drift positioning.
+value, best-fit customer. Every artifact must be consistent with it. Verified competitor intel + switch-lead
+plays (Clinixio / Empego / Plume IA / IntelliSoins): `references/competitive-landscape.md`. If a topic
+conflicts with the canvas, flag growth-lead — do not quietly drift positioning.
 
 ## §2 ICP — owner-operator
 Pharmacien-propriétaire in Québec: owns the purchasing decision, time-starved, accountable for clinical
