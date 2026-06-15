@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Re-exec under bash if invoked via `sh script` (dash overrides the shebang and lacks
+# `set -o pipefail`). Belt-and-suspenders so any caller is safe.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 # sync-agent-harness.sh — refresh the LIVE `agent` runtime harness (/home/agent/.claude)
 # from the paperclip SSOT. ONE canonical harness: renders the SSOT directly into the
 # agent's home — there is NO parallel operator (ubuntu) harness to drift against.

@@ -18,7 +18,7 @@ command -v node >/dev/null 2>&1 || exit 0
 # /etc, present only on the agents VPS) — the puller `ubuntu` cannot stat the mode-700
 # /home/agent, so the marker must live outside it.
 if [ -f /etc/systemd/system/paperclip-agent-harness.service ]; then
-  sh "$TOP/templates/pharmia/agent-runtime/sync-agent-harness.sh" || true
+  bash "$TOP/templates/pharmia/agent-runtime/sync-agent-harness.sh" || true
   exit 0
 fi
 
