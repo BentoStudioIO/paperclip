@@ -49,7 +49,28 @@ for f in "$SRC"/*; do
   linked=$((linked + 1))
 done
 
-echo "[cli-install] target=$TARGET linked=$linked relinked-skipped=$skipped backed-up=$backed"
+# Opt-in pruning (CLI_PRUNE=1): suppress CLIs removed from the SSOT. Inherently safe —
+# only ever removes farm-owned SYMLINKS whose resolved target lives under THIS run's SRC
+# dir but whose basename no longer exists in SRC. Foreign real-file binaries (e.g. a
+# compiled mcp-grafana dropped into the same dir) are never symlinks-into-SRC, so they
+# are structurally untouchable. Off by default so a human install to ~/.local/bin never
+# surprise-deletes a hand-placed tool.
+pruned=0
+if [ "${CLI_PRUNE:-0}" = "1" ]; then
+  SRC_RESOLVED="$(readlink -f "$SRC")"
+  for dest in "$TARGET"/*; do
+    [ -L "$dest" ] || continue                       # only symlinks are farm-owned
+    tgt="$(readlink -f "$dest" 2>/dev/null || true)"
+    case "$tgt" in
+      "$SRC_RESOLVED"/*) ;;                            # points into our SRC bin → ours
+      *) continue ;;                                   # foreign symlink → leave alone
+    esac
+    [ -e "$SRC/$(basename "$dest")" ] && continue      # still in SSOT → keep
+    rm -f "$dest"; pruned=$((pruned + 1))
+  done
+fi
+
+echo "[cli-install] target=$TARGET linked=$linked relinked-skipped=$skipped backed-up=$backed pruned=$pruned"
 case ":${PATH}:" in
   *":$TARGET:"*) : ;;
   *) echo "[cli-install] NOTE: $TARGET is not on PATH — add: export PATH=\"$TARGET:\$PATH\"" ;;
