@@ -23,6 +23,13 @@ The public-tenant Atlas funnel is encoded in `ba_user`:
 `is_anonymous=true` (anonymous trial) → `role='user'` (signed up) → `onboarding_completed` → `last_login_at`
 within window (retained). `anon_queries_before_signup` measures pre-signup engagement.
 
+**Anonymous trials are unreachable** — no email/name/phone is captured, so there is no way to DM or email
+them. "Re-engage the anons" is NOT an actionable play. The only levers on anon trials are: *conversion*
+(prompt for identity mid-trial so they become reachable), on-return in-app re-engagement (if their cookie
+persists), and paid retargeting (what the `gclid`/`fbclid` attribution capture enables). The reachable
+existing audiences are pre-onboarding drop-offs (`role='user'`, NOT `onboarding_completed` — they have
+accounts/email) and not-yet-contacted owners in Twenty.
+
 ### 1. Signups — new users this week vs last (USER GROWTH)
 ```sql
 SELECT date_trunc('week', "createdAt") AS wk, count(*)

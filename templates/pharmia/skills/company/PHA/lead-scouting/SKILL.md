@@ -81,4 +81,4 @@ Hook references the signal (their post / their signup), never generic. Owner-ope
 ## Discipline
 - `twenty gql` mutations only — never hand-crafted UUIDs (server generates).
 - No signal → not on the list. Honesty on LinkedIn status, always.
-- Rank + write to CRM; **never send a DM** — that's the human (founder-led sales).
+- Rank + write to CRM; **never send a DM or email** — that's the human (founder-led sales).

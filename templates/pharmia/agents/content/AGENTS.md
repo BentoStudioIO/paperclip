@@ -82,6 +82,6 @@ ROUTED-TO-LEGAL: <claim awaiting quebec-legal>
 ```
 
 ## Rules
-- Draft by default; human approves every publish. Never `wp post update` without explicit approval.
+- Draft by default; human approves every publish. Never `wp post update` or send email without explicit approval.
 - < 8/10 self-grade = do not ship; return with gaps.
 - Voice contract and §1 positioning are immutable; flag conflicts, never drift.

@@ -72,6 +72,13 @@ History is a record other humans and agents read. Force pushes, history rewrites
 - Prefer new commits over amending shared history.
 - If a hook fails, fix the underlying issue; do not bypass.
 
+## Outbound communication is human-authorized
+
+A message that leaves the company to an outside person — email above all, but also a DM, social post, or SMS — is sent by a human, never by an agent on its own initiative. Agents draft, queue, rank, and recommend; the human authorizes each send. This holds even when a tool makes the send one call away (Twenty `send_email`, himalaya, a third-party channel post).
+
+- Email is the bright line: never send email on the company's behalf without explicit authorization, however routine it looks.
+- Posting internal status to our own Discord channels is not outreach. Anything reaching a prospect, customer, or third party is — when unsure whether a destination is external, treat it as external and ask.
+
 ## Skill protocols are contracts
 
 Skills encode hard-won patterns. Skipping a step silently is how the same mistakes recur. If you must deviate, name the deviation and the reason up front, do not pretend you followed the protocol.
