@@ -110,7 +110,11 @@ services:
     environment:
       # CLI client target + board-actor auth (cli/src/commands/client/common.ts):
       # PAPERCLIP_API_URL is the API base; PAPERCLIP_API_KEY authenticates the import.
-      PAPERCLIP_API_URL: http://server:3100
+      # Use the PUBLIC origin, NOT http://server:3100 — the server 403s any request
+      # whose Host is not a trusted origin (on every path, including /api/health),
+      # and the internal service name is untrusted. The public URL carries a trusted
+      # Host and is reachable from this network (hairpin via Traefik is OK).
+      PAPERCLIP_API_URL: ${PAPERCLIP_PUBLIC_URL}
       PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:-}
     depends_on:
       server:
@@ -120,11 +124,11 @@ services:
       - sh
       - -c
       - |
-        echo "[import] waiting for server API at http://server:3100/api/health ..."
+        echo "[import] waiting for server API at $$PAPERCLIP_API_URL/api/health ..."
         i=0
-        # Probe /api/health: the root path is origin-gated (403) in authenticated
-        # mode, so `curl -f http://server:3100/` would never read as ready.
-        until curl -fsS -o /dev/null http://server:3100/api/health; do
+        # Probe the public /api/health through the same base the CLI uses, so
+        # readiness also covers the edge (Traefik) routing the import relies on.
+        until curl -fsS -o /dev/null "$$PAPERCLIP_API_URL/api/health"; do
           i=$$((i+1))
           if [ "$$i" -ge 30 ]; then
             echo "[import] FATAL: server API did not become ready within ~60s" >&2
