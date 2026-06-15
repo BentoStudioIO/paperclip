@@ -78,6 +78,11 @@ async function connectInbox(ctx: PluginContext, cfg: ResolvedConfig, inbox: Inbo
 async function readCursor(ctx: PluginContext, address: string): Promise<CursorState | null> {
   const value = await ctx.state.get({
     scopeKind: "company",
+    // Non-null scopeId is REQUIRED: this deployment's `plugin_state` unique index
+    // does not treat NULL scope_ids as equal, so a null scopeId makes set()'s upsert
+    // insert a new row every time (cursor never advances → duplicate drafts). The
+    // per-inbox address is a stable non-null discriminator.
+    scopeId: address,
     namespace: address,
     stateKey: CURSOR_STATE_KEY,
   });
@@ -88,7 +93,7 @@ async function readCursor(ctx: PluginContext, address: string): Promise<CursorSt
 }
 
 async function writeCursor(ctx: PluginContext, address: string, cursor: CursorState): Promise<void> {
-  await ctx.state.set({ scopeKind: "company", namespace: address, stateKey: CURSOR_STATE_KEY }, cursor);
+  await ctx.state.set({ scopeKind: "company", scopeId: address, namespace: address, stateKey: CURSOR_STATE_KEY }, cursor);
 }
 
 /** Cap the body fed to the LLM + the Discord snippet — full HTML mails can be huge. */
