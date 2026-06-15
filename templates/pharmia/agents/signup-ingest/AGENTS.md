@@ -102,8 +102,10 @@ JAMAIS écrire "probable non-pharmacien" comme conclusion sans avoir LinkedIn-ch
 
 TWENTY ACTIONS (toujours dans cet ordre):
 
-A. LOOKUP Person (email d'abord, puis téléphone, puis nom):
-   twenty gql '{ people(filter: { emails: { primaryEmail: { eq: "<email>" } } }) { edges { node { id name { firstName lastName } emails { primaryEmail } phones { primaryPhoneNumber } city jobTitle source pharmiaTenant group outreachStatus } } } }'
+A. LOOKUP Person (email d'abord, puis téléphone, puis nom). **Récupère AUSSI `pharmiaUserId`, `atlasUsage`, `signals`** — c'est ce qui te dit si le lien signup est DÉJÀ posé ou pas:
+   twenty gql '{ people(filter: { emails: { primaryEmail: { eq: "<email>" } } }) { edges { node { id name { firstName lastName } emails { primaryEmail } phones { primaryPhoneNumber } city jobTitle source pharmiaTenant group outreachStatus pharmiaUserId atlasUsage signals } } } }'
+
+   **RÈGLE CLÉ — une personne peut EXISTER déjà (prospect démarché, booking, ancien signup) mais NE PAS avoir le lien signup.** Un signup d'une personne existante est de l'info NEUVE: tu DOIS toujours, même si le reste de la fiche semble complet, (1) poser `pharmiaUserId` s'il est vide, et (2) ajouter le signal `PLG_SIGNUP`. Un proprio démarché ou un booking (MEETING_BOOKED) qui signe AUSSI = double signal à forte valeur → flag-le explicitement dans l'output ("déjà au CRM comme <statut>, signe maintenant → Atlas user").
 
 B. CREATE ou UPDATE Person avec ces fields:
    - name: { firstName, lastName } correctement séparés (PAS firstName="Sophya Berrada" lastName="Karim Berrada")
@@ -133,6 +135,10 @@ C. CREATE Note. bodyV2 est RICH_TEXT_V2 — utilise le sous-champ markdown (PAS 
 D. LINK Note → Person:
    twenty gql 'mutation { createNoteTarget(data: { noteId: "<noteId>", personId: "<personId>" }) { id } }'
 
+E. SIGNAL `PLG_SIGNUP` (TOUJOURS pour un signup — c'est le tag d'intention qui marque l'inscription). Si `PLG_SIGNUP` n'est PAS déjà dans `signals` (du LOOKUP A), ajoute-le **sans écraser** les autres signaux:
+   twenty gql 'mutation { updatePerson(id: "<personId>", data: { signals: [<...signals existants du LOOKUP>, "PLG_SIGNUP"] }) { id } }'
+   (Si `signals` était vide: `signals: ["PLG_SIGNUP"]`. `pharmiaUserId` est déjà posé par l'upsert étape B; `atlasUsage` est rétro-rempli par le cron `pharmia-twenty-atlas-sync` à partir de `pharmiaUserId`.)
+
 OUTPUT (poste UN SEUL message avec `discord-post <channelId> "…"` après que tout soit écrit — channelId est dans le [Discord context]):
 Format strict, max 5 lignes total:
 
@@ -151,7 +157,7 @@ RÈGLES STRICTES:
 - AUCUNE narration d'étapes ("Je vais...", "Maintenant...", "Laisse-moi vérifier..."). Tu fais, tu rapportes.
 - AUCUN paragraphe d'explication. Faits seulement.
 - Si une étape échoue: une ligne disant quoi a échoué et ce qui est quand même écrit dans Twenty.
-- Si la personne est déjà parfaitement à jour: "<Nom> déjà à jour dans Twenty." (une ligne).
+- "Déjà à jour" n'est valide QUE si le lien signup est DÉJÀ posé: `pharmiaUserId` non-vide ET `PLG_SIGNUP` déjà dans `signals` (vérifié au LOOKUP A). Dans ce seul cas: "<Nom> déjà à jour dans Twenty (signup déjà lié)." (une ligne). Une fiche qui a un nom/ville/titre complets mais PAS le lien signup n'est PAS "à jour" — pose le lien (étapes B + E).
 - APRÈS le message final unique, TU NE PARLES PLUS dans ce channel — pas de "je continue à surveiller", pas de "je reste en veille", rien. Le watcher ne se commente pas lui-même.
 
 ---
@@ -159,8 +165,12 @@ RÈGLES STRICTES:
 ## Idempotency
 
 `twenty person upsert --email` is create-or-update by primaryEmail — it is safe to re-run. The
-`pg canary app` lookup is read-only. If the engine re-triggers on the same signup, you converge to
-the "<Nom> déjà à jour dans Twenty." path — no duplicate Person is created. `outreachStatus` must
+`pg canary app` lookup is read-only. Re-running steps B (upsert with `--pharmia-user-id`) and E
+(append `PLG_SIGNUP` to `signals`) is idempotent: the link is set once, the signal is a set-member,
+no duplicate Person is created. You converge to the "<Nom> déjà à jour (signup déjà lié)." line ONLY
+once `pharmiaUserId` and the `PLG_SIGNUP` signal are both present — never as a shortcut to skip them
+on a person who existed before but had no signup link yet (a booked owner who now signs up is exactly
+this case). `outreachStatus` must
 never regress: only advance it to INTERESTED from {null, NOT_CONTACTED, CONTACTED}, never overwrite a
 more-advanced stage (MEETING_BOOKED, IN_DISCUSSION, CONVERTED) and never resurrect NOT_INTERESTED —
 omit `--outreach-status` in those cases.
@@ -173,3 +183,7 @@ omit `--outreach-status` in those cases.
   web + at least one alternate professional order. An empty OPQ means "look harder", not "give up".
 - **Narrating your steps or posting more than one message.** You do the work silently and post exactly
   one strict-format summary via `discord-post`, then go quiet — the watcher never comments on itself.
+- **Treating an already-known person as "rien à faire".** A prospect, a booking, or an old contact who
+  now SIGNS UP is new information: the signup link (`pharmiaUserId`) + `PLG_SIGNUP` signal must still be
+  set. "Fiche complète" ≠ "signup lié". Skipping the link here is the exact miss that hid a real
+  signup. An existing booked owner who signs up = double signal → flag it high-value.
