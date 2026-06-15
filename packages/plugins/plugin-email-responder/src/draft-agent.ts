@@ -1,10 +1,12 @@
 /**
- * Draft-only agent: schema-enforced structured output, NO tools, NO creds in code.
- * Ported from the proven agents-VPS harness (draft-agent.mjs). The worker inherits
- * ANTHROPIC_BASE_URL / CLAUDE_CODE_OAUTH_TOKEN from the server environment — this
- * module sets neither. There is no send path; it only decides + writes a body.
+ * Draft-only agent. Structured output via a FORCED tool on the gateway's Anthropic
+ * Messages API (POST $ANTHROPIC_BASE_URL/v1/messages), using the base @anthropic-ai/sdk
+ * — a pure HTTP client. We deliberately do NOT use @anthropic-ai/claude-agent-sdk:
+ * its query() spawns the Claude Code CLI binary, which the control-plane container
+ * doesn't ship. The worker inherits ANTHROPIC_BASE_URL / CLAUDE_CODE_OAUTH_TOKEN from
+ * the server environment. No send path — this only decides + writes a body.
  */
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import Anthropic from "@anthropic-ai/sdk";
 import { DRAFT_SCHEMA, VOICE_SYSTEM_PROMPT } from "./constants.js";
 
 export interface DraftDecision {
@@ -21,10 +23,25 @@ export interface IncomingEmailForDraft {
   body: string;
 }
 
+const DRAFT_TOOL_NAME = "submit_draft";
+
+let client: Anthropic | null = null;
+function getClient(): Anthropic {
+  // apiKey -> x-api-key header; the gateway (LiteLLM) accepts it. maxRetries rides
+  // out transient 429s (the subscription rate-window is shared across all agents).
+  client ??= new Anthropic({
+    baseURL: process.env.ANTHROPIC_BASE_URL,
+    apiKey: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY ?? "",
+    maxRetries: 4,
+  });
+  return client;
+}
+
 /**
- * Ask the gateway whether to reply and, if so, for the reply body.
- * Returns `shouldReply: false` (never throws) on any structured-output failure so
- * the worker can log + skip without aborting the rest of the batch.
+ * Ask the gateway whether to reply and, if so, for the reply body. Forces a single
+ * tool call whose input_schema is DRAFT_SCHEMA, so the output is schema-shaped.
+ * Returns shouldReply:false (never throws) on any failure so the worker logs + skips
+ * and advances the cursor instead of wedging on the message.
  */
 export async function draftReply(email: IncomingEmailForDraft, model: string): Promise<DraftDecision> {
   const prompt = [
@@ -37,30 +54,35 @@ export async function draftReply(email: IncomingEmailForDraft, model: string): P
     email.body,
   ].join("\n");
 
-  const run = query({
-    prompt,
-    options: {
-      allowedTools: [],
-      systemPrompt: VOICE_SYSTEM_PROMPT,
-      outputFormat: { type: "json_schema", schema: DRAFT_SCHEMA },
+  try {
+    const resp = await getClient().messages.create({
       model,
-    },
-  });
+      max_tokens: 2000,
+      system: VOICE_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: prompt }],
+      tools: [
+        {
+          name: DRAFT_TOOL_NAME,
+          description: "Record the drafting decision and, when replying, the reply subject and body.",
+          input_schema: DRAFT_SCHEMA as unknown as Anthropic.Tool.InputSchema,
+        },
+      ],
+      tool_choice: { type: "tool", name: DRAFT_TOOL_NAME },
+    });
 
-  let result: Record<string, unknown> | null = null;
-  for await (const message of run as AsyncIterable<Record<string, unknown>>) {
-    if (message.type === "result") result = message;
+    const toolUse = resp.content.find((block) => block.type === "tool_use");
+    if (!toolUse || toolUse.type !== "tool_use") {
+      return { shouldReply: false, reason: "model returned no tool output" };
+    }
+    const out = toolUse.input as Partial<DraftDecision>;
+    if (typeof out.shouldReply !== "boolean") {
+      return { shouldReply: false, reason: "tool output missing shouldReply" };
+    }
+    return { shouldReply: out.shouldReply, reason: out.reason ?? "", draft: out.draft };
+  } catch (err) {
+    return {
+      shouldReply: false,
+      reason: `gateway error: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
-
-  if (!result) {
-    return { shouldReply: false, reason: "no result message from agent" };
-  }
-  if (result.subtype === "error_max_structured_output_retries") {
-    return { shouldReply: false, reason: "agent could not produce schema-valid output" };
-  }
-  if (result.subtype !== "success" || !result.structured_output) {
-    return { shouldReply: false, reason: `agent error: ${String(result.subtype)}` };
-  }
-
-  return result.structured_output as DraftDecision;
 }
