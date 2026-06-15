@@ -78,7 +78,7 @@ if [[ -z "$MESSAGE" && ${#IMAGES[@]} -eq 0 ]]; then
   echo "discord-post: empty message (and no --image attachment)" >&2; exit 1
 fi
 
-TOKEN="${DISCORD_BOT_TOKEN:-}"
+TOKEN="${DISCORD_BOT_TOKEN:-$(vault-secret discord_bot_token 2>/dev/null)}"
 [[ -n "$TOKEN" ]] || { echo "discord-post: \$DISCORD_BOT_TOKEN is not set — cannot authenticate as the bot" >&2; exit 1; }
 
 # Post a single chunk; jq builds the JSON body so content is correctly escaped.

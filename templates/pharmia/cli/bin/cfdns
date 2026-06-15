@@ -4,6 +4,7 @@ set -euo pipefail
 # Cloudflare DNS management CLI
 # Auth: CLOUDFLARE_API_TOKEN env var
 API="https://api.cloudflare.com/client/v4"
+CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-$(vault-secret cloudflare_api_token 2>/dev/null)}"
 AUTH="Authorization: Bearer ${CLOUDFLARE_API_TOKEN:?Set CLOUDFLARE_API_TOKEN}"
 
 CONFIG_DIR="${HOME}/.config/cfdns"

@@ -303,17 +303,33 @@ resource "coder_agent" "main" {
           rm -rf "$d"
         fi
       done
-      for sub in agents skills rules; do
+      for sub in agents skills rules hooks; do
         if [ -d "/opt/bento/claude-config/$sub" ]; then
           mkdir -p "$HOME/.claude/$sub"
           cp -rn /opt/bento/claude-config/$sub/. "$HOME/.claude/$sub/" 2>/dev/null || true
         fi
       done
+      [ -f "$HOME/.claude/hooks/deny-env-dump.sh" ] && chmod 755 "$HOME/.claude/hooks/deny-env-dump.sh" 2>/dev/null || true
       echo "[startup] synced team agents/skills/rules → $HOME/.claude (no-clobber + marker-prune)"
       # environment-bindings.md is the PAPERCLIP-SANDBOX edition of the toolkit doc (assumes
       # injected scoped creds) — in zero-creds workspaces it made Claude over-claim access.
       # Removed every start (re-copied by the no-clobber sync above, so rm must follow it).
       rm -f "$HOME/.claude/rules/environment-bindings.md"
+      # env-dump deny-hook -> ~/.claude/settings.json (leak backstop). Runs every start,
+      # BEFORE the gateway-token merge below (which reads+preserves this hooks block).
+      python3 - <<'PYHOOK' || true
+import json, pathlib
+p = pathlib.Path.home() / '.claude' / 'settings.json'
+d = {}
+if p.exists():
+    try: d = json.loads(p.read_text() or '{}')
+    except Exception: d = {}
+hook = str(pathlib.Path.home() / '.claude' / 'hooks' / 'deny-env-dump.sh')
+d['hooks'] = {'PreToolUse': [{'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': hook}]}]}
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps(d, indent=2))
+print("[startup] installed env-dump deny-hook into ~/.claude/settings.json")
+PYHOOK
       # Team CLAUDE.md (engineering discipline; baked from workspace-CLAUDE.md) — written
       # once if absent so a dev's own CLAUDE.md edits are never overwritten.
       if [ -f /opt/bento/claude-config/CLAUDE.md ] && [ ! -f "$HOME/.claude/CLAUDE.md" ]; then

@@ -96,7 +96,7 @@ esac
 URL_VAR="GRAFANA_URL_$ENV"
 TOKEN_VAR="GRAFANA_TOKEN_$ENV"
 URL="${!URL_VAR:-}"
-TOKEN="${!TOKEN_VAR:-}"
+TOKEN="${!TOKEN_VAR:-$(vault-secret "grafana_token_$(echo "$ENV" | tr '[:upper:]' '[:lower:]')" 2>/dev/null)}"
 if [[ -z "$URL" ]]; then
   echo "Set $URL_VAR in ~/.zshenv" >&2
   exit 1

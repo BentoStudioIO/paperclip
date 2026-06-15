@@ -131,25 +131,25 @@ case "$ENV" in
     SSH_HOST="bento"
     APP_NAME="pharmia-dev-kwvuth"
     PG_USER="postgres"
-    PG_PASS="${PG_DEV_PASSWORD:-}"
-    MASTRA_PASS="${PG_DEV_MASTRA_PASSWORD:-}"
-    GF_PASS="${PG_DEV_GRAFANA_PASSWORD:-}"
+    PG_PASS="${PG_DEV_PASSWORD:-$(vault-secret pg_dev_password 2>/dev/null)}"
+    MASTRA_PASS="${PG_DEV_MASTRA_PASSWORD:-$(vault-secret pg_dev_mastra_password 2>/dev/null)}"
+    GF_PASS="${PG_DEV_GRAFANA_PASSWORD:-$(vault-secret pg_dev_grafana_password 2>/dev/null)}"
     ;;
   qa)
     SSH_HOST="pharmia-qa"
     APP_NAME="pharmia-qa-xdb2q7"
     PG_USER="postgres"
-    PG_PASS="${PG_QA_PASSWORD:-}"
-    MASTRA_PASS="${PG_QA_MASTRA_PASSWORD:-}"
-    GF_PASS="${PG_QA_GRAFANA_PASSWORD:-}"
+    PG_PASS="${PG_QA_PASSWORD:-$(vault-secret pg_qa_password 2>/dev/null)}"
+    MASTRA_PASS="${PG_QA_MASTRA_PASSWORD:-$(vault-secret pg_qa_mastra_password 2>/dev/null)}"
+    GF_PASS="${PG_QA_GRAFANA_PASSWORD:-$(vault-secret pg_qa_grafana_password 2>/dev/null)}"
     ;;
   canary)
     SSH_HOST="prod"
     APP_NAME="pharmia-canary-46uhia"
     PG_USER="postgres"
-    PG_PASS="${PG_CANARY_PASSWORD:-}"
-    MASTRA_PASS="${PG_CANARY_MASTRA_PASSWORD:-}"
-    GF_PASS="${PG_CANARY_GRAFANA_PASSWORD:-}"
+    PG_PASS="${PG_CANARY_PASSWORD:-$(vault-secret pg_canary_password 2>/dev/null)}"
+    MASTRA_PASS="${PG_CANARY_MASTRA_PASSWORD:-$(vault-secret pg_canary_mastra_password 2>/dev/null)}"
+    GF_PASS="${PG_CANARY_GRAFANA_PASSWORD:-$(vault-secret pg_canary_grafana_password 2>/dev/null)}"
     ;;
   *)
     echo "Unknown environment: $ENV (use dev, qa, or canary)" >&2

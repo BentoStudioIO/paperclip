@@ -40,6 +40,11 @@ cp -f "$PHARMIA_DIR/rules/"*.md "$STAGE/rules/" 2>/dev/null || true
 # Coder workspaces it makes Claude over-claim toolkit access. Excluded from the image —
 # runtimes that inject scoped creds (Daytona/paperclip) should supply it themselves.
 rm -f "$STAGE/rules/environment-bindings.md"
+# env-dump deny-hook (leak backstop): workspaces carry the gateway token + free-model keys
+# in env; this PreToolUse hook blocks reflexive env/secret-file dumps from landing in Claude
+# transcripts. Wired into ~/.claude/settings.json by the template startup (see main.tf).
+mkdir -p "$STAGE/hooks"
+cp -f "$SCRIPT_DIR/hooks/deny-env-dump.sh" "$STAGE/hooks/deny-env-dump.sh" && chmod 755 "$STAGE/hooks/deny-env-dump.sh"
 # Team CLAUDE.md (engineering discipline distilled from the CTO's guide) — synced to
 # ~/.claude/CLAUDE.md by the template startup (no-clobber; Claude Code loads it natively).
 cp -f "$SCRIPT_DIR/workspace-CLAUDE.md" "$STAGE/CLAUDE.md"

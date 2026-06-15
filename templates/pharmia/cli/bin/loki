@@ -109,15 +109,15 @@ case "$_env" in
     ;;
   dev)
     LOKI_ADDR="https://grafana.dev.pharmia.ca/api/datasources/proxy/uid/loki"
-    _auth_args=(--bearer-token "${LOKI_DEV_TOKEN:?set LOKI_DEV_TOKEN in env (~/.zshenv)}")
+    _auth_args=(--bearer-token "${LOKI_DEV_TOKEN:-$(vault-secret loki_dev_token 2>/dev/null)}")
     ;;
   qa)
     LOKI_ADDR="https://grafana.qa.pharmia.ca/api/datasources/proxy/uid/loki"
-    _auth_args=(--bearer-token "${LOKI_QA_TOKEN:?set LOKI_QA_TOKEN in env (~/.zshenv)}")
+    _auth_args=(--bearer-token "${LOKI_QA_TOKEN:-$(vault-secret loki_qa_token 2>/dev/null)}")
     ;;
   canary)
     LOKI_ADDR="https://grafana.canary.pharmia.ca/api/datasources/proxy/uid/loki"
-    _auth_args=(--bearer-token "${LOKI_CANARY_TOKEN:?set LOKI_CANARY_TOKEN in env (~/.zshenv)}")
+    _auth_args=(--bearer-token "${LOKI_CANARY_TOKEN:-$(vault-secret loki_canary_token 2>/dev/null)}")
     ;;
 esac
 

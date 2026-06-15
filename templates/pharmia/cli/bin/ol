@@ -44,6 +44,7 @@ fi
 [[ -f "$CONF_SHELL" ]] && source "$CONF_SHELL"
 
 BASE="${OUTLINE_URL:?Set OUTLINE_URL in config or env}"
+OUTLINE_API_TOKEN="${OUTLINE_API_TOKEN:-$(vault-secret outline_api_token 2>/dev/null)}"
 TOKEN="${OUTLINE_API_TOKEN:?Set OUTLINE_API_TOKEN in config or env}"
 API="${BASE}/api"
 

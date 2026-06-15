@@ -103,13 +103,20 @@ sudo grep -q 'ZSH_VERSION.*_bun' "$ZE" || true   # bun completion is guarded at 
 ensure_line FORGEJO_URL "export FORGEJO_URL=\"$FORGEJO_URL\""
 sudo grep -q 'config/forgejo/token' "$ZE" || echo '[ -r ~/.config/forgejo/token ] && export FORGEJO_TOKEN="$(cat ~/.config/forgejo/token)"' | sudo tee -a "$ZE" >/dev/null
 ensure_line ANTHROPIC_BASE_URL "export ANTHROPIC_BASE_URL=\"$GATEWAY_URL\""
+# Gateway token MUST stay in env: Claude Code authenticates to the llm.bentostudio.io
+# gateway via `Authorization: Bearer` (CLAUDE_CODE_OAUTH_TOKEN). apiKeyHelper only delivers
+# an x-api-key, which the gateway rejects ("Ensure Key has Bearer prefix"), so it cannot be
+# moved out of the env. It stays here, protected by the env-dump deny-hook installed in §6c.
 ensure_secret CLAUDE_CODE_OAUTH_TOKEN "${AGENT_GATEWAY_TOKEN:-}"
-ensure_secret PG_DEV_PASSWORD "${PG_DEV_PASSWORD:-}"; ensure_secret PG_QA_PASSWORD "${PG_QA_PASSWORD:-}"
-ensure_secret LOKI_DEV_TOKEN "${LOKI_DEV_TOKEN:-}"; ensure_secret LOKI_QA_TOKEN "${LOKI_QA_TOKEN:-}"; ensure_secret LOKI_CANARY_TOKEN "${LOKI_CANARY_TOKEN:-}"
-ensure_secret DISCORD_BOT_TOKEN "${DISCORD_BOT_TOKEN:-}"   # for `discord-post` (assignment back-posts); same bot as the plugin
-ensure_secret GRAFANA_TOKEN_DEV "${GRAFANA_TOKEN_DEV:-}"; ensure_secret GRAFANA_TOKEN_QA "${GRAFANA_TOKEN_QA:-}"
-ensure_secret OUTLINE_API_TOKEN "${OUTLINE_API_TOKEN:-}"; ensure_secret CLOUDFLARE_API_TOKEN "${CLOUDFLARE_API_TOKEN:-}"
-sudo chmod 600 "$ZE"; log "zshenv structural lines ensured; secrets set where provided in env"
+# 2026-06-15 leak fix: the tool secrets (PG_*, LOKI_*, GRAFANA_TOKEN_*, OUTLINE_API_TOKEN,
+# CLOUDFLARE_API_TOKEN, DISCORD_BOT_TOKEN) are NO LONGER injected into the agent env — an
+# `env`/`printenv` dump used to persist them verbatim into run transcripts. The wrapper CLIs
+# (pg/loki/prom/ol/cfdns/discord-post) now fetch each value ON DEMAND from HashiCorp Vault
+# secret/agents/* via `vault-secret`, so the env carries none of them. See §6c for the
+# bootstrap (read-only agents-ro AppRole creds) + the deny-hook. To rotate a value, update
+# Vault (secret/agents/<name>), NOT this file. GH_TOKEN/GITHUB_PERSONAL_ACCESS_TOKEN remain
+# in env for the compiled `gh`; FORGEJO_TOKEN is already file-sourced above.
+sudo chmod 600 "$ZE"; log "zshenv: gateway token + structural lines only; tool secrets are Vault-fetched on demand (§6c)"
 
 echo "== 6) harness ~/.claude (single canonical agent harness) =="
 # DRY: the ONE harness-sync codepath, shared with the post-merge hook + systemd timer.
@@ -123,6 +130,36 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now paperclip-agent-harness.timer >/dev/null 2>&1 \
   && log "harness timer enabled (6h backstop; post-merge hook keys off /etc/systemd/system/paperclip-agent-harness.service)" \
   || echo "  ! could not enable paperclip-agent-harness.timer"
+
+echo "== 6c) leak-prevention: Vault-fetch CLI toolkit + env-dump deny-hook (2026-06-15) =="
+# Tool secrets are fetched on demand from HashiCorp Vault (secret/agents/*) by the wrapper
+# CLIs via `vault-secret`, instead of sitting in the agent env where an env dump leaked them
+# into run transcripts. Bootstrap = a READ-ONLY, secret/agents/*-scoped AppRole (agents-ro)
+# whose role_id/secret_id live in a 0600 file OUTSIDE the env. Idempotent; survives the
+# harness sync (settings.json + hooks/ are not in sync-agent-harness.sh's rsync scope).
+CLI_SRC="$(cd "$SCRIPT_DIR/../cli/bin" 2>/dev/null && pwd)"
+if [ -n "$CLI_SRC" ]; then
+  sudo install -d -m 755 /opt/bento-cli/bin
+  sudo install -m 755 "$CLI_SRC"/* /opt/bento-cli/bin/ 2>/dev/null \
+    && log "installed CLI toolkit (incl vault-secret + Vault-fallback pg/loki/prom/ol/cfdns/discord-post) into /opt/bento-cli/bin"
+fi
+# agents-ro Vault creds (read-only). role_id/secret_id sourced from escrow env before provisioning.
+if [ -n "${AGENT_VAULT_RO_ROLE_ID:-}" ] && [ -n "${AGENT_VAULT_RO_SECRET_ID:-}" ]; then
+  sudo -u "$AGENT_USER" install -d -m 700 "$AGENT_HOME/.config/pharmia-vault"
+  printf 'VAULT_RO_ROLE_ID=%s\nVAULT_RO_SECRET_ID=%s\n' "$AGENT_VAULT_RO_ROLE_ID" "$AGENT_VAULT_RO_SECRET_ID" \
+    | sudo -u "$AGENT_USER" tee "$AGENT_HOME/.config/pharmia-vault/agents-ro.env" >/dev/null
+  sudo chmod 600 "$AGENT_HOME/.config/pharmia-vault/agents-ro.env"; log "wrote agents-ro Vault creds (0600, outside the env)"
+elif ! sudo test -s "$AGENT_HOME/.config/pharmia-vault/agents-ro.env"; then
+  echo "  ! AGENT_VAULT_RO_{ROLE,SECRET}_ID unset and creds absent — vault-secret (and the Vault-fetch CLIs) will fail until provided"
+fi
+# env-dump deny-hook (PreToolUse, matcher Bash): backstop so a reflexive env/printenv/secret-file
+# dump can't land in a transcript. Fail-open by construction (never blocks all Bash).
+sudo -u "$AGENT_USER" install -d -m 700 "$AGENT_HOME/.claude/hooks"
+sudo install -o "$AGENT_USER" -g "$AGENT_USER" -m 750 "$SCRIPT_DIR/hooks/deny-env-dump.sh" "$AGENT_HOME/.claude/hooks/deny-env-dump.sh"
+printf '%s\n' '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/home/agent/.claude/hooks/deny-env-dump.sh"}]}]}}' \
+  | sudo -u "$AGENT_USER" tee "$AGENT_HOME/.claude/settings.json" >/dev/null
+sudo chmod 600 "$AGENT_HOME/.claude/settings.json"
+log "env-dump deny-hook + settings.json installed (verified to enforce under --dangerously-skip-permissions)"
 
 echo "== 7) host: ssh banner-off + ufw allow for the control-plane IP =="
 sudo tee /etc/ssh/sshd_config.d/99-paperclip-no-banner.conf >/dev/null <<EOF
