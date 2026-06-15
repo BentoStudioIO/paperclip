@@ -16,6 +16,11 @@ and draw down the plan's credits (no paid plan required for the API).
   jobs      "<query>"       get-leads/linkedin-scraper(jobs)      hiring signals
 
 Pipeline: OPQ/search (find) -> profile (enrich + confirm owner) -> posts/reactions (score AI-pharmacy intent) -> Twenty.
+NOTE (2026-06-14): `search` results are NOISY (pharma execs, wrong-country pharmacies, truncated names). ALWAYS
+OPQ-verify a name (token-subset of a licensed OPQ pharmacist) + dedup vs Twenty BEFORE capturing to the CRM —
+never create CRM people from raw search hits. Per-name search is also too noisy for bulk owner-vs-staff
+classification; use derivable signals (name-in-company, provenance) for that. Yield ~1-5 verified/query ->
+run multiple city/role queries for volume.
 
 Creds (env-first, then ~/.config/pharmia-linkedin/creds.env):
   APIFY_TOKEN   required

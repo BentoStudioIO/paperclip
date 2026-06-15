@@ -11,7 +11,10 @@ never hand-craft UUIDs (the server generates them).
 - **Person.group** (persona, NOT origin): `PHARMACIST_OWNER` | `PHARMACIST` | `VC` | `INFLUENCER` | `MENTOR` | `CLIENT` | `SALES` | `PARTNER` | null
 - **Person.pharmiaTenant**: the Pharmia tenant SLUG (`app`, `pjc-254`, …), NOT the friendly name ("Public").
 - **Person.pharmiaUserId**: the Pharmia **better-auth user id** (`ba_user.id`) — the CRM↔app link. Set it whenever the person has a Pharmia account; its presence is how we identify an **Atlas user** in the CRM (combine with `group=PHARMACIST_OWNER` for the owner∩Atlas segment). `group` is single-select so it can't also encode "Atlas user" — that's exactly why the link field exists. Get the id from `pg canary app "SELECT id FROM ba_user WHERE lower(email)='<email>'"`. A daily cron `pharmia-twenty-atlas-sync` backfills it by email for anyone missed.
-- **Opportunity.stage**: `NEW` | `SCREENING` | `MEETING` | `PROPOSAL` | `CLIENT` | `DONE` | `LATER`
+- **Person.atlasUsage** (product-usage state, synced from app): `NEVER` | `ANON_TRIED` | `SIGNED_UP` | `ACTIVE`. Derived from the pharmiaUserId↔`ba_user` match (ACTIVE if `last_login_at` < 30d, else SIGNED_UP). pharmiaUserId presence = *linked*; atlasUsage = *usage depth*. Together → the "owner ∩ active-Atlas-user" segment.
+- **Person.signals** (MULTI_SELECT — accumulating intent tags, NON-exclusive): `LINKEDIN_INTERESTED` | `LINKEDIN_ENGAGED_COMPETITOR` | `PLG_SIGNUP` | `EVENT_MET` | `REFERRAL_MENTION` | `JOB_POSTING` | `CONTENT_ENGAGED`. The INTENT axis — distinct from `source` (one origin) and `group` (persona); a person can hold several. Atlas signup → add `PLG_SIGNUP`; LinkedIn-sourced lead → `LINKEDIN_INTERESTED`. Set via `twenty gql` (not yet on `person upsert` — see gotchas).
+- **Connection** (junction object = the person↔person relation map; this Twenty has NO many-to-many): `personA`/`personB` (→person), `relationshipType` (`CO_OWNER`|`COLLEAGUE`|`KNOWS`|`REFERRAL`|`MENTOR`), `context`. For "X knows Y → warm intro" lead-gen — query a person's connections to find who can introduce a new lead. Create: `twenty gql 'mutation{createConnection(data:{personAId:"<id>" personBId:"<id>" relationshipType:CO_OWNER}){id}}'`. Seeded from co-located pharmacy people.
+- **Opportunity.stage**: `NEW` | `SCREENING` | `MEETING` | `PROPOSAL` | `CLIENT` | `DONE` | `LATER` — opportunity = a GENUINE pursuit only, NOT one-per-pharmacy (the pharmacy universe lives in Company+Person). Don't mint an opp per scouted row.
 - **Note/Task body** = markdown via `twenty note add --md` / `--md-file`.
 - `source` = where they came from; `group` = who they are. Keep them distinct.
 
@@ -60,3 +63,13 @@ Fields: id, fullName, licenseNumber, studentLicenseNumber, city, isStudent. Empt
 ## Write authorization — interactive vs autonomous
 - **Interactive / batch / destructive** (operator-run triage, cohort reconcile, reward claw-back, deletes): **confirm before writing.**
 - **Autonomous watch** (a single signup/booking trigger enriching ONE record via `person upsert` + `note add` — idempotent by design): write WITHOUT per-record confirm. This is the only autonomous-write exception; everything else still confirms.
+
+## Bulk ops & Twenty gotchas (learned 2026-06-14, full CRM re-architecture)
+- **No MANY_TO_MANY** in this Twenty (v2.9.4) — only MANY_TO_ONE / ONE_TO_MANY. For a many-to-many relation, use a junction object (that's why `Connection` exists).
+- **Aliased-mutation cap**: >~50 aliased mutations in one request → "Query too complex". For bulk writes, batch ≤15 aliased per request WITH a per-id fallback.
+- **No deleteMany mutation**: only `delete<Object>(id)` — and it's a SOFT delete (sets `deletedAt`, recoverable). Loop/batch for bulk deletes.
+- **Setting the new fields**: `signals` / `atlasUsage` aren't on `twenty person upsert` yet → set via `twenty gql` `updatePerson`/`createPerson` `data:{signals:["PLG_SIGNUP"], atlasUsage:ACTIVE}` (signals = string array; atlasUsage = bare enum).
+- **field-create for a RELATION field**: extras must be `{"relationCreationPayload":{"type":"MANY_TO_ONE","targetObjectMetadataId":"<id>","targetFieldLabel":"..","targetFieldIcon":".."}}` (the CLI sends it as a variable) — NOT flat `relationType`/`targetObjectMetadataId`.
+- **`pg` CLI takes NO psql flags** (`pg <env> <db> "<sql>"` only). For parseable output, concatenate columns with a rare delimiter inside the SQL (e.g. `col1||'~|~'||col2`) and split in the consumer.
+- **OPQ index needs a browser User-Agent** (`curl`/`urllib` default → 403). Send `User-Agent: Mozilla/5.0 ...`.
+- **Bulk owner-detection**: per-name Brave/web search is TOO NOISY for mass owner-vs-staff classification (wrong-country, wrong same-name person, parse errors) → use it per-record during interactive triage only. For bulk, trust derivable signals: de-mangled owner records, name-in-company-name, LinkedIn-as-propriétaire, and PROVENANCE (a scouted contact linked to a pharmacy was qualified as an owner when added → `PHARMACIST_OWNER`). PLG self-signups stay `PHARMACIST` (owner/staff-mixed, not reliably classifiable).

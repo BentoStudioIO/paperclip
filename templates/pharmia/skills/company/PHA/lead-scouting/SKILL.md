@@ -25,6 +25,9 @@ curl -s 'https://www.opq.org/wp-content/uploads/pharmacist-search/pharmacists_in
 JSON array: `id, fullName, licenseNumber, studentLicenseNumber, city, isStudent`. Filter to licensed
 non-students. OPQ does NOT flag ownership — infer **pharmacien-propriétaire** by cross-referencing web /
 LinkedIn / known pharmacy names (the repertoire is the universe, ownership is the qualifier).
+**Gotcha:** the endpoint WAFs default agents (403) — send a browser `User-Agent` header. **OPQ is also the
+lead-QUALITY GATE**: only capture a web/LinkedIn-sourced name if it matches a licensed OPQ pharmacist
+(token-subset of a 2-4-token OPQ name) — this rejects pharma execs / wrong-country / non-pharmacist noise.
 
 ## Source 2 — Twenty (dedupe + write)
 - Discover schema: `twenty objects`, `twenty fields person`, `twenty fields company`.
@@ -77,6 +80,26 @@ LINKEDIN PIPELINE: <ran ok | empty | unavailable>
 ```
 Hook references the signal (their post / their signup), never generic. Owner-operator contact =
 **opportunity** in Twenty (per CRM rules: rencontre/contact propriétaire = opportunity).
+
+## Capturing & enriching leads (proven pipelines, 2026-06-14)
+Set the right fields on every captured lead (full field model: crm-triage `references/twenty-entity-rules.md`).
+- **PLG capture** (Atlas signups not yet in CRM): email-match `pg canary app` `ba_user` (non-anon, has email)
+  ↔ Twenty; for the unmatched, `createPerson` with `group:PHARMACIST source:PHARMIA_SIGNUP
+  atlasUsage:SIGNED_UP|ACTIVE signals:["PLG_SIGNUP"] pharmiaUserId:<ba_user.id>`. (283 captured 2026-06-14.)
+  Skip fuzzy name-only matches (wrong-person PII risk).
+- **LinkedIn capture**: `linkedin-signals search "<role> <city>"` → **OPQ-verify each name** (the gate) →
+  dedup vs Twenty → `createPerson(group:PHARMACIST_OWNER source:SOCIAL signals:["LINKEDIN_INTERESTED"]
+  linkedinLink:{primaryLinkUrl:"<url>"} outreachStatus:NOT_CONTACTED)`. Search is noisy (~1-5 verified/query)
+  → run multiple city/role queries for volume.
+- **`signals` / `atlasUsage`** are set via `twenty gql` (not on `person upsert` yet).
+- **Owner vs staff** (`group`): trust de-mangled owner records, name-in-company-name, LinkedIn-as-propriétaire,
+  and PROVENANCE (a scouted pharmacy-linked contact was qualified as an owner → `PHARMACIST_OWNER`). Per-name
+  Brave search is TOO NOISY for bulk owner/staff classification — use it per-record only, never en masse.
+
+## Relation map — warm intros (`Connection` object)
+"X knows Y → who can introduce a cold lead." Co-located pharmacy people are seeded as `CO_OWNER`/`COLLEAGUE`
+connections. For a new cold lead, query their pharmacy's other People + their `Connection`s to surface a warm
+intro path. Add one: `twenty gql 'mutation{createConnection(data:{personAId:".." personBId:".." relationshipType:KNOWS}){id}}'`.
 
 ## Discipline
 - `twenty gql` mutations only — never hand-crafted UUIDs (server generates).

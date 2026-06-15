@@ -63,8 +63,21 @@ Enums (discover live with 'twenty fields <obj>' + 'twenty meta'):
   person.source   PHARMIA_SIGNUP INBOUND_MEETING REFERRAL COLD SOCIAL EVENT PARTNER_REFERRAL
   person.group    PHARMACIST_OWNER PHARMACIST VC INFLUENCER MENTOR CLIENT SALES PARTNER
   person.outreachStatus  NOT_CONTACTED CONTACTED INTERESTED MEETING_BOOKED IN_DISCUSSION CONVERTED NOT_INTERESTED
-  opportunity.stage  NEW SCREENING MEETING PROPOSAL DONE CLIENT LATER
+  person.atlasUsage  NEVER ANON_TRIED SIGNED_UP ACTIVE   (Atlas product-usage, synced from app)
+  person.signals  MULTI_SELECT (accumulating): LINKEDIN_INTERESTED LINKEDIN_ENGAGED_COMPETITOR PLG_SIGNUP EVENT_MET REFERRAL_MENTION JOB_POSTING CONTENT_ENGAGED
+  opportunity.stage  NEW SCREENING MEETING PROPOSAL DONE CLIENT LATER   (opp = a real pursuit, NOT one-per-pharmacy)
+  connection.relationshipType  CO_OWNER COLLEAGUE KNOWS REFERRAL MENTOR   (person<->person relation map = the 'connection' junction object)
   task.status     TODO IN_PROGRESS PLANNED DONE WONT_DO WAITING LATER
+
+Schema notes / gotchas (2026-06-14 CRM re-architecture):
+  - This Twenty (v2.9.4) has NO MANY_TO_MANY relations (only MANY_TO_ONE / ONE_TO_MANY) -> for M2M use a
+    junction object; the 'connection' object models person<->person.
+  - field-create RELATION: extras = {"relationCreationPayload":{"type":"MANY_TO_ONE","targetObjectMetadataId":
+    "<id>","targetFieldLabel":"..","targetFieldIcon":".."}} (sent as a variable) -- NOT flat relationType.
+  - Bulk writes: aliased mutations cap at <50 per request ("Query too complex") -> batch <=15 + per-id fallback.
+    No deleteMany mutation; delete<Object>(id) is a SOFT delete (recoverable).
+  - signals/atlasUsage have no 'person upsert' flag yet -> set via: twenty gql 'mutation{updatePerson(id:".."
+    data:{signals:["PLG_SIGNUP"] atlasUsage:ACTIVE}){id}}'.
 
 Examples:
   twenty objects
