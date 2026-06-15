@@ -245,6 +245,28 @@ describe("resolveCompanyImportApiPath", () => {
       })
     ).toThrow(/require a companyId/i);
   });
+
+  it("routes existing-company imports to the privileged board-full route when boardFull is set", () => {
+    // The company-scoped safe route rejects replace; --board-full opts into the
+    // privileged /api/companies/import route (board_full mode) that allows it.
+    expect(
+      resolveCompanyImportApiPath({
+        dryRun: false,
+        targetMode: "existing_company",
+        companyId: "company-123",
+        boardFull: true,
+      }),
+    ).toBe("/api/companies/import");
+
+    expect(
+      resolveCompanyImportApiPath({
+        dryRun: true,
+        targetMode: "existing_company",
+        companyId: "company-123",
+        boardFull: true,
+      }),
+    ).toBe("/api/companies/import/preview");
+  });
 });
 
 describe("resolveCompanyImportApplyConfirmationMode", () => {

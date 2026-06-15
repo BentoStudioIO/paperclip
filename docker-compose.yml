@@ -120,9 +120,11 @@ services:
       - sh
       - -c
       - |
-        echo "[import] waiting for server API at http://server:3100 ..."
+        echo "[import] waiting for server API at http://server:3100/api/health ..."
         i=0
-        until curl -fsS -o /dev/null http://server:3100/; do
+        # Probe /api/health: the root path is origin-gated (403) in authenticated
+        # mode, so `curl -f http://server:3100/` would never read as ready.
+        until curl -fsS -o /dev/null http://server:3100/api/health; do
           i=$$((i+1))
           if [ "$$i" -ge 30 ]; then
             echo "[import] FATAL: server API did not become ready within ~60s" >&2
@@ -131,10 +133,14 @@ services:
           sleep 2
         done
         echo "[import] server ready; importing templates as SSOT ..."
+        # --board-full: existing-company replace requires the privileged board_full
+        # route (the CEO-safe route rejects replace). PAPERCLIP_API_KEY must belong
+        # to an instance-admin or a member of the target company.
         pnpm paperclipai company import /app/templates/pharmia \
           --target existing \
           --company-id 57cd0843-fe5a-42d5-a6f6-c4e896fee84e \
           --collision replace \
+          --board-full \
           --include company,agents,skills \
           --yes \
           || { echo "[import] FATAL: template import failed" >&2; exit 1; }

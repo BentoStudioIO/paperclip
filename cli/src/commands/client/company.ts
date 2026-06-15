@@ -85,6 +85,7 @@ interface CompanyImportOptions extends BaseClientOptions {
   paperclipUrl?: string;
   yes?: boolean;
   dryRun?: boolean;
+  boardFull?: boolean;
 }
 
 const DEFAULT_EXPORT_INCLUDE: CompanyPortabilityInclude = {
@@ -747,8 +748,16 @@ export function resolveCompanyImportApiPath(input: {
   dryRun: boolean;
   targetMode: "new_company" | "existing_company";
   companyId?: string | null;
+  /**
+   * Opt into the privileged board-full import route (`/api/companies/import`,
+   * board_full mode) for an existing company. The company-scoped safe route
+   * (`/imports/apply`) is CEO-scoped and rejects the `replace` collision
+   * strategy; deploy-time SSOT syncs that must overwrite existing agents set
+   * this to reach the route that allows replace.
+   */
+  boardFull?: boolean;
 }): string {
-  if (input.targetMode === "existing_company") {
+  if (input.targetMode === "existing_company" && !input.boardFull) {
     const companyId = input.companyId?.trim();
     if (!companyId) {
       throw new Error("Existing-company imports require a companyId to resolve the API route.");
@@ -1395,6 +1404,11 @@ export function registerCompanyCommands(program: Command): void {
       .option("--paperclip-url <url>", "Alias for --api-base on this command")
       .option("--yes", "Accept default selection and skip the pre-import confirmation prompt", false)
       .option("--dry-run", "Run preview only without applying", false)
+      .option(
+        "--board-full",
+        "Use the privileged board-full import route for existing companies (required for --collision replace; needs instance-admin or company membership)",
+        false,
+      )
       .action(async (fromPathOrUrl: string, opts: CompanyImportOptions) => {
         try {
           if (!opts.apiBase?.trim() && opts.paperclipUrl?.trim()) {
@@ -1469,6 +1483,7 @@ export function registerCompanyCommands(program: Command): void {
             dryRun: true,
             targetMode: targetPayload.mode,
             companyId: targetPayload.mode === "existing_company" ? targetPayload.companyId : null,
+            boardFull: opts.boardFull,
           });
 
           let selectedFiles: string[] | undefined;
@@ -1550,6 +1565,7 @@ export function registerCompanyCommands(program: Command): void {
             dryRun: false,
             targetMode: targetPayload.mode,
             companyId: targetPayload.mode === "existing_company" ? targetPayload.companyId : null,
+            boardFull: opts.boardFull,
           });
           const imported = await ctx.api.post<CompanyPortabilityImportResult>(importApiPath, {
             ...previewPayload,
