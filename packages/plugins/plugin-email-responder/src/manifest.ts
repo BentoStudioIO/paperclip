@@ -83,8 +83,19 @@ const manifest: PaperclipPluginManifestV1 = {
         description: "Caps oldest-first processing per tick so a backlog drains over successive runs.",
         default: DEFAULT_CONFIG.batchCapPerRun,
       },
+      gatewayBaseUrl: {
+        type: "string",
+        title: "LLM gateway base URL",
+        default: DEFAULT_CONFIG.gatewayBaseUrl,
+      },
+      gatewayTokenRef: {
+        type: "string",
+        format: "secret-ref",
+        title: "LLM gateway token",
+        description: "Saved Paperclip secret holding the gateway (LiteLLM) token for the draft model.",
+      },
     },
-    required: ["inboxes", "discordBotTokenRef"],
+    required: ["inboxes", "discordBotTokenRef", "gatewayTokenRef"],
   },
   jobs: [
     {

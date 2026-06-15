@@ -25,16 +25,16 @@ export interface IncomingEmailForDraft {
 
 const DRAFT_TOOL_NAME = "submit_draft";
 
-let client: Anthropic | null = null;
-function getClient(): Anthropic {
-  // apiKey -> x-api-key header; the gateway (LiteLLM) accepts it. maxRetries rides
-  // out transient 429s (the subscription rate-window is shared across all agents).
-  client ??= new Anthropic({
-    baseURL: process.env.ANTHROPIC_BASE_URL,
-    apiKey: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY ?? "",
-    maxRetries: 4,
-  });
-  return client;
+export interface DraftOptions {
+  model: string;
+  /** Gateway base URL, e.g. https://llm.bentostudio.io */
+  baseUrl: string;
+  /**
+   * Gateway token. The worker resolves it from a Paperclip secret and passes it in
+   * — we do NOT read host env here: the plugin worker runs with a sandboxed env
+   * (PATH/NODE_PATH/NODE_ENV/TZ only), so the ANTHROPIC and CLAUDE vars are absent.
+   */
+  token: string;
 }
 
 /**
@@ -43,7 +43,7 @@ function getClient(): Anthropic {
  * Returns shouldReply:false (never throws) on any failure so the worker logs + skips
  * and advances the cursor instead of wedging on the message.
  */
-export async function draftReply(email: IncomingEmailForDraft, model: string): Promise<DraftDecision> {
+export async function draftReply(email: IncomingEmailForDraft, opts: DraftOptions): Promise<DraftDecision> {
   const prompt = [
     `Incoming email to ${email.inboxAddress}:`,
     `From: ${email.from}`,
@@ -55,8 +55,11 @@ export async function draftReply(email: IncomingEmailForDraft, model: string): P
   ].join("\n");
 
   try {
-    const resp = await getClient().messages.create({
-      model,
+    // apiKey -> x-api-key header; the gateway (LiteLLM) accepts it. maxRetries rides
+    // out transient 429s (the subscription rate-window is shared across all agents).
+    const client = new Anthropic({ baseURL: opts.baseUrl, apiKey: opts.token, maxRetries: 4 });
+    const resp = await client.messages.create({
+      model: opts.model,
       max_tokens: 2000,
       system: VOICE_SYSTEM_PROMPT,
       messages: [{ role: "user", content: prompt }],

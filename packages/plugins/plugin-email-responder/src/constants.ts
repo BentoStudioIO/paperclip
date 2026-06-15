@@ -15,6 +15,7 @@ export const DEFAULT_CONFIG = {
   imapPort: 993,
   model: "claude-sonnet-4-6",
   batchCapPerRun: 5,
+  gatewayBaseUrl: "https://llm.bentostudio.io",
 } as const;
 
 /**

@@ -39,6 +39,8 @@ interface ResolvedConfig {
   imapPort: number;
   model: string;
   batchCapPerRun: number;
+  gatewayTokenRef: string;
+  gatewayBaseUrl: string;
 }
 
 let currentContext: PluginContext | null = null;
@@ -53,6 +55,8 @@ async function getConfig(ctx: PluginContext): Promise<ResolvedConfig> {
     imapPort: raw.imapPort ?? DEFAULT_CONFIG.imapPort,
     model: raw.model ?? DEFAULT_CONFIG.model,
     batchCapPerRun: typeof raw.batchCapPerRun === "number" ? raw.batchCapPerRun : DEFAULT_CONFIG.batchCapPerRun,
+    gatewayTokenRef: raw.gatewayTokenRef ?? "",
+    gatewayBaseUrl: raw.gatewayBaseUrl ?? DEFAULT_CONFIG.gatewayBaseUrl,
   };
 }
 
@@ -155,6 +159,7 @@ async function postDiscord(
 
 async function processInbox(ctx: PluginContext, cfg: ResolvedConfig, inbox: InboxConfig): Promise<void> {
   const botToken = await ctx.secrets.resolve(cfg.discordBotTokenRef);
+  const gatewayToken = await ctx.secrets.resolve(cfg.gatewayTokenRef);
   const client = await connectInbox(ctx, cfg, inbox);
   try {
     const lock = await client.getMailboxLock("INBOX");
@@ -206,7 +211,7 @@ async function processInbox(ctx: PluginContext, cfg: ResolvedConfig, inbox: Inbo
 
         const decision = await draftReply(
           { inboxAddress: inbox.address, from: mail.from, subject: mail.subject, date: mail.headers["date"] ?? "", body: mail.body },
-          cfg.model,
+          { model: cfg.model, baseUrl: cfg.gatewayBaseUrl, token: gatewayToken },
         );
 
         if (!decision.shouldReply || !decision.draft) {
