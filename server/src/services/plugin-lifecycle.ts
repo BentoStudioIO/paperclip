@@ -184,7 +184,7 @@ export interface PluginLifecycleManager {
   markUpgradePending(pluginId: string): Promise<PluginRecord>;
 
   /**
-   * Upgrade a plugin to a newer version.
+   * Upgrade a plugin to a newer version or package source.
    * This is a placeholder that handles the lifecycle state transition.
    * The actual package installation is handled by plugin-loader.
    *
@@ -640,16 +640,16 @@ export function pluginLifecycleManager(
      * @param pluginId - The UUID of the plugin to upgrade.
      * @param options - Optional npm package/version or local path override.
      * @returns The updated `PluginRecord`.
-     * @throws {BadRequest} If the plugin is not in a ready or upgrade_pending state.
+     * @throws {BadRequest} If the plugin is not in a ready, upgrade_pending, or error state.
      */
     async upgrade(pluginId: string, options: PluginUpgradeOptions = {}): Promise<PluginRecord> {
       const plugin = await requirePlugin(pluginId);
 
-      // Can only upgrade plugins that are ready or already in upgrade_pending
-      if (plugin.status !== "ready" && plugin.status !== "upgrade_pending") {
+      // Error-state plugins may need a package/source upgrade to recover.
+      if (plugin.status !== "ready" && plugin.status !== "upgrade_pending" && plugin.status !== "error") {
         throw badRequest(
           `Cannot upgrade plugin in status '${plugin.status}'. ` +
-            `Plugin must be in 'ready' or 'upgrade_pending' status to be upgraded.`,
+            `Plugin must be in 'ready', 'upgrade_pending', or 'error' status to be upgraded.`,
         );
       }
 

@@ -127,3 +127,54 @@ describe("pluginLifecycleManager.restartWorker", () => {
     expect(started).toHaveBeenCalledWith({ pluginId: "plugin-1", pluginKey: "example.plugin" });
   });
 });
+
+describe("pluginLifecycleManager.upgrade", () => {
+  it("allows package upgrades from error state for recovery", async () => {
+    const erroredPlugin = {
+      ...pluginRecord,
+      status: "error",
+      lastError: "bad package root",
+    };
+    const readyPlugin = {
+      ...pluginRecord,
+      status: "ready",
+      version: "1.1.0",
+      lastError: null,
+    };
+
+    mockRegistry.getById.mockResolvedValue(erroredPlugin);
+    mockRegistry.updateStatus.mockResolvedValue(readyPlugin);
+
+    const { workerManager } = makeWorkerManagerStub();
+    const loader: Partial<PluginLoader> = {
+      hasRuntimeServices: vi.fn().mockReturnValue(true) as PluginLoader["hasRuntimeServices"],
+      unloadSingle: vi.fn().mockResolvedValue(undefined) as PluginLoader["unloadSingle"],
+      loadSingle: vi.fn().mockResolvedValue({
+        success: true,
+        plugin: readyPlugin,
+        registered: { worker: true, eventSubscriptions: 0, jobs: 0, webhooks: 0, tools: 0 },
+      }) as PluginLoader["loadSingle"],
+      upgradePlugin: vi.fn().mockResolvedValue({
+        oldManifest: { capabilities: [] },
+        newManifest: { capabilities: [] },
+        discovered: { version: "1.1.0" },
+      }) as PluginLoader["upgradePlugin"],
+    };
+
+    const lifecycle = pluginLifecycleManager(
+      {} as never,
+      { loader: loader as PluginLoader, workerManager },
+    );
+
+    const result = await lifecycle.upgrade("plugin-1", {
+      localPath: "/paperclip/.paperclip/plugins/local/example",
+    });
+
+    expect(loader.unloadSingle).toHaveBeenCalledWith("plugin-1", "example.plugin");
+    expect(loader.upgradePlugin).toHaveBeenCalledWith("plugin-1", {
+      localPath: "/paperclip/.paperclip/plugins/local/example",
+    });
+    expect(loader.loadSingle).toHaveBeenCalledWith("plugin-1");
+    expect(result.status).toBe("ready");
+  });
+});
