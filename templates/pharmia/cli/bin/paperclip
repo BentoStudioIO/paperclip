@@ -58,7 +58,10 @@ case "$cmd" in
           [ "$a" = y ] || { echo aborted; exit 1; }
           _sql "UPDATE agents SET status='idle' WHERE id='$id' AND status<>'terminated' RETURNING 'now: '||status";;
   import) echo "reconciling templates -> DB (collision=replace)…"
-          ssh "$SSH_HOST" "docker exec $(_srv) sh -c 'cd /app && pnpm paperclipai company import /app/templates/pharmia --target existing --company-id $COMPANY --collision replace --include company,agents,skills,tasks --yes'";;
+          [ -s "$KEY_FILE" ] || { echo "missing Paperclip API key file: $KEY_FILE" >&2; exit 1; }
+          token=$(cat "$KEY_FILE")
+          srv=$(_srv)
+          printf '%s\n' "$token" | ssh "$SSH_HOST" "docker exec -i $srv sh -c 'IFS= read -r PAPERCLIP_API_KEY; export PAPERCLIP_API_KEY; export PAPERCLIP_API_URL=http://127.0.0.1:3100; cd /app && pnpm paperclipai company import /app/templates/pharmia --target existing --company-id $COMPANY --collision replace --include company,agents,skills,tasks --yes --board-full'";;
   deploy) busy=$(_sql "SELECT count(*) FROM agents WHERE status NOT IN ('idle','terminated','error')")
           if [ "${busy:-0}" != 0 ] && [ "${1:-}" != "--force" ]; then
             echo "refusing: $busy agent(s) running — a deploy orphans their runs ('Process lost'). Retry when idle, or 'paperclip deploy --force'."; exit 1; fi
