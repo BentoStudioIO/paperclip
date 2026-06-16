@@ -11,7 +11,7 @@
 #   PAPERCLIP_SSH      ssh host for the DB/container (default bento)
 #
 # Usage:
-#   paperclip agents                    list claude_local agents (name/status/model/id)
+#   paperclip agents                    list agents (name/status/adapter/model/id)
 #   paperclip agent  <name|id>          one agent's detail (status, env, skills)
 #   paperclip wake   <name|id> [--fresh]  wake an agent (mutates: queues a run)
 #   paperclip runs   [since=24h] [grep] recent heartbeat runs
@@ -41,7 +41,7 @@ _srv() { ssh "$SSH_HOST" 'docker ps --format "{{.Names}}" | grep -E "paperclip.*
 
 cmd="${1:-help}"; shift || true
 case "$cmd" in
-  agents) _sql "SELECT rpad(name,22)||rpad(status,11)||rpad(coalesce(adapter_config->>'model','?'),20)||id FROM agents WHERE adapter_type='claude_local' ORDER BY status,name";;
+  agents) _sql "SELECT rpad(name,22)||rpad(status,11)||rpad(adapter_type,14)||rpad(coalesce(adapter_config->>'model','?'),20)||id FROM agents ORDER BY status,name";;
   agent)  id=$(_aid "$1"); _sql "SELECT 'name   '||name||E'\nstatus '||status||E'\nmodel  '||coalesce(adapter_config->>'model','?')||E'\nenv    '||coalesce(default_environment_id::text,'-')||E'\nhome   '||coalesce(adapter_config#>>'{env,AGENT_HOME}','(computed)')||E'\nskills '||coalesce(adapter_config#>>'{paperclipSkillSync,desiredSkills}','[]') FROM agents WHERE id='$id'";;
   wake)   id=$(_aid "$1"); fresh=false; [ "${2:-}" = "--fresh" ] && fresh=true
           _api POST "/agents/$id/wakeup" -d "{\"source\":\"on_demand\",\"forceFreshSession\":$fresh}" | jq -r '"queued run "+.id';;

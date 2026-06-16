@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Provision the capped `agent` execution identity on the agents VPS (Paperclip's
-# claude_local SSH target). IDEMPOTENT — safe to re-run; converges to the intended
+# SSH execution target). IDEMPOTENT — safe to re-run; converges to the intended
 # state. This is the SSOT for the hand-applied setup so a fresh VPS / home volume
 # reseeds (per PLAN-shared-agent-vps.md + memory paperclip-agent-identity).
 #
@@ -13,7 +13,7 @@
 # (so re-running live without secrets in env is a no-op for those lines). Source them
 # from Vaultwarden / the ~/.config escrow before running a FRESH provision:
 #   FORGEJO_TOKEN              (bentoadmin site-admin token — required)
-#   AGENT_GATEWAY_TOKEN        (LiteLLM virtual key for CLAUDE_CODE_OAUTH_TOKEN)
+#   AGENT_GATEWAY_TOKEN        (LiteLLM virtual key for Claude Code + Codex gateway auth)
 #   PG_DEV_PASSWORD PG_QA_PASSWORD LOKI_DEV_TOKEN LOKI_QA_TOKEN LOKI_CANARY_TOKEN
 #   DISCORD_BOT_TOKEN          (Paperclip Discord bot token for `discord-post` back-posts;
 #                              SAME bot 1515174537153482843 as the plugin — so awoken
@@ -28,6 +28,7 @@ ENV_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBgTH1DrhC+JNKSh8m/ehFUyKZgRE90z
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGING_DIR="${STAGING_DIR:-$SCRIPT_DIR/.claude-config-staging}"
 GATEWAY_URL="${ANTHROPIC_BASE_URL:-https://llm.bentostudio.io}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-5.5}"
 FORGEJO_URL="${FORGEJO_URL:-https://git.bentostudio.io}"
 
 log(){ printf '  • %s\n' "$*"; }
@@ -108,6 +109,42 @@ ensure_line ANTHROPIC_BASE_URL "export ANTHROPIC_BASE_URL=\"$GATEWAY_URL\""
 # an x-api-key, which the gateway rejects ("Ensure Key has Bearer prefix"), so it cannot be
 # moved out of the env. It stays here, protected by the env-dump deny-hook installed in §6c.
 ensure_secret CLAUDE_CODE_OAUTH_TOKEN "${AGENT_GATEWAY_TOKEN:-}"
+if [ -n "${AGENT_GATEWAY_TOKEN:-}" ]; then
+  sudo -u "$AGENT_USER" env GATEWAY_URL="$GATEWAY_URL" CODEX_MODEL="$CODEX_MODEL" AGENT_GATEWAY_TOKEN="$AGENT_GATEWAY_TOKEN" python3 - <<'PYCODEX'
+import json, os, pathlib, re
+
+cfg = pathlib.Path.home() / ".codex" / "config.toml"
+text = cfg.read_text() if cfg.exists() else ""
+gateway_url = os.environ["GATEWAY_URL"].rstrip("/") + "/v1"
+model = os.environ["CODEX_MODEL"]
+token = os.environ["AGENT_GATEWAY_TOKEN"]
+block = (
+    "[model_providers.gateway]\n"
+    'name = "Bento Gateway"\n'
+    f"base_url = {json.dumps(gateway_url)}\n"
+    'wire_api = "responses"\n'
+    f"experimental_bearer_token = {json.dumps(token)}\n"
+)
+if re.search(r"(?m)^\s*model_provider\s*=", text):
+    text = re.sub(r"(?m)^\s*model_provider\s*=.*$", 'model_provider = "gateway"', text)
+else:
+    text = 'model_provider = "gateway"\n' + text
+if re.search(r"(?m)^\s*model\s*=", text):
+    text = re.sub(r"(?m)^\s*model\s*=.*$", f"model = {json.dumps(model)}", text)
+else:
+    text = f"model = {json.dumps(model)}\n" + text
+if "[model_providers.gateway]" in text:
+    text = re.sub(r"(?ms)^\[model_providers\.gateway\].*?(?=^\[|\Z)", block, text)
+else:
+    text = text.rstrip() + "\n\n" + block
+cfg.parent.mkdir(parents=True, exist_ok=True)
+cfg.write_text(text)
+cfg.chmod(0o600)
+print("  codex: gateway provider configured")
+PYCODEX
+elif ! sudo test -s "$AGENT_HOME/.codex/config.toml"; then
+  echo "  ! AGENT_GATEWAY_TOKEN not set and $AGENT_HOME/.codex/config.toml absent — codex_local agents will need auth before first run"
+fi
 # 2026-06-15 leak fix: the tool secrets (PG_*, LOKI_*, GRAFANA_TOKEN_*, OUTLINE_API_TOKEN,
 # CLOUDFLARE_API_TOKEN, DISCORD_BOT_TOKEN) are NO LONGER injected into the agent env — an
 # `env`/`printenv` dump used to persist them verbatim into run transcripts. The wrapper CLIs

@@ -1,11 +1,11 @@
 schema: "paperclip/v1"
-# Every agent below uses the same claude_local adapter; declare it once here and let
+# Every agent below uses the same codex_local adapter; declare it once here and let
 # each agent override only its model via the `model:` shorthand. Any agent needing a
 # different adapter can still add an explicit `adapter:` block (it overrides these).
 adapterDefaults:
-  type: "claude_local"
+  type: "codex_local"
   config:
-    dangerouslySkipPermissions: true
+    dangerouslyBypassApprovalsAndSandbox: true
 agents:
   # capabilities: ONE crisp sentence — what the agent OWNS / its primary deliverable +
   # a scope boundary. The importer (company-portability.ts) reads THIS key into the
@@ -13,92 +13,98 @@ agents:
   # (e.g. the CEO) so they delegate by primary deliverable instead of pattern-matching prose.
   ceo:
     role: "ceo"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Owns strategy, prioritization, cross-functional routing, and board comms; answers quick @mentions directly but delegates ALL execution to a lead — never does IC work itself.'
   bug-hunter:
     role: "qa"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Engineering pipeline (on-demand) — reproduces a reported defect/regression, finds root cause, and writes the regression test; investigation only, does not ship the fix.'
   devops:
     role: "devops"
-    model: "claude-sonnet-4-6"
+    model: "gpt-5.5"
     capabilities: 'Owns infrastructure operations — deployments, service management, DNS, monitoring, rollback, and incident response across the VPS fleet; runtime ops, not application code.'
   e2e:
     role: "qa"
-    model: "claude-sonnet-4-6"
+    model: "gpt-5.5"
     capabilities: 'Engineering pipeline (on-demand) — owns end-to-end test coverage: flow discovery, Playwright scenario maintenance, suite runs, and pass/fail reporting; no production code.'
   engineering-lead:
     role: "cto"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Owns ALL code, bugs, features, infra, deploys, and devtools AND release/QA artifacts (changelogs, release notes, version bumps); orchestrates the eng pipeline — never external marketing.'
   implementer:
     role: "engineer"
-    model: "claude-sonnet-4-6"
+    model: "gpt-5.5"
     capabilities: 'Engineering pipeline (sequential) — executes an APPROVED plan into code, tests, and config via red-green TDD; implements only, never plans or self-approves; never pushes or merges.'
   quebec-legal:
     role: "legal"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Authority on law and compliance (Law 25/P-39.1, R-22.1, P-10, TGV/MSSS, PIPEDA, SaMD); verbatim-source-first, no fact without a citation; defers pharmacy-billing/standards to pharmacy-lead.'
   pharmacy-lead:
     role: "pharmacy"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Authority on pharmacist scope-of-practice, RAMQ billing, OPQ standards, and clinical/corpus/skill correctness; no fact without a source; defers privacy/civil/SaMD/TGV to quebec-legal.'
   reflect:
     role: "meta"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'The meta-agent — evolves agent instructions, skills, and prompts from observed patterns; proposes changes for human approval, never ships product code or other deliverables.'
   planner:
     role: "pm"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Engineering pipeline (sequential) — produces the structured implementation plan (requirements, tasks, dependencies, acceptance criteria) before the implementer starts; plans only, writes no code.'
   researcher:
     role: "researcher"
-    model: "claude-sonnet-4-6"
+    model: "gpt-5.5"
     capabilities: 'Engineering pipeline (sequential, first) — finds existing solutions, evaluates libraries, and maps what the codebase already provides before any planning or implementation; research only.'
   reviewer:
     role: "qa"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Engineering pipeline (sequential, last) — final verification of finished artifacts (code, docs, plans, configs); picks the review mode and approves or blocks with concrete findings; never authors the work.'
   security-agent:
     role: "security"
-    model: "claude-sonnet-4-6"
+    model: "gpt-5.5"
     capabilities: 'Engineering pipeline (on-demand) — proactive security scanning (secrets, dependency CVEs, SAST, container/config, authz surface); reports findings, never auto-fixes.'
   ai-product-observer:
     role: "observer"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Triage-only observer for Atlas + the agent/eval platform — reads detector-attached evidence for answer/render/clinical-tool quality, fabrication, and ring/cost drift, then files child Issues for the eng pipeline; never edits code or calls host CLIs.'
   clinical-flow-observer:
     role: "observer"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Triage-only observer for the real-time clinical pipelines (Echo analyzer, phone/LiveKit, B2B consult) — reads evidence for silent failures and consent/ZDR drift and decomposes into child Issues; never edits code or calls host CLIs.'
   platform-observer:
     role: "observer"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Triage-only observer for platform reliability + FinOps — reads evidence to confirm alert noise/coverage gaps, poller-cursor drops, and budget breaches, proposing rule diffs as Issues; never edits live rules or calls host CLIs.'
   growth-lead:
     role: "cmo"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Owns EXTERNAL marketing, content, SEO, market intelligence, lead-scouting, and outreach — orchestrates the weekly Growth Brief; explicitly NOT internal release notes, changelogs, or engineering docs (those are engineering-lead).'
   market-intel:
     role: "analyst"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Growth team analyst — produces internal funnel/activation/retention/growth numbers (pg canary) + the Atlas question corpus + an external dated pharmacy-land digest; analysis only, writes no copy and sends no outreach.'
   lead-scout:
     role: "sdr"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Growth team prospecting analyst — crosses OPQ, Twenty, online signals, and PLG signups into a ranked DM list and writes qualified opportunities to Twenty; the human sends every DM, it never sends a message.'
   content:
     role: "marketing"
-    model: "claude-opus-4-8"
+    model: "gpt-5.5"
     capabilities: 'Growth team maker — composes EXTERNAL FR-Québec marketing/positioning copy from market-intel topics, gates SEO fit, routes clinical/legal claims out; NOT code-derived release notes/changelogs; drafts only, human approves every publish.'
   signup-ingest:
     role: "sdr"
-    model: "claude-sonnet-4-6"
+    model: "gpt-5.5"
     capabilities: 'Single-shot Discord-triggered watcher — on a "New Signup" match, enriches/creates the Twenty Person, detects pharmacy ownership, attaches a signup Note, and posts ONE summary back; never narrates, never general work.'
   booking-ingest:
     role: "sdr"
-    model: "claude-sonnet-4-6"
+    model: "gpt-5.5"
     capabilities: 'Single-shot Discord-triggered watcher — on a "New Booking" match, enriches the lead and upserts the MEETING Opportunity in Twenty, attaches a Note, and posts ONE summary back; never narrates, never general work.'
+  code-health:
+    role: "agent"
+    model: "gpt-5.5"
+  dokploy-ops:
+    role: "agent"
+    model: "gpt-5.5"
 company:
   attachmentMaxBytes: 10485760
 routines:

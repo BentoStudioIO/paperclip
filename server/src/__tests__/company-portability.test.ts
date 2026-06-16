@@ -3945,7 +3945,7 @@ describe("company portability", () => {
     expect(alpha?.adapterConfig).toEqual({});
   });
 
-  it("round-trips the slimmed pharmia .paperclip.yaml: every agent resolves to the shared claude_local adapter + its model", async () => {
+  it("round-trips the slimmed pharmia .paperclip.yaml: every agent resolves to the shared codex_local adapter + its model", async () => {
     const portability = companyPortabilityService({} as any);
 
     const yamlPath = path.resolve(moduleDir, "../../../templates/pharmia/.paperclip.yaml");
@@ -3955,28 +3955,30 @@ describe("company portability", () => {
     // value changes intentionally, update it here; an accidental adapter regression in the
     // shorthand/defaults wiring will fail this test instead of shipping silently.
     const expectedModels: Record<string, string> = {
-      ceo: "claude-opus-4-8",
-      "bug-hunter": "claude-opus-4-8",
-      devops: "claude-sonnet-4-6",
-      e2e: "claude-sonnet-4-6",
-      "engineering-lead": "claude-opus-4-8",
-      implementer: "claude-sonnet-4-6",
-      "quebec-legal": "claude-opus-4-8",
-      "pharmacy-lead": "claude-opus-4-8",
-      reflect: "claude-opus-4-8",
-      planner: "claude-opus-4-8",
-      researcher: "claude-sonnet-4-6",
-      reviewer: "claude-opus-4-8",
-      "security-agent": "claude-sonnet-4-6",
-      "ai-product-observer": "claude-opus-4-8",
-      "clinical-flow-observer": "claude-opus-4-8",
-      "platform-observer": "claude-opus-4-8",
-      "growth-lead": "claude-opus-4-8",
-      "market-intel": "claude-opus-4-8",
-      "lead-scout": "claude-opus-4-8",
-      content: "claude-opus-4-8",
-      "signup-ingest": "claude-sonnet-4-6",
-      "booking-ingest": "claude-sonnet-4-6",
+      ceo: "gpt-5.5",
+      "bug-hunter": "gpt-5.5",
+      devops: "gpt-5.5",
+      e2e: "gpt-5.5",
+      "engineering-lead": "gpt-5.5",
+      implementer: "gpt-5.5",
+      "quebec-legal": "gpt-5.5",
+      "pharmacy-lead": "gpt-5.5",
+      reflect: "gpt-5.5",
+      planner: "gpt-5.5",
+      researcher: "gpt-5.5",
+      reviewer: "gpt-5.5",
+      "security-agent": "gpt-5.5",
+      "ai-product-observer": "gpt-5.5",
+      "clinical-flow-observer": "gpt-5.5",
+      "platform-observer": "gpt-5.5",
+      "growth-lead": "gpt-5.5",
+      "market-intel": "gpt-5.5",
+      "lead-scout": "gpt-5.5",
+      content: "gpt-5.5",
+      "signup-ingest": "gpt-5.5",
+      "booking-ingest": "gpt-5.5",
+      "code-health": "gpt-5.5",
+      "dokploy-ops": "gpt-5.5",
     };
 
     const files: Record<string, string> = {
@@ -3998,9 +4000,9 @@ describe("company portability", () => {
     expect(preview.errors).toEqual([]);
     expect(preview.manifest.agents).toHaveLength(Object.keys(expectedModels).length);
     for (const agent of preview.manifest.agents) {
-      expect(agent.adapterType, agent.slug).toBe("claude_local");
+      expect(agent.adapterType, agent.slug).toBe("codex_local");
       expect(agent.adapterConfig, agent.slug).toEqual({
-        dangerouslySkipPermissions: true,
+        dangerouslyBypassApprovalsAndSandbox: true,
         model: expectedModels[agent.slug],
       });
     }
