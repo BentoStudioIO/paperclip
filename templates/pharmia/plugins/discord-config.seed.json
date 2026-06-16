@@ -1,5 +1,5 @@
 {
-  "_comment": "Durability seed for paperclip-plugin-discord (Pharmia company). The live config lives ONLY in DB plugin_config.config_json — a reseed/company-import WIPES it. Restore: POST /api/plugins/88682096-ad88-49e3-adf1-fd7c5f598ec8/config {configJson: <below minus _comment>}, then /enable, then restart the paperclip-server container. The two *Ref fields point at company_secrets rows (bot token + Paperclip board API key) — those secret VALUES must be re-created/escrowed separately (Discord dev portal token + a Paperclip board API key); update the refs if their UUIDs change. Channel/guild IDs are the live #paperclip + 💊┃Pharmia scan set.",
+  "_comment": "Durability seed for paperclip-plugin-discord (Pharmia company). The live config lives in DB plugin_config.config_json; apply this seed with the plugin config API, then enable/restart. Secret refs point at company_secrets rows; recreate the secret values separately if refs change. managedAssignments are reconciled by the plugin on startup and preserve runtime lastTriggeredAt.",
   "enableInbound": true,
   "defaultGuildId": "1354213528097132585",
   "enableCommands": true,
@@ -7,6 +7,7 @@
   "defaultChannelId": "1515177543207096332",
   "paperclipBaseUrl": "https://paperclip.bentostudio.io",
   "frontdeskModel": "gpt-5.5",
+  "enableFrontdesk": true,
   "enableEscalations": true,
   "notifyOnIssueDone": false,
   "approvalsChannelId": "1515177543207096332",
@@ -19,10 +20,56 @@
   "enableCustomCommands": true,
   "notifyOnIssueCreated": false,
   "intelligenceChannelIds": [
-    "1354216906441363477", "1484471292626210846", "1484688053837500488", "1481511735532851364",
-    "1423469520437252157", "1436126989730975765", "1425931232054743130", "1421242477733482648"
+    "1354216906441363477",
+    "1484688053837500488"
   ],
   "notifyOnApprovalCreated": true,
   "paperclipBoardApiKeyRef": "911765f3-b768-4d56-a211-09e4446756f2",
-  "enableProactiveSuggestions": false
+  "enableProactiveSuggestions": false,
+  "enableMentionChat": true,
+  "mentionAgentName": "CEO",
+  "mentionAllowedRoleIds": "1354215056287731962,1354217530368987276,1359431752535244901,1359432219319337170,1354453947716337684,1365874896122675324,1365875323492634675,1371289675746115725,1398710576821043442,1429263554468642827",
+  "llmGatewayBaseUrl": "https://llm.bentostudio.io",
+  "llmGatewayTokenRef": "a341b474-0e87-42f7-9d36-ee84e2a43c43",
+  "enableBookingPoll": true,
+  "gcalClientIdRef": "1eb96e08-840c-466d-b2b9-27c5e5d34447",
+  "gcalClientSecretRef": "6344eda7-8743-47ff-9d48-9e544660775b",
+  "gcalRefreshTokenRef": "f2fb2321-2d7e-4ceb-91ff-58cfd865554d",
+  "gcalCalendarId": "primary",
+  "bookingChannelId": "1423469520437252157",
+  "bookingTeamMemberEmails": "aissa.mcef@gmail.com, borisdmbuko@gmail.com, amine@bentostudio.io",
+  "enableQaChangelog": true,
+  "qaChangelogChannelId": "1436126989730975765",
+  "forgejoApiBase": "https://git.bentostudio.io/api/v1",
+  "forgejoRepo": "Pharmia/PharmaMate",
+  "forgejoBranch": "qa",
+  "forgejoTokenRef": "43ab0065-0499-4cdf-b757-1230245dbbc6",
+  "enableTranslateFrJob": true,
+  "translateFrChannelId": "1485869100952588309",
+  "enableIntelligenceProcessor": true,
+  "intelligenceProcessorChannelId": "1515177543207096332",
+  "intelligenceProcessorBatchSize": 50,
+  "intelligenceProcessorAutoBaseline": false,
+  "managedAssignments": [
+    {
+      "id": "asn_cutover_signup_001",
+      "channelId": "1485869100952588309",
+      "pattern": "New signup",
+      "agentName": "Signup Ingest",
+      "prompt": "A new Pharmia signup notification was just posted in the Atlas live feed (see the triggering message below). Run your full signup-ingest process on it: identify the user in canary (pg canary app, ba_user), enrich (OPQ + LinkedIn/web), detect ownership, create or update the Twenty Person plus a signup Note, then post your concise summary (max 5 lines) back to this same channel (id 1485869100952588309) using the discord-post CLI.",
+      "cooldownSeconds": 120,
+      "enabled": true,
+      "createdBy": "managed-discord-config"
+    },
+    {
+      "id": "asn_booking_001",
+      "channelId": "1423469520437252157",
+      "pattern": "New Booking|Moved/Updated",
+      "agentName": "Booking Ingest",
+      "prompt": "A Pharmia meeting booking was just posted in this channel (the booking embed with booker name, email, start/end and organizer is in the [Triggering message], already serialized). Run your full booking-ingest contract on it: look up / upsert the Twenty Person by the booker email, create or update the idempotent MEETING Opportunity (check Twenty for an existing active Opportunity before creating, no duplicates), attach a booking Note, then post ONE concise summary (max 5 lines) back to this same channel with the discord-post CLI.",
+      "cooldownSeconds": 120,
+      "enabled": true,
+      "createdBy": "managed-discord-config"
+    }
+  ]
 }
