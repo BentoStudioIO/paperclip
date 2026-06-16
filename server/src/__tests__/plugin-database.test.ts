@@ -619,6 +619,56 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
     expect(plugin?.manifestJson.database?.coreReadTables).toEqual(["companies"]);
   });
 
+  it("persists upgraded manifests with new capabilities for lifecycle approval", async () => {
+    const staleManifest = manifest("paperclip.capability-upgrade");
+    const upgradedManifest: PaperclipPluginManifestV1 = {
+      ...staleManifest,
+      version: "1.1.0",
+      capabilities: [...staleManifest.capabilities, "ui.page.register"],
+      entrypoints: {
+        ...staleManifest.entrypoints,
+        ui: "./dist/ui",
+      },
+      ui: {
+        slots: [
+          {
+            id: "capability-upgrade-page",
+            type: "page",
+            displayName: "Capability Upgrade",
+            exportName: "CapabilityUpgradePage",
+          },
+        ],
+      },
+    };
+    const namespace = derivePluginDatabaseNamespace(upgradedManifest.id);
+    const packageRoot = await createInstallablePluginPackage(
+      upgradedManifest,
+      `CREATE TABLE ${namespace}.capability_rows (id uuid PRIMARY KEY);`,
+    );
+    const pluginId = await installPluginRecord(staleManifest);
+    await db
+      .update(plugins)
+      .set({ status: "ready" })
+      .where(eq(plugins.id, pluginId));
+
+    const loader = pluginLoader(db, {
+      enableLocalFilesystem: false,
+      enableNpmDiscovery: false,
+    });
+
+    const result = await loader.upgradePlugin(pluginId, { localPath: packageRoot });
+
+    expect(result.oldManifest.capabilities).not.toContain("ui.page.register");
+    expect(result.newManifest.capabilities).toContain("ui.page.register");
+    const [plugin] = await db
+      .select()
+      .from(plugins)
+      .where(eq(plugins.id, pluginId));
+    expect(plugin?.version).toBe("1.1.0");
+    expect(plugin?.manifestJson.capabilities).toContain("ui.page.register");
+    expect(plugin?.manifestJson.ui?.slots).toHaveLength(1);
+  });
+
   it("rejects checksum changes for already applied migrations", async () => {
     const pluginManifest = manifest();
     const namespace = derivePluginDatabaseNamespace(pluginManifest.id);
