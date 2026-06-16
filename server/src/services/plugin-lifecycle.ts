@@ -134,6 +134,12 @@ type LifecycleEventPayload<K extends LifecycleEventName> = PluginLifecycleEvents
 // PluginLifecycleManager
 // ---------------------------------------------------------------------------
 
+export interface PluginUpgradeOptions {
+  packageName?: string;
+  localPath?: string;
+  version?: string;
+}
+
 export interface PluginLifecycleManager {
   /**
    * Load a newly installed plugin – transitions `installed` → `ready`.
@@ -185,7 +191,7 @@ export interface PluginLifecycleManager {
    * If the upgrade adds new capabilities, transitions to `upgrade_pending`.
    * Otherwise, transitions to `ready` directly.
    */
-  upgrade(pluginId: string, version?: string): Promise<PluginRecord>;
+  upgrade(pluginId: string, options?: PluginUpgradeOptions): Promise<PluginRecord>;
 
   /**
    * Start the worker process for a plugin that is already in `ready` state.
@@ -632,11 +638,11 @@ export function pluginLifecycleManager(
      *    with the updated version and manifest metadata.
      *
      * @param pluginId - The UUID of the plugin to upgrade.
-     * @param version - Optional target version specifier.
+     * @param options - Optional npm package/version or local path override.
      * @returns The updated `PluginRecord`.
      * @throws {BadRequest} If the plugin is not in a ready or upgrade_pending state.
      */
-    async upgrade(pluginId: string, version?: string): Promise<PluginRecord> {
+    async upgrade(pluginId: string, options: PluginUpgradeOptions = {}): Promise<PluginRecord> {
       const plugin = await requirePlugin(pluginId);
 
       // Can only upgrade plugins that are ready or already in upgrade_pending
@@ -648,7 +654,7 @@ export function pluginLifecycleManager(
       }
 
       log.info(
-        { pluginId, pluginKey: plugin.pluginKey, targetVersion: version },
+        { pluginId, pluginKey: plugin.pluginKey, upgradeOptions: options },
         "plugin lifecycle: upgrade requested",
       );
 
@@ -656,7 +662,7 @@ export function pluginLifecycleManager(
 
       // 1. Download and validate new package via loader
       const { oldManifest, newManifest, discovered } =
-        await pluginLoaderInstance.upgradePlugin(pluginId, { version });
+        await pluginLoaderInstance.upgradePlugin(pluginId, options);
 
       log.info(
         {

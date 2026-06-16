@@ -353,7 +353,37 @@ describe.sequential("plugin install and upgrade authz", () => {
       .send({ version: "1.1.0" });
 
     expect(res.status).toBe(200);
-    expect(mockLifecycle.upgrade).toHaveBeenCalledWith(pluginId, "1.1.0");
+    expect(mockLifecycle.upgrade).toHaveBeenCalledWith(pluginId, { version: "1.1.0" });
+  }, 20_000);
+
+  it("allows instance admins to upgrade plugins from a server-local path", async () => {
+    const pluginId = "11111111-1111-4111-8111-111111111111";
+    mockRegistry.getById.mockResolvedValue({
+      id: pluginId,
+      pluginKey: "paperclip.example",
+      version: "1.0.0",
+    });
+    mockLifecycle.upgrade.mockResolvedValue({
+      id: pluginId,
+      version: "1.1.0",
+    });
+
+    const { app } = await createApp({
+      type: "board",
+      userId: "admin-1",
+      source: "session",
+      isInstanceAdmin: true,
+      companyIds: [],
+    });
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/upgrade`)
+      .send({ localPath: "/paperclip/.paperclip/plugins/local/example" });
+
+    expect(res.status).toBe(200);
+    expect(mockLifecycle.upgrade).toHaveBeenCalledWith(pluginId, {
+      localPath: "/paperclip/.paperclip/plugins/local/example",
+    });
   }, 20_000);
 });
 

@@ -50,7 +50,7 @@ import {
   PLUGIN_STATUSES,
 } from "@paperclipai/shared";
 import { pluginRegistryService } from "../services/plugin-registry.js";
-import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
+import { pluginLifecycleManager, type PluginUpgradeOptions } from "../services/plugin-lifecycle.js";
 import { getPluginUiContributionMetadata, pluginLoader } from "../services/plugin-loader.js";
 import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
@@ -113,6 +113,17 @@ interface PluginInstallRequest {
   /** Target version for npm packages (optional, defaults to latest) */
   version?: string;
   /** True if packageName is a local filesystem path */
+  isLocalPath?: boolean;
+}
+
+interface PluginUpgradeRequest {
+  /** Optional npm package override. Defaults to the installed package name. */
+  packageName?: string;
+  /** Server-local plugin package directory. */
+  localPath?: string;
+  /** Target version for npm packages. */
+  version?: string;
+  /** Treat packageName as a server-local plugin path. */
   isLocalPath?: boolean;
 }
 
@@ -2423,7 +2434,10 @@ export function pluginRoutes(
    * new package contents on the host before activation.
    *
    * Request body (optional):
-   * - version: Target version (defaults to latest)
+   * - version: Target npm version (defaults to latest)
+   * - packageName: npm package override; with isLocalPath=true, a server-local path
+   * - localPath: server-local plugin package directory
+   * - isLocalPath: treat packageName as a local path
    *
    * If the upgrade adds new capabilities, the plugin transitions to
    * 'upgrade_pending' state for board approval. Otherwise, it goes
@@ -2435,8 +2449,54 @@ export function pluginRoutes(
   router.post("/plugins/:pluginId/upgrade", async (req, res) => {
     assertInstanceAdmin(req);
     const { pluginId } = req.params;
-    const body = req.body as { version?: string } | undefined;
-    const version = body?.version;
+    const body = (req.body ?? {}) as PluginUpgradeRequest;
+
+    if (body.version !== undefined && typeof body.version !== "string") {
+      res.status(400).json({ error: "version must be a string if provided" });
+      return;
+    }
+
+    if (body.packageName !== undefined && typeof body.packageName !== "string") {
+      res.status(400).json({ error: "packageName must be a string if provided" });
+      return;
+    }
+
+    if (body.localPath !== undefined && typeof body.localPath !== "string") {
+      res.status(400).json({ error: "localPath must be a string if provided" });
+      return;
+    }
+
+    if (body.isLocalPath !== undefined && typeof body.isLocalPath !== "boolean") {
+      res.status(400).json({ error: "isLocalPath must be a boolean if provided" });
+      return;
+    }
+
+    const version = body.version?.trim();
+    const packageName = body.packageName?.trim();
+    const localPath = body.localPath?.trim();
+    const upgradeOptions: PluginUpgradeOptions = {};
+
+    if (body.isLocalPath || localPath) {
+      const resolvedLocalPath = localPath || packageName;
+      if (!resolvedLocalPath) {
+        res.status(400).json({ error: "localPath is required for local plugin upgrades" });
+        return;
+      }
+      if (version) {
+        res.status(400).json({ error: "version is only supported for npm plugin upgrades" });
+        return;
+      }
+      upgradeOptions.localPath = resolvedLocalPath;
+    } else {
+      if (packageName) {
+        if (/[<>:"|?*]/.test(packageName)) {
+          res.status(400).json({ error: "packageName contains invalid characters" });
+          return;
+        }
+        upgradeOptions.packageName = packageName;
+      }
+      if (version) upgradeOptions.version = version;
+    }
 
     const plugin = await resolvePlugin(registry, pluginId);
     if (!plugin) {
@@ -2450,13 +2510,16 @@ export function pluginRoutes(
       // 2. Compare capabilities
       // 3. If new capabilities, mark as upgrade_pending
       // 4. Otherwise, transition to ready
-      const result = await lifecycle.upgrade(plugin.id, version);
+      const result = await lifecycle.upgrade(plugin.id, upgradeOptions);
       await logPluginMutationActivity(req, "plugin.upgraded", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
         previousVersion: plugin.version,
         version: result?.version ?? plugin.version,
-        targetVersion: version ?? null,
+        upgradeSource: upgradeOptions.localPath ? "local_path" : "npm",
+        targetPackageName: upgradeOptions.packageName ?? null,
+        targetLocalPath: upgradeOptions.localPath ?? null,
+        targetVersion: upgradeOptions.version ?? null,
       });
       publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "upgraded" } });
       res.json(result);
