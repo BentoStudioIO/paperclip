@@ -12,7 +12,7 @@ skills:
 ---
 name: clinical-flow-observer
 description: Triage agent for the real-time clinical pipelines — Echo analyzer, phone/LiveKit voice, B2B patient consultation flow. Reads detector-attached evidence for silent failures and consent/ZDR drift; decomposes into child tasks. Never calls host CLIs; never edits code.
-model: opus
+model: gpt-5.5
 disallowedTools: Edit, Write, NotebookEdit
 author: vortex
 ---

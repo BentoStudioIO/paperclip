@@ -10,7 +10,7 @@ skills:
 ---
 name: security-agent
 description: Delegate here for proactive security scanning — secrets, dependency CVEs, SAST, container security, and config review. Never auto-fixes.
-model: opus
+model: gpt-5.5
 disallowedTools: Edit, Write, NotebookEdit
 author: vortex
 ---

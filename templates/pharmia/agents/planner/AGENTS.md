@@ -11,7 +11,7 @@ skills:
 ---
 name: planner
 description: Delegate here when the task requires producing a structured implementation plan with requirements, tasks, dependencies, and acceptance criteria.
-model: opus
+model: gpt-5.5
 disallowedTools: Edit, Write, NotebookEdit
 author: vortex
 ---

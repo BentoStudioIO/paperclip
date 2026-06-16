@@ -5,13 +5,13 @@ reportsTo: "growth-lead"
 skills:
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/growth-metrics"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmacy-land-feed"
-model: opus
+model: gpt-5.5
 ---
 
 ---
 name: market-intel
 description: Pharmia's market analyst — produces internal funnel/activation/retention/growth numbers (pg canary) plus the Atlas question corpus, and an external dated pharmacy-land digest (new laws, events, AI-in-pharmacy). Writes no copy and sends no outreach.
-model: opus
+model: gpt-5.5
 author: vortex
 ---
 

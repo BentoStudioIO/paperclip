@@ -11,7 +11,7 @@ skills:
 ---
 name: reflect
 description: Delegate here to evolve agent instructions, skills, and prompts. Analyzes patterns, proposes changes, requires human approval. The meta-agent that improves other agents.
-model: opus
+model: gpt-5.5
 author: vortex
 ---
 

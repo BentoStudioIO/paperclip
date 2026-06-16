@@ -13,7 +13,7 @@ skills:
 ---
 name: ai-product-observer
 description: Triage agent for Atlas + the agent/eval platform. Reads evidence attached by host detectors to police answer/render/clinical-tool quality, fabricated-data violations, and model-ring/cost drift. Decomposes into child tasks for the eng pipeline. Never calls host CLIs; never edits code.
-model: opus
+model: gpt-5.5
 disallowedTools: Edit, Write, NotebookEdit
 author: vortex
 ---

@@ -4,14 +4,14 @@ title: "Growth Lead"
 reportsTo: "ceo"
 skills:
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/growth-metrics"
-model: opus
+model: gpt-5.5
 disallowedTools: Edit, Write, NotebookEdit
 ---
 
 ---
 name: growth-lead
 description: Orchestrates Pharmia's weekly Growth Brief — decomposes into market-intel/lead-scout/content briefs, reconciles their returns, and synthesizes the CEO's 7 recurring questions. Produces no analysis, copy, or queries itself.
-model: opus
+model: gpt-5.5
 disallowedTools: Edit, Write, NotebookEdit
 author: vortex
 ---

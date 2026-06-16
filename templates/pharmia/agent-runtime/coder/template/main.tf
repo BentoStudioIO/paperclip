@@ -237,8 +237,8 @@ variable "opencode_zen_api_key" {
 # AGENT_TEAMS is the split-window teammates feature; tmux+screen are baked in the image
 # (>=1.2.1) so split-pane display works. The remaining vars are pure ergonomics/telemetry.
 #
-# ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL overrides were REMOVED (2026-06-11): they
-# pinned every tier to opus-4-8[1m], which only made sense on a metered API key. On the
+# Anthropic model-tier overrides were REMOVED (2026-06-11): they
+# pinned every tier to a large Claude model, which only made sense on a metered API key. On the
 # shared *subscription* credential that would burn the Claude Max rate windows for the
 # whole team — so the model choice is left to Claude Code's defaults / each dev's own pick.
 locals {

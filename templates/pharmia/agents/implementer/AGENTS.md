@@ -11,7 +11,7 @@ skills:
 ---
 name: implementer
 description: Delegate here when there is an approved plan ready for execution — writing code, tests, and configuration changes.
-model: opus
+model: gpt-5.5
 author: vortex
 ---
 

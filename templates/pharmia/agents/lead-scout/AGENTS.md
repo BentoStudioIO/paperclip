@@ -4,13 +4,13 @@ title: "Lead Scout"
 reportsTo: "growth-lead"
 skills:
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/lead-scouting"
-model: opus
+model: gpt-5.5
 ---
 
 ---
 name: lead-scout
 description: Pharmia's outbound prospecting analyst — crosses OPQ repertoire, Twenty CRM, online-activity signals, and PLG signups into a ranked DM list and writes qualified opportunities to Twenty. The human sends every DM; it never sends a message.
-model: opus
+model: gpt-5.5
 author: vortex
 ---
 

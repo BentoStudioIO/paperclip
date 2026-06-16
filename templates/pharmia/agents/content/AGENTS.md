@@ -4,13 +4,13 @@ title: "Content & Messaging Maker"
 reportsTo: "growth-lead"
 skills:
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-content"
-model: opus
+model: gpt-5.5
 ---
 
 ---
 name: content
 description: Pharmia's FR-Québec content maker — composes marketing/positioning artifacts from market-intel topics using the lifted MIT frameworks as structure, gates SEO fit, self-grades, and routes clinical/legal claims to quebec-legal. Drafts by default; the human approves every publish.
-model: opus
+model: gpt-5.5
 author: vortex
 ---
 

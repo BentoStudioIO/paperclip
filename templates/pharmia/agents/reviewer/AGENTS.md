@@ -11,7 +11,7 @@ skills:
 ---
 name: reviewer
 description: Delegate here for final verification of finished artifacts — code, docs, plans, prompts, and configs. Select the right review mode, gather evidence, and approve or block with concrete findings.
-model: opus
+model: gpt-5.5
 disallowedTools: Edit, Write, NotebookEdit
 author: vortex
 ---

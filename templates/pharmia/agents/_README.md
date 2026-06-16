@@ -37,7 +37,7 @@ skills:                      # full skill keys this agent has access to
 ---
 name: <slug>                 # lowercase, kebab-case, matches dir name
 description: <one-line dispatch hint — when to delegate here>
-model: opus | sonnet
+model: gpt-5.5
 disallowedTools: Edit, Write, NotebookEdit  # optional, omit if the agent edits files
 author: <name>
 ---

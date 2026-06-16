@@ -10,7 +10,7 @@ skills:
 ---
 name: code-health
 description: Delegate here for periodic codebase health scans — tech debt, test coverage trends, design coupling, dashboard config drift, i18n coverage gaps, extensibility audits, blast radius analysis, and code elimination.
-model: opus
+model: gpt-5.5
 author: vortex
 ---
 

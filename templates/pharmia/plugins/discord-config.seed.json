@@ -6,6 +6,7 @@
   "errorsChannelId": "1515177543207096332",
   "defaultChannelId": "1515177543207096332",
   "paperclipBaseUrl": "https://paperclip.bentostudio.io",
+  "frontdeskModel": "gpt-5.5",
   "enableEscalations": true,
   "notifyOnIssueDone": false,
   "approvalsChannelId": "1515177543207096332",

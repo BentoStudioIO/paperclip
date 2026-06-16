@@ -114,8 +114,7 @@ coder create my-ws --template bento-workspace \
 - **Claude Code env parity (since 1.2.1):** the template injects the CTO's workstation
   `~/.claude/settings.json` env block into every workspace (`coder_env` for_each):
   `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` (split-window teammates — tmux + screen are baked
-  in the image for the pane display), model overrides (haiku→sonnet-4-6, sonnet/opus→
-  opus-4-8 1M-context — raises spend on the shared key), autocompact 80%, telemetry off,
+  in the image for the pane display), autocompact 80%, telemetry off,
   no-flicker, adaptive-thinking off. Update path: edit `locals.claude_code_env` in main.tf.
 - **Resource caps** are sized for the 4c/8GB box (cpu ≤4, memory ≤5 GB).
 

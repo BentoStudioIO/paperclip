@@ -13,7 +13,7 @@ export const DEFAULT_CONFIG = {
   discordChannelId: "1515177543207096332",
   imapHost: "stalwart.bentostudio.io",
   imapPort: 993,
-  model: "claude-sonnet-4-6",
+  model: "gpt-5.5",
   batchCapPerRun: 5,
   gatewayBaseUrl: "https://llm.bentostudio.io",
 } as const;

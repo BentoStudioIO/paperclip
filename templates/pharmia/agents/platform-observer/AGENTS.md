@@ -11,7 +11,7 @@ skills:
 ---
 name: platform-observer
 description: Triage agent for platform reliability + FinOps. Reads detector-attached evidence to confirm alert noise/coverage gaps, poller-cursor drops, clinical-tool endpoint failures, and budget breaches; proposes rule diffs as Issues. Never edits live rules; never calls host CLIs.
-model: opus
+model: gpt-5.5
 disallowedTools: Edit, Write, NotebookEdit
 author: vortex
 ---
