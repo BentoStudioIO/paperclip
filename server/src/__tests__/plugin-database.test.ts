@@ -665,6 +665,7 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
       .from(plugins)
       .where(eq(plugins.id, pluginId));
     expect(plugin?.version).toBe("1.1.0");
+    expect(plugin?.packagePath).toBe(packageRoot);
     expect(plugin?.manifestJson.capabilities).toContain("ui.page.register");
     expect(plugin?.manifestJson.ui?.slots).toHaveLength(1);
   });
