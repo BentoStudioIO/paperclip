@@ -50,7 +50,10 @@ const routineSvc = {
   list: vi.fn(),
   getDetail: vi.fn(),
   create: vi.fn(),
+  update: vi.fn(),
   createTrigger: vi.fn(),
+  updateTrigger: vi.fn(),
+  deleteTrigger: vi.fn(),
 };
 
 const companySkillSvc = {
@@ -274,6 +277,28 @@ describe("company portability", () => {
       createdAt: new Date(),
       updatedAt: new Date(),
     }));
+    routineSvc.update.mockImplementation(async (id: string, input: Record<string, unknown>) => ({
+      id,
+      companyId: "company-1",
+      projectId: input.projectId,
+      goalId: input.goalId ?? null,
+      parentIssueId: input.parentIssueId ?? null,
+      title: input.title,
+      description: input.description ?? null,
+      assigneeAgentId: input.assigneeAgentId,
+      priority: input.priority ?? "medium",
+      status: input.status ?? "active",
+      concurrencyPolicy: input.concurrencyPolicy ?? "coalesce_if_active",
+      catchUpPolicy: input.catchUpPolicy ?? "skip_missed",
+      createdByAgentId: null,
+      createdByUserId: null,
+      updatedByAgentId: null,
+      updatedByUserId: null,
+      lastTriggeredAt: null,
+      lastEnqueuedAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }));
     routineSvc.createTrigger.mockImplementation(async (_routineId: string, input: Record<string, unknown>) => ({
       id: "trigger-created",
       companyId: "company-1",
@@ -298,6 +323,34 @@ describe("company portability", () => {
       createdAt: new Date(),
       updatedAt: new Date(),
     }));
+    routineSvc.updateTrigger.mockImplementation(async (id: string, input: Record<string, unknown>) => ({
+      trigger: {
+        id,
+        companyId: "company-1",
+        routineId: "routine-existing",
+        kind: "schedule",
+        label: input.label ?? null,
+        enabled: input.enabled ?? true,
+        cronExpression: input.cronExpression ?? null,
+        timezone: input.timezone ?? null,
+        nextRunAt: null,
+        lastFiredAt: null,
+        publicId: null,
+        secretId: null,
+        signingMode: input.signingMode ?? null,
+        replayWindowSec: input.replayWindowSec ?? null,
+        lastRotatedAt: null,
+        lastResult: null,
+        createdByAgentId: null,
+        createdByUserId: null,
+        updatedByAgentId: null,
+        updatedByUserId: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      revision: {},
+    }));
+    routineSvc.deleteTrigger.mockResolvedValue({ deleted: true, revision: {} });
     const companySkills = [
       {
         id: "skill-1",
@@ -2086,6 +2139,191 @@ describe("company portability", () => {
     expect(issueSvc.create).not.toHaveBeenCalled();
   });
 
+  it("imports projectless recurring task packages as company-level routines", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    companySvc.create.mockResolvedValue({
+      id: "company-imported",
+      name: "Imported Paperclip",
+    });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.create.mockResolvedValue({
+      id: "agent-created",
+      name: "ClaudeCoder",
+    });
+    agentSvc.list.mockResolvedValue([]);
+
+    const files = {
+      "COMPANY.md": [
+        "---",
+        'schema: "agentcompanies/v1"',
+        'name: "Imported Paperclip"',
+        "---",
+        "",
+      ].join("\n"),
+      "agents/claudecoder/AGENTS.md": [
+        "---",
+        'name: "ClaudeCoder"',
+        "---",
+        "",
+        "You write code.",
+        "",
+      ].join("\n"),
+      "tasks/daily-check/TASK.md": [
+        "---",
+        'name: "Daily Check"',
+        'assignee: "claudecoder"',
+        "recurring: true",
+        "---",
+        "",
+        "Check company-level health.",
+        "",
+      ].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "routines:",
+        "  daily-check:",
+        '    status: "paused"',
+        "    triggers:",
+        "      - kind: schedule",
+        '        cronExpression: "0 9 * * *"',
+        '        timezone: "UTC"',
+        "        enabled: false",
+        "",
+      ].join("\n"),
+    };
+
+    const preview = await portability.previewImport({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: true, projects: false, issues: true, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Paperclip" },
+      agents: "all",
+      collisionStrategy: "rename",
+    });
+
+    expect(preview.errors).toEqual([]);
+
+    await portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: true, projects: false, issues: true, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Paperclip" },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1");
+
+    expect(routineSvc.create).toHaveBeenCalledWith("company-imported", expect.objectContaining({
+      projectId: null,
+      title: "Daily Check",
+      assigneeAgentId: "agent-created",
+      status: "paused",
+    }), expect.any(Object));
+    expect(routineSvc.createTrigger).toHaveBeenCalledWith("routine-created", expect.objectContaining({
+      kind: "schedule",
+      enabled: false,
+      cronExpression: "0 9 * * *",
+    }), expect.any(Object));
+  });
+
+  it("replaces existing recurring task routines and reconciles triggers", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    routineSvc.list.mockResolvedValue([
+      {
+        id: "routine-existing",
+        companyId: "company-1",
+        title: "Daily Check",
+        status: "paused",
+        triggers: [],
+      },
+    ]);
+    routineSvc.getDetail.mockResolvedValue({
+      id: "routine-existing",
+      companyId: "company-1",
+      title: "Daily Check",
+      status: "paused",
+      triggers: [
+        {
+          id: "trigger-existing",
+          kind: "schedule",
+          label: "Old schedule",
+          enabled: false,
+          cronExpression: "0 8 * * *",
+          timezone: "UTC",
+        },
+      ],
+    });
+
+    const files = {
+      "COMPANY.md": [
+        "---",
+        'schema: "agentcompanies/v1"',
+        'name: "Imported Paperclip"',
+        "---",
+        "",
+      ].join("\n"),
+      "tasks/daily-check/TASK.md": [
+        "---",
+        'name: "Daily Check"',
+        'assignee: "claudecoder"',
+        "recurring: true",
+        "---",
+        "",
+        "Check company-level health.",
+        "",
+      ].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "routines:",
+        "  daily-check:",
+        '    status: "active"',
+        "    triggers:",
+        "      - kind: schedule",
+        '        label: "Daily check"',
+        '        cronExpression: "30 9 * * *"',
+        '        timezone: "UTC"',
+        "        enabled: true",
+        "",
+      ].join("\n"),
+    };
+
+    const preview = await portability.previewImport({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: false, agents: false, projects: false, issues: true, skills: false },
+      target: { mode: "existing_company", companyId: "company-1" },
+      agents: "all",
+      collisionStrategy: "replace",
+    }, { mode: "board_full" });
+
+    expect(preview.plan.issuePlans).toEqual([
+      expect.objectContaining({
+        slug: "daily-check",
+        action: "update",
+        existingRoutineId: "routine-existing",
+      }),
+    ]);
+
+    await portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: false, agents: false, projects: false, issues: true, skills: false },
+      target: { mode: "existing_company", companyId: "company-1" },
+      agents: "all",
+      collisionStrategy: "replace",
+    }, "user-1", { mode: "board_full" });
+
+    expect(routineSvc.create).not.toHaveBeenCalled();
+    expect(routineSvc.update).toHaveBeenCalledWith("routine-existing", expect.objectContaining({
+      projectId: null,
+      title: "Daily Check",
+      status: "active",
+    }), expect.any(Object));
+    expect(routineSvc.updateTrigger).toHaveBeenCalledWith("trigger-existing", expect.objectContaining({
+      label: "Daily check",
+      enabled: true,
+      cronExpression: "30 9 * * *",
+      timezone: "UTC",
+    }), expect.any(Object));
+  });
+
   it("migrates legacy schedule.recurrence imports into routine triggers", async () => {
     const portability = companyPortabilityService({} as any);
 
@@ -2185,7 +2423,6 @@ describe("company portability", () => {
       collisionStrategy: "rename",
     });
 
-    expect(preview.errors).toContain("Recurring task monday-review must declare a project to import as a routine.");
     expect(preview.errors).toContain("Recurring task monday-review must declare an assignee to import as a routine.");
   });
 

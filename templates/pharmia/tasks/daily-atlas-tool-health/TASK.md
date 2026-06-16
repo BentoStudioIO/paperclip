@@ -1,5 +1,6 @@
 ---
 name: "Daily Atlas tool-health"
+project: "pharmamate"
 assignee: "ai-product-observer"
 recurring: true
 description: >

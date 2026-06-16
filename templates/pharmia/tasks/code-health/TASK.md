@@ -1,6 +1,7 @@
 ---
-name: "Code-health weekly"
-assignee: "implementer"
+name: "Code Health"
+project: "pharmamate"
+assignee: "code-health"
 recurring: true
 description: >
   Weekly diff-scoped code-health — coverage drops / new-code-at-0%, i18n gaps on

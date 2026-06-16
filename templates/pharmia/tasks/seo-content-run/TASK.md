@@ -1,5 +1,6 @@
 ---
 name: "SEO Content Run"
+project: "pharmamate"
 assignee: "content"
 recurring: true
 description: >

@@ -266,8 +266,9 @@ export interface CompanyPortabilityPreviewProjectPlan {
 
 export interface CompanyPortabilityPreviewIssuePlan {
   slug: string;
-  action: "create" | "skip";
+  action: "create" | "update" | "skip";
   plannedTitle: string;
+  existingRoutineId?: string | null;
   reason: string | null;
 }
 

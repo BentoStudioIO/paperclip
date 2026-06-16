@@ -1,5 +1,6 @@
 ---
 name: "Daily alert-health"
+project: "pharmamate"
 assignee: "platform-observer"
 recurring: true
 description: >

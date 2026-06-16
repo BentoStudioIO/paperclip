@@ -1,5 +1,6 @@
 ---
 name: "QA Changelog"
+project: "pharmamate"
 assignee: "content"
 recurring: true
 description: >

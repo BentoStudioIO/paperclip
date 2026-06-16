@@ -1,5 +1,6 @@
 ---
 name: "Weekly Growth Brief"
+project: "pharmamate"
 assignee: "growth-lead"
 recurring: true
 description: >

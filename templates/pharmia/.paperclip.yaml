@@ -108,26 +108,30 @@ agents:
 company:
   attachmentMaxBytes: 10485760
 routines:
-  # NOTE: All observer routines below are defined as org-as-code but DISABLED
-  # (every trigger enabled: false, routine status: paused). The CTO is preparing
-  # the grounds; the VPS host-detector infra is not wired yet, so none should fire.
+  # NOTE: Routines are org-as-code and imported via company import --include tasks.
+  # Keep dormant routines watchable but disabled (status: paused, triggers enabled:
+  # false). Only daily Atlas + daily alert health are active by default.
   # Assignee agent + description are captured as comments because the manifest
   # routine schema only reads triggers / variables / concurrencyPolicy /
   # catchUpPolicy / status. Assignee + description bind at the TASK.md level.
   code-health:
+    status: "paused"
     triggers:
       -
         kind: "schedule"
         cronExpression: "0 9 * * 1"
         label: "Weekly Monday morning"
         timezone: "UTC"
+        enabled: false
   weekly-growth-brief:
+    status: "paused"
     triggers:
       -
         kind: "schedule"
         cronExpression: "0 13 * * 1"
         label: "Weekly Monday afternoon"
         timezone: "UTC"
+        enabled: false
 
   # ── Dependency & service release watch (WEBHOOK) ──────────────────────────
   # assignee: code-health
@@ -188,27 +192,27 @@ routines:
   #          + capability-gap detection (over-search / webSearch-fallback / missing-info -> upgrade suggestions)
   # prompt SSOT: templates/pharmia/tasks/daily-atlas-tool-health/TASK.md
   daily-atlas-tool-health:
-    status: "paused"
+    status: "active"
     triggers:
       -
         kind: "schedule"
         cronExpression: "0 10 * * *"
         label: "Daily Atlas health"
         timezone: "UTC"
-        enabled: false
+        enabled: true
   # Tier-A host-detector
   # assignee: platform-observer
   # purpose: Grafana fired-vs-expected + poller-cursor drops
   # prompt SSOT: templates/pharmia/tasks/daily-alert-health/TASK.md
   daily-alert-health:
-    status: "paused"
+    status: "active"
     triggers:
       -
         kind: "schedule"
         cronExpression: "30 9 * * *"
         label: "Daily alert health"
         timezone: "UTC"
-        enabled: false
+        enabled: true
   # Tier-A host-detector
   # assignee: clinical-flow-observer
   # purpose: Consult forms never isComplete, confirm dead-ends

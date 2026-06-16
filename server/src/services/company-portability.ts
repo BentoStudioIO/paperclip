@@ -210,6 +210,103 @@ function normalizeSkillKey(value: string | null | undefined) {
   return segments.length > 0 ? segments.join("/") : null;
 }
 
+function routineSlugFromTitle(value: string | null | undefined) {
+  return normalizeAgentUrlKey(value ?? "") ?? null;
+}
+
+function indexRoutinesBySlug(
+  routinesList: Array<{ id: string; title: string }>,
+) {
+  const map = new Map<string, { id: string; title: string }>();
+  for (const routine of routinesList) {
+    const slug = routineSlugFromTitle(routine.title);
+    if (slug && !map.has(slug)) map.set(slug, routine);
+  }
+  return map;
+}
+
+function routineTriggerCreateInput(trigger: CompanyPortabilityIssueRoutineTriggerManifestEntry) {
+  if (trigger.kind === "schedule") {
+    return {
+      kind: "schedule" as const,
+      label: trigger.label,
+      enabled: trigger.enabled,
+      cronExpression: trigger.cronExpression!,
+      timezone: trigger.timezone!,
+    };
+  }
+  if (trigger.kind === "webhook") {
+    return {
+      kind: "webhook" as const,
+      label: trigger.label,
+      enabled: trigger.enabled,
+      signingMode:
+        trigger.signingMode && ROUTINE_TRIGGER_SIGNING_MODES.includes(trigger.signingMode as any)
+          ? trigger.signingMode as typeof ROUTINE_TRIGGER_SIGNING_MODES[number]
+          : "bearer",
+      replayWindowSec: trigger.replayWindowSec ?? 300,
+    };
+  }
+  return {
+    kind: "api" as const,
+    label: trigger.label,
+    enabled: trigger.enabled,
+  };
+}
+
+function routineTriggerUpdateInput(trigger: CompanyPortabilityIssueRoutineTriggerManifestEntry) {
+  if (trigger.kind === "schedule") {
+    return {
+      label: trigger.label,
+      enabled: trigger.enabled,
+      cronExpression: trigger.cronExpression!,
+      timezone: trigger.timezone!,
+    };
+  }
+  if (trigger.kind === "webhook") {
+    return {
+      label: trigger.label,
+      enabled: trigger.enabled,
+      signingMode:
+        trigger.signingMode && ROUTINE_TRIGGER_SIGNING_MODES.includes(trigger.signingMode as any)
+          ? trigger.signingMode as typeof ROUTINE_TRIGGER_SIGNING_MODES[number]
+          : "bearer",
+      replayWindowSec: trigger.replayWindowSec ?? 300,
+    };
+  }
+  return {
+    label: trigger.label,
+    enabled: trigger.enabled,
+  };
+}
+
+async function reconcileImportedRoutineTriggers(
+  routinesSvc: ReturnType<typeof routineService>,
+  routineId: string,
+  existingTriggers: Array<{ id: string; kind: string; label: string | null }>,
+  desiredTriggers: CompanyPortabilityIssueRoutineTriggerManifestEntry[],
+  actor: { agentId?: string | null; userId?: string | null },
+) {
+  const unused = [...existingTriggers];
+  for (const trigger of desiredTriggers) {
+    const exactIndex = unused.findIndex(
+      (existing) => existing.kind === trigger.kind && (existing.label ?? null) === (trigger.label ?? null),
+    );
+    const fallbackIndex = exactIndex >= 0
+      ? exactIndex
+      : unused.findIndex((existing) => existing.kind === trigger.kind);
+    if (fallbackIndex >= 0) {
+      const [existing] = unused.splice(fallbackIndex, 1);
+      await routinesSvc.updateTrigger(existing!.id, routineTriggerUpdateInput(trigger), actor);
+      continue;
+    }
+    await routinesSvc.createTrigger(routineId, routineTriggerCreateInput(trigger), actor);
+  }
+  for (const extra of unused) {
+    await routinesSvc.deleteTrigger(extra.id, actor);
+  }
+}
+
 function readSkillKey(frontmatter: Record<string, unknown>) {
   const metadata = isPlainRecord(frontmatter.metadata) ? frontmatter.metadata : null;
   const paperclip = isPlainRecord(metadata?.paperclip) ? metadata?.paperclip as Record<string, unknown> : null;
@@ -4027,9 +4124,6 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           }
         }
         if (issue.recurring) {
-          if (!issue.projectSlug) {
-            errors.push(`Recurring task ${issue.slug} must declare a project to import as a routine.`);
-          }
           if (!issue.assigneeAgentSlug) {
             errors.push(`Recurring task ${issue.slug} must declare an assignee to import as a routine.`);
           }
@@ -4086,6 +4180,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     const issuePlans: CompanyPortabilityPreviewResult["plan"]["issuePlans"] = [];
     const existingProjectSlugToProject = new Map<string, { id: string; name: string }>();
     const existingProjectSlugs = new Set<string>();
+    let existingRoutineSlugToRoutine = new Map<string, { id: string; title: string }>();
 
     if (input.target.mode === "existing_company") {
       const existingAgents = await agents.list(input.target.companyId);
@@ -4101,6 +4196,9 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           existingProjectSlugToProject.set(existing.urlKey, { id: existing.id, name: existing.name });
         }
         existingProjectSlugs.add(existing.urlKey);
+      }
+      if (include.issues) {
+        existingRoutineSlugToRoutine = indexRoutinesBySlug(await routineService(db).list(input.target.companyId));
       }
 
       const existingSkills = await companySkills.listFull(input.target.companyId);
@@ -4263,10 +4361,34 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
 
     if (include.issues) {
       for (const manifestIssue of manifest.issues) {
+        const existingRoutine = manifestIssue.recurring
+          ? existingRoutineSlugToRoutine.get(manifestIssue.slug) ?? null
+          : null;
+        if (existingRoutine && mode === "board_full" && collisionStrategy === "replace") {
+          issuePlans.push({
+            slug: manifestIssue.slug,
+            action: "update",
+            plannedTitle: existingRoutine.title,
+            existingRoutineId: existingRoutine.id,
+            reason: "Existing routine slug matched; replace strategy.",
+          });
+          continue;
+        }
+        if (existingRoutine && collisionStrategy === "skip") {
+          issuePlans.push({
+            slug: manifestIssue.slug,
+            action: "skip",
+            plannedTitle: existingRoutine.title,
+            existingRoutineId: existingRoutine.id,
+            reason: "Existing routine slug matched; skip strategy.",
+          });
+          continue;
+        }
         issuePlans.push({
           slug: manifestIssue.slug,
           action: "create",
           plannedTitle: manifestIssue.title,
+          existingRoutineId: existingRoutine?.id ?? null,
           reason: manifestIssue.recurring ? "Recurring task will be imported as a routine." : null,
         });
       }
@@ -4852,6 +4974,9 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
 
       if (include.issues) {
         const routines = routineService(db);
+        const existingRoutineSlugToRoutine = input.target.mode === "existing_company"
+          ? indexRoutinesBySlug(await routines.list(targetCompany.id))
+          : new Map<string, { id: string; title: string }>();
         for (const manifestIssue of sourceManifest.issues) {
           const markdownRaw = readPortableTextFile(plan.source.files, manifestIssue.path);
           const parsed = markdownRaw ? parseFrontmatterMarkdown(markdownRaw) : null;
@@ -4876,9 +5001,6 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             warnings.push(`Task ${manifestIssue.slug} references workspace key ${manifestIssue.projectWorkspaceKey}, but that workspace was not imported.`);
           }
           if (manifestIssue.recurring) {
-            if (!projectId) {
-              throw unprocessable(`Recurring task ${manifestIssue.slug} is missing the project required to create a routine.`);
-            }
             const resolvedRoutine = resolvePortableRoutineDefinition(manifestIssue, parsed?.frontmatter.schedule);
             if (resolvedRoutine.errors.length > 0) {
               throw unprocessable(`Recurring task ${manifestIssue.slug} could not be imported as a routine: ${resolvedRoutine.errors.join("; ")}`);
@@ -4890,7 +5012,12 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
               variables: null,
               triggers: [],
             };
-            const createdRoutine = await routines.create(targetCompany.id, {
+            const actor = {
+              agentId: null,
+              userId: actorUserId ?? null,
+            };
+            const existingRoutine = existingRoutineSlugToRoutine.get(manifestIssue.slug) ?? null;
+            const routineInput = {
               projectId,
               goalId: null,
               parentIssueId: null,
@@ -4912,48 +5039,25 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
                   ? routineDefinition.catchUpPolicy as typeof ROUTINE_CATCH_UP_POLICIES[number]
                   : "skip_missed",
               variables: routineDefinition.variables ?? [],
-            }, {
-              agentId: null,
-              userId: actorUserId ?? null,
-            });
+            };
+            if (existingRoutine && plan.collisionStrategy === "skip") {
+              continue;
+            }
+            if (existingRoutine && mode === "board_full" && plan.collisionStrategy === "replace") {
+              await routines.update(existingRoutine.id, routineInput, actor);
+              const detail = await routines.getDetail(existingRoutine.id);
+              await reconcileImportedRoutineTriggers(
+                routines,
+                existingRoutine.id,
+                detail?.triggers ?? [],
+                routineDefinition.triggers,
+                actor,
+              );
+              continue;
+            }
+            const createdRoutine = await routines.create(targetCompany.id, routineInput, actor);
             for (const trigger of routineDefinition.triggers) {
-              if (trigger.kind === "schedule") {
-                await routines.createTrigger(createdRoutine.id, {
-                  kind: "schedule",
-                  label: trigger.label,
-                  enabled: trigger.enabled,
-                  cronExpression: trigger.cronExpression!,
-                  timezone: trigger.timezone!,
-                }, {
-                  agentId: null,
-                  userId: actorUserId ?? null,
-                });
-                continue;
-              }
-              if (trigger.kind === "webhook") {
-                await routines.createTrigger(createdRoutine.id, {
-                  kind: "webhook",
-                  label: trigger.label,
-                  enabled: trigger.enabled,
-                  signingMode:
-                    trigger.signingMode && ROUTINE_TRIGGER_SIGNING_MODES.includes(trigger.signingMode as any)
-                      ? trigger.signingMode as typeof ROUTINE_TRIGGER_SIGNING_MODES[number]
-                      : "bearer",
-                  replayWindowSec: trigger.replayWindowSec ?? 300,
-                }, {
-                  agentId: null,
-                  userId: actorUserId ?? null,
-                });
-                continue;
-              }
-              await routines.createTrigger(createdRoutine.id, {
-                kind: "api",
-                label: trigger.label,
-                enabled: trigger.enabled,
-              }, {
-                agentId: null,
-                userId: actorUserId ?? null,
-              });
+              await routines.createTrigger(createdRoutine.id, routineTriggerCreateInput(trigger), actor);
             }
             continue;
           }

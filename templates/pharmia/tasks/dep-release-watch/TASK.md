@@ -1,5 +1,6 @@
 ---
 name: "Dependency & Service Release Watch"
+project: "pharmamate"
 assignee: "code-health"
 recurring: true
 description: >
