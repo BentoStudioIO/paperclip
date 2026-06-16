@@ -1,15 +1,18 @@
 ---
 name: "Daily alert-health"
 project: "pharmamate"
-assignee: "platform-observer"
+assignee: "devops"
 recurring: true
 description: >
-  Grafana/Prometheus fired-vs-expected, silent-failure signals (poller-cursor /
-  NoData), and structural coverage gaps — grouped root-cause + concrete action
-  items routed through the alert-rule-change-validator skill.
+  Host detector for Grafana/Prometheus fired-vs-expected, silent-failure signals
+  (poller-cursor / NoData), and structural coverage gaps. Collect evidence,
+  write the health report, and route confirmed follow-ups without blocking the
+  recurring detector issue.
 ---
 
-Run the DAILY ALERT HEALTH CHECK now, autonomously. Use the alert-rule-change-validator skill and the pharmia-grafana-alerting knowledge.
+Run the DAILY ALERT HEALTH CHECK now, autonomously. You are the host detector:
+collect the CLI-backed evidence first, then write the health report. Use the
+alert-rule-change-validator skill and the pharmia-grafana-alerting knowledge.
 
 ## Steps (last 24h on canary)
 
@@ -20,6 +23,11 @@ Run the DAILY ALERT HEALTH CHECK now, autonomously. Use the alert-rule-change-va
 ## For every finding
 
 Name the exact rule/metric/series/path and the ROOT CAUSE — one of: OTel rename · threshold misfit · missing/renamed series · provisioning drift (Grafana API edits silently revert the file SSOT `tooling/grafana/provisioning/alerting/rules.yaml`) · coverage gap (signal/alert that should exist but doesn't) · genuine incident. GROUP findings sharing one cause; one concrete action item per group, routed through the validator skill. Validate cheaply before asserting (confirm the series exists; query the source-of-truth, e.g. the DB row, not the absence of a log).
+
+If a finding needs observer/product judgment after evidence collection, create a
+child issue for Platform Observer with the report and raw evidence pointers. Do
+not block this recurring detector issue on that follow-up; mark this issue done
+after the report is posted and any follow-up issues are created.
 
 ## Remediation policy
 

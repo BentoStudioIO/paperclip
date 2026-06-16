@@ -186,7 +186,7 @@ routines:
 
   # ── Tier-A host detectors (SCHEDULE) ──────────────────────────────────────
   # Tier-A host-detector
-  # assignee: ai-product-observer
+  # assignee: devops
   # purpose: Atlas thread/tool-health — unrendered tags, fabricated data, tool failures;
   #          + external clinical tools return expected shape (merged from daily-clinical-tool-health)
   #          + capability-gap detection (over-search / webSearch-fallback / missing-info -> upgrade suggestions)
@@ -201,7 +201,7 @@ routines:
         timezone: "UTC"
         enabled: true
   # Tier-A host-detector
-  # assignee: platform-observer
+  # assignee: devops
   # purpose: Grafana fired-vs-expected + poller-cursor drops
   # prompt SSOT: templates/pharmia/tasks/daily-alert-health/TASK.md
   daily-alert-health:

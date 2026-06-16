@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Read-only canary Postgres query path for Paperclip agents.
+# Used by the prod-ro SSH forced command. Reads SQL on stdin, rejects psql
+# backslash meta-commands, and routes only to approved read-only DB targets.
+set -euo pipefail
+
+DB="app"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --db)
+      DB="${2:-}"
+      [[ -n "$DB" ]] || { echo "ERROR: --db requires app or mastra" >&2; exit 2; }
+      shift 2
+      ;;
+    --db=*)
+      DB="${1#*=}"
+      shift
+      ;;
+    --)
+      shift
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "$DB" in
+  app)
+    CONTAINER="pharmia-canary-46uhia-db-1"
+    PASSWORD_FILE="/etc/canary-pg-ro.pw"
+    ;;
+  mastra)
+    CONTAINER="pharmia-canary-46uhia-mastra_db-1"
+    PASSWORD_FILE="/etc/canary-mastra-pg-ro.pw"
+    ;;
+  *)
+    echo "ERROR: unsupported --db target: $DB" >&2
+    exit 2
+    ;;
+esac
+
+SQL="$(cat)"
+if printf '%s\n' "$SQL" | grep -qE '^[[:space:]]*\\'; then
+  echo "ERROR: psql backslash meta-commands are not permitted; read-only SQL only." >&2
+  exit 1
+fi
+
+printf '%s' "$SQL" | docker exec -i -e PGPASSWORD="$(cat "$PASSWORD_FILE")" \
+  "$CONTAINER" psql -U pharmia_readonly -h 127.0.0.1 -d postgres -v ON_ERROR_STOP=1 -f -

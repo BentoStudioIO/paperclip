@@ -4,6 +4,10 @@ title: "DevOps Engineer"
 reportsTo: "engineering-lead"
 skills:
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-infra"
+  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/pharmia-cli"
+  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/alert-rule-change-validator"
+  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/atlas-rca"
+  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/atlas-render-regression"
 ---
 
 ---

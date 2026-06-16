@@ -222,7 +222,7 @@ if [[ "$ENV" == "canary" ]] && ssh_alias_resolves prod-ro && ! ssh_alias_resolve
   # stops the ssh client from consuming `--db` as its own flag. Pipe the SQL on
   # stdin via base64 to preserve literal bytes (quotes, newlines, backslashes),
   # matching the docker-exec path below. The forced-command reads stdin SQL and
-  # (post Task 5.1) routes by --db; today it reads app and ignores the target.
+  # routes by --db while keeping the agent path read-only.
   FULL_QUERY="${RO_PRELUDE}${QUERY}"
   B64_QUERY=$(printf '%s' "$FULL_QUERY" | base64 -w0)
   echo "$B64_QUERY" | base64 -d | ssh prod-ro -- --db "$RO_DB"

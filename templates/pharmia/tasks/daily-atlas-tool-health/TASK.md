@@ -1,16 +1,21 @@
 ---
 name: "Daily Atlas tool-health"
 project: "pharmamate"
-assignee: "ai-product-observer"
+assignee: "devops"
 recurring: true
 description: >
-  Atlas quality check — starts from the user-dissatisfaction signal
+  Host detector for Atlas quality — user-dissatisfaction signal
   (atlas_message_reaction dislikes + question-chain pushback), then
-  tool/render/citation correctness + capability-gap detection. Groups findings
-  by root cause into concise, standard action items.
+  tool/render/citation correctness + capability-gap detection. Collect evidence,
+  write the health report, and route confirmed follow-ups without blocking the
+  recurring detector issue.
 ---
 
-Run the DAILY ATLAS HEALTH CHECK now, autonomously, against canary. Use the atlas-rca and atlas-render-regression skills; consult the [[atlas-tool-health-canary]] memo for known failure modes instead of re-deriving them.
+Run the DAILY ATLAS HEALTH CHECK now, autonomously, against canary. You are the
+host detector: collect the CLI-backed evidence first, then write the health
+report. Use the atlas-rca and atlas-render-regression skills; consult the
+[[atlas-tool-health-canary]] memo for known failure modes instead of re-deriving
+them.
 
 Detect by PRINCIPLE, not by matching past incidents — the examples in the memos are illustrations of a class, not the whole class. A new failure that doesn't match a banked one still counts.
 
@@ -29,6 +34,12 @@ Detect by PRINCIPLE, not by matching past incidents — the examples in the memo
 ## For every issue
 
 Don't stop at detection — root-cause it (`threads <id> --rca`/`--tools`/`--json`), name the failing layer (tool/model/render/persist/coverage), confirm the mechanism. GROUP findings that share one root cause. Each group → ONE concrete action item: owner file/skill + fix + how to validate. Validate cheaply when you can. Render fixes name a repro harness (atlas-render-regression); model/prompt fixes route through model-config-gate.
+
+If a finding needs observer/product/clinical judgment after evidence collection,
+create a child issue for AI Product Observer or Pharmacy Lead with the report
+and raw evidence pointers. Do not block this recurring detector issue on that
+follow-up; mark this issue done after the report is posted and any follow-up
+issues are created.
 
 ## Remediation policy
 
