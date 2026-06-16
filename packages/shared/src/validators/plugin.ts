@@ -49,6 +49,22 @@ export const jsonSchemaSchema = z.record(z.string(), z.unknown()).refine(
   { message: "Must be a valid JSON Schema object (requires at least a 'type', '$ref', or composition keyword)" },
 );
 
+const pluginPackageRelativePathSchema = z.string().min(1).max(500).refine(
+  (value) =>
+    !value.startsWith("/") &&
+    !value.includes("..") &&
+    !value.includes("\\") &&
+    !value.split("/").some((segment) => segment === "" || segment === "."),
+  { message: "plugin package paths must be relative paths without traversal, empty segments, or backslashes" },
+);
+
+export const pluginSourceReferenceSchema = z.object({
+  path: pluginPackageRelativePathSchema,
+  exportName: z.string().min(1).max(120).optional(),
+  line: z.number().int().min(1).optional(),
+  url: z.string().url().optional(),
+});
+
 // ---------------------------------------------------------------------------
 // Manifest sub-type schemas
 // ---------------------------------------------------------------------------
@@ -80,6 +96,7 @@ export const pluginJobDeclarationSchema = z.object({
   jobKey: z.string().min(1),
   displayName: z.string().min(1),
   description: z.string().optional(),
+  source: pluginSourceReferenceSchema.optional(),
   schedule: z.string().refine(
     (val) => isValidCronExpression(val),
     { message: "schedule must be a valid 5-field cron expression (e.g. '*/15 * * * *')" },
@@ -212,14 +229,7 @@ export const pluginManagedRoutineDeclarationSchema = z.object({
 
 export type PluginManagedRoutineDeclarationInput = z.infer<typeof pluginManagedRoutineDeclarationSchema>;
 
-const pluginLocalFolderRelativePathSchema = z.string().min(1).max(500).refine(
-  (value) =>
-    !value.startsWith("/") &&
-    !value.includes("..") &&
-    !value.includes("\\") &&
-    !value.split("/").some((segment) => segment === "" || segment === "."),
-  { message: "local folder paths must be relative paths without traversal, empty segments, or backslashes" },
-);
+const pluginLocalFolderRelativePathSchema = pluginPackageRelativePathSchema;
 
 export const pluginLocalFolderDeclarationSchema = z.object({
   folderKey: z.string().min(1).max(100).regex(/^[a-z0-9][a-z0-9._:-]*$/, {
@@ -567,6 +577,39 @@ export const pluginApiRouteDeclarationSchema = z.object({
 
 export type PluginApiRouteDeclarationInput = z.infer<typeof pluginApiRouteDeclarationSchema>;
 
+export const pluginPrimitiveDeclarationSchema = z.object({
+  primitiveKey: z.string().min(1).max(100).regex(/^[a-z0-9][a-z0-9._:-]*$/, {
+    message: "primitiveKey must start with a lowercase alphanumeric and contain only lowercase letters, digits, dots, colons, underscores, or hyphens",
+  }),
+  kind: z.enum([
+    "agent",
+    "api_route",
+    "assignment",
+    "cli",
+    "feature",
+    "intelligence",
+    "job",
+    "local_folder",
+    "project",
+    "routine",
+    "skill",
+    "tool",
+    "ui",
+    "webhook",
+    "workflow",
+  ]),
+  displayName: z.string().trim().min(1).max(120),
+  description: z.string().max(2000).optional(),
+  status: z.enum(["active", "paused", "disabled", "needs_config", "experimental", "deprecated"]).optional(),
+  source: pluginSourceReferenceSchema.optional(),
+  related: z.array(z.object({
+    kind: z.string().min(1).max(80),
+    key: z.string().min(1).max(120),
+  })).max(20).optional(),
+});
+
+export type PluginPrimitiveDeclarationInput = z.infer<typeof pluginPrimitiveDeclarationSchema>;
+
 // ---------------------------------------------------------------------------
 // Plugin Manifest V1 schema
 // ---------------------------------------------------------------------------
@@ -638,6 +681,7 @@ export const pluginManifestV1Schema = z.object({
   jobs: z.array(pluginJobDeclarationSchema).optional(),
   webhooks: z.array(pluginWebhookDeclarationSchema).optional(),
   tools: z.array(pluginToolDeclarationSchema).optional(),
+  primitives: z.array(pluginPrimitiveDeclarationSchema).optional(),
   database: pluginDatabaseDeclarationSchema.optional(),
   apiRoutes: z.array(pluginApiRouteDeclarationSchema).optional(),
   environmentDrivers: z.array(pluginEnvironmentDriverDeclarationSchema).optional(),
@@ -872,6 +916,18 @@ export const pluginManifestV1Schema = z.object({
         code: z.ZodIssueCode.custom,
         message: `Duplicate tool names: ${[...new Set(duplicates)].join(", ")}`,
         path: ["tools"],
+      });
+    }
+  }
+
+  if (manifest.primitives) {
+    const primitiveKeys = manifest.primitives.map((primitive) => primitive.primitiveKey);
+    const duplicates = primitiveKeys.filter((key, i) => primitiveKeys.indexOf(key) !== i);
+    if (duplicates.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Duplicate primitive keys: ${[...new Set(duplicates)].join(", ")}`,
+        path: ["primitives"],
       });
     }
   }

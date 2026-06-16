@@ -287,6 +287,10 @@ export type {
 export type {
   PaperclipPluginManifestV1,
   PluginJobDeclaration,
+  PluginPrimitiveDeclaration,
+  PluginPrimitiveKind,
+  PluginPrimitiveStatus,
+  PluginSourceReference,
   PluginWebhookDeclaration,
   PluginToolDeclaration,
   PluginEnvironmentDriverDeclaration,

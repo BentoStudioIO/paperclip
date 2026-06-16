@@ -190,6 +190,40 @@ export interface PluginLocalFolderSaveInput {
   requiredFiles?: string[];
 }
 
+export interface PluginPrimitiveSource {
+  path: string;
+  exportName?: string;
+  line?: number;
+  url?: string;
+}
+
+export interface PluginPrimitiveCatalogItem {
+  key: string;
+  kind: string;
+  displayName: string;
+  description: string | null;
+  origin: "native" | "custom";
+  status: string | null;
+  source: PluginPrimitiveSource | null;
+  metadata: Record<string, unknown>;
+  related: Array<{ kind: string; key: string }>;
+}
+
+export interface PluginPrimitiveCatalogResponse {
+  pluginId: string;
+  pluginKey: string;
+  displayName: string;
+  primitives: PluginPrimitiveCatalogItem[];
+}
+
+export interface PluginSourceFileResponse {
+  pluginId: string;
+  path: string;
+  language: string;
+  size: number;
+  content: string;
+}
+
 /**
  * Plugin management API client.
  *
@@ -312,6 +346,20 @@ export const pluginsApi = {
       `/plugins/${pluginId}/logs${qs ? `?${qs}` : ""}`,
     );
   },
+
+  /**
+   * Fetch normalized manifest-declared primitives for the plugin.
+   */
+  primitives: (pluginId: string) =>
+    api.get<PluginPrimitiveCatalogResponse>(`/plugins/${pluginId}/primitives`),
+
+  /**
+   * Fetch a bounded source file from the plugin package root.
+   */
+  sourceFile: (pluginId: string, sourcePath: string) =>
+    api.get<PluginSourceFileResponse>(
+      `/plugins/${pluginId}/source?path=${encodeURIComponent(sourcePath)}`,
+    ),
 
   /**
    * Upgrade a plugin to a newer version.

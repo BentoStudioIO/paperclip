@@ -308,6 +308,7 @@ export async function createApp(
       { workerManager },
       { toolDispatcher },
       { workerManager },
+      { localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR },
     ),
   );
   api.use(adapterRoutes());

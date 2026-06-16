@@ -19,7 +19,7 @@
  * @see doc/plugins/PLUGIN_SPEC.md for the full plugin specification
  */
 
-import { access, readdir, readFile } from "node:fs/promises";
+import { access, readdir, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -41,6 +41,10 @@ import type {
   PaperclipPluginManifestV1,
   PluginBridgeErrorCode,
   PluginLauncherRenderContextSnapshot,
+  PluginJobRecord,
+  PluginPrimitiveDeclaration,
+  PluginPrimitiveKind,
+  PluginSourceReference,
 } from "@paperclipai/shared";
 import {
   PLUGIN_STATUSES,
@@ -140,6 +144,7 @@ const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const PLUGIN_API_BODY_LIMIT_BYTES = 1_000_000;
+const PLUGIN_SOURCE_MAX_BYTES = 400_000;
 const PLUGIN_SCOPED_API_RESPONSE_HEADER_ALLOWLIST = new Set([
   "cache-control",
   "etag",
@@ -338,6 +343,277 @@ async function resolvePlugin(
   return registry.getByKey(pluginId);
 }
 
+interface PluginRouteOptions {
+  localPluginDir?: string;
+}
+
+type PluginPrimitiveOrigin = "native" | "custom";
+
+interface PluginPrimitiveCatalogItem {
+  key: string;
+  kind: PluginPrimitiveKind;
+  displayName: string;
+  description: string | null;
+  origin: PluginPrimitiveOrigin;
+  status: string | null;
+  source: PluginSourceReference | null;
+  metadata: Record<string, unknown>;
+  related: Array<{ kind: string; key: string }>;
+}
+
+interface PluginPrimitiveCatalogResponse {
+  pluginId: string;
+  pluginKey: string;
+  displayName: string;
+  primitives: PluginPrimitiveCatalogItem[];
+}
+
+function toIso(value: Date | string | null | undefined): string | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString();
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+function addPrimitive(
+  rows: PluginPrimitiveCatalogItem[],
+  input: Omit<PluginPrimitiveCatalogItem, "description" | "source" | "metadata" | "related"> & {
+    description?: string | null;
+    source?: PluginSourceReference | null;
+    metadata?: Record<string, unknown>;
+    related?: Array<{ kind: string; key: string }>;
+  },
+) {
+  rows.push({
+    ...input,
+    description: input.description ?? null,
+    source: input.source ?? null,
+    metadata: input.metadata ?? {},
+    related: input.related ?? [],
+  });
+}
+
+function mergeCustomPrimitive(
+  rows: PluginPrimitiveCatalogItem[],
+  primitive: PluginPrimitiveDeclaration,
+) {
+  const existing = rows.find((row) => row.kind === primitive.kind && row.key === primitive.primitiveKey);
+  if (!existing) {
+    addPrimitive(rows, {
+      key: primitive.primitiveKey,
+      kind: primitive.kind,
+      displayName: primitive.displayName,
+      description: primitive.description ?? null,
+      origin: "custom",
+      status: primitive.status ?? null,
+      source: primitive.source ?? null,
+      related: primitive.related ?? [],
+    });
+    return;
+  }
+
+  existing.description = existing.description ?? primitive.description ?? null;
+  existing.source = existing.source ?? primitive.source ?? null;
+  existing.status = existing.status ?? primitive.status ?? null;
+  existing.related = [...existing.related, ...(primitive.related ?? [])];
+}
+
+function buildPluginPrimitiveCatalog(
+  plugin: { id: string; pluginKey: string; manifestJson: PaperclipPluginManifestV1 },
+  jobs: PluginJobRecord[] = [],
+): PluginPrimitiveCatalogResponse {
+  const manifest = plugin.manifestJson;
+  const rows: PluginPrimitiveCatalogItem[] = [];
+  const jobByKey = new Map(jobs.map((job) => [job.jobKey, job]));
+
+  for (const job of manifest.jobs ?? []) {
+    const runtime = jobByKey.get(job.jobKey);
+    addPrimitive(rows, {
+      key: job.jobKey,
+      kind: "job",
+      displayName: job.displayName,
+      description: job.description ?? null,
+      origin: "native",
+      status: runtime?.status ?? "declared",
+      source: job.source ?? null,
+      metadata: {
+        schedule: runtime?.schedule ?? job.schedule ?? null,
+        lastRunAt: toIso(runtime?.lastRunAt),
+        nextRunAt: toIso(runtime?.nextRunAt),
+      },
+    });
+  }
+
+  for (const webhook of manifest.webhooks ?? []) {
+    addPrimitive(rows, {
+      key: webhook.endpointKey,
+      kind: "webhook",
+      displayName: webhook.displayName,
+      description: webhook.description ?? null,
+      origin: "native",
+      status: "declared",
+      metadata: { endpoint: `/api/plugins/${plugin.id}/webhooks/${webhook.endpointKey}` },
+    });
+  }
+
+  for (const tool of manifest.tools ?? []) {
+    addPrimitive(rows, {
+      key: tool.name,
+      kind: "tool",
+      displayName: tool.displayName,
+      description: tool.description,
+      origin: "native",
+      status: "declared",
+      metadata: { parametersSchema: tool.parametersSchema },
+    });
+  }
+
+  for (const route of manifest.apiRoutes ?? []) {
+    addPrimitive(rows, {
+      key: route.routeKey,
+      kind: "api_route",
+      displayName: `${route.method} ${route.path}`,
+      description: null,
+      origin: "native",
+      status: "declared",
+      metadata: { method: route.method, path: route.path, auth: route.auth },
+    });
+  }
+
+  for (const driver of manifest.environmentDrivers ?? []) {
+    addPrimitive(rows, {
+      key: driver.driverKey,
+      kind: "feature",
+      displayName: driver.displayName,
+      description: driver.description ?? null,
+      origin: "native",
+      status: "declared",
+      metadata: { driverKind: driver.kind ?? "environment_driver" },
+    });
+  }
+
+  for (const agent of manifest.agents ?? []) {
+    addPrimitive(rows, {
+      key: agent.agentKey,
+      kind: "agent",
+      displayName: agent.displayName,
+      description: agent.capabilities ?? agent.title ?? null,
+      origin: "native",
+      status: agent.status ?? "declared",
+      metadata: { role: agent.role ?? null },
+    });
+  }
+
+  for (const project of manifest.projects ?? []) {
+    addPrimitive(rows, {
+      key: project.projectKey,
+      kind: "project",
+      displayName: project.displayName,
+      description: project.description ?? null,
+      origin: "native",
+      status: project.status ?? "declared",
+    });
+  }
+
+  for (const routine of manifest.routines ?? []) {
+    addPrimitive(rows, {
+      key: routine.routineKey,
+      kind: "routine",
+      displayName: routine.title,
+      description: routine.description ?? null,
+      origin: "native",
+      status: routine.status ?? "declared",
+      metadata: { triggers: routine.triggers ?? [] },
+    });
+  }
+
+  for (const skill of manifest.skills ?? []) {
+    addPrimitive(rows, {
+      key: skill.skillKey,
+      kind: "skill",
+      displayName: skill.displayName,
+      description: skill.description ?? null,
+      origin: "native",
+      status: "declared",
+      metadata: { slug: skill.slug ?? skill.skillKey },
+    });
+  }
+
+  for (const folder of manifest.localFolders ?? []) {
+    addPrimitive(rows, {
+      key: folder.folderKey,
+      kind: "local_folder",
+      displayName: folder.displayName,
+      description: folder.description ?? null,
+      origin: "native",
+      status: "declared",
+      metadata: { access: folder.access ?? "readWrite" },
+    });
+  }
+
+  for (const slot of manifest.ui?.slots ?? []) {
+    addPrimitive(rows, {
+      key: slot.id,
+      kind: "ui",
+      displayName: slot.displayName,
+      description: null,
+      origin: "native",
+      status: "declared",
+      metadata: { type: slot.type, exportName: slot.exportName, routePath: slot.routePath ?? null },
+    });
+  }
+
+  for (const launcher of [...(manifest.launchers ?? []), ...(manifest.ui?.launchers ?? [])]) {
+    addPrimitive(rows, {
+      key: launcher.id,
+      kind: "ui",
+      displayName: launcher.displayName,
+      description: launcher.description ?? null,
+      origin: "native",
+      status: "declared",
+      metadata: { placementZone: launcher.placementZone, action: launcher.action },
+    });
+  }
+
+  for (const primitive of manifest.primitives ?? []) {
+    mergeCustomPrimitive(rows, primitive);
+  }
+
+  rows.sort((left, right) => {
+    const kind = left.kind.localeCompare(right.kind);
+    if (kind !== 0) return kind;
+    return left.displayName.localeCompare(right.displayName);
+  });
+
+  return {
+    pluginId: plugin.id,
+    pluginKey: plugin.pluginKey,
+    displayName: manifest.displayName ?? plugin.pluginKey,
+    primitives: rows,
+  };
+}
+
+function resolvePluginPackageRoot(
+  plugin: { packagePath?: string | null; packageName: string; pluginKey: string },
+  localPluginDir?: string,
+): string | null {
+  if (plugin.packagePath) return path.resolve(plugin.packagePath);
+  if (!localPluginDir) return null;
+  if (plugin.packageName.startsWith("@")) {
+    return path.join(localPluginDir, "node_modules", ...plugin.packageName.split("/"));
+  }
+  return path.join(localPluginDir, "node_modules", plugin.packageName);
+}
+
+function languageFromPath(sourcePath: string): string {
+  const ext = path.extname(sourcePath).toLowerCase();
+  if (ext === ".ts" || ext === ".tsx") return "typescript";
+  if (ext === ".js" || ext === ".jsx" || ext === ".mjs" || ext === ".cjs") return "javascript";
+  if (ext === ".json") return "json";
+  if (ext === ".md" || ext === ".mdx") return "markdown";
+  return "text";
+}
+
 /**
  * Optional dependencies for plugin job scheduling routes.
  *
@@ -440,6 +716,8 @@ interface PluginToolExecuteRequest {
  * | POST | /plugins/:pluginId/enable | Enable a plugin |
  * | POST | /plugins/:pluginId/disable | Disable a plugin |
  * | GET | /plugins/:pluginId/health | Run health diagnostics |
+ * | GET | /plugins/:pluginId/primitives | List manifest-declared primitives |
+ * | GET | /plugins/:pluginId/source | Read a bounded primitive source file |
  * | POST | /plugins/:pluginId/upgrade | Upgrade to newer version |
  * | GET | /plugins/:pluginId/jobs | List jobs for a plugin |
  * | GET | /plugins/:pluginId/jobs/:jobId/runs | List runs for a job |
@@ -476,6 +754,7 @@ export function pluginRoutes(
   webhookDeps?: PluginRouteWebhookDeps,
   toolDeps?: PluginRouteToolDeps,
   bridgeDeps?: PluginRouteBridgeDeps,
+  options: PluginRouteOptions = {},
 ) {
   const router = Router();
   const registry = pluginRegistryService(db);
@@ -2030,6 +2309,109 @@ export function pluginRoutes(
       .limit(limit);
 
     res.json(rows);
+  });
+
+  /**
+   * GET /api/plugins/:pluginId/primitives
+   *
+   * Return an operator-facing catalog of manifest-declared plugin primitives.
+   * Native declarations such as jobs, webhooks, tools, API routes, UI slots,
+   * managed routines, and managed skills are normalized automatically. Plugins
+   * can add extra rows through `manifest.primitives`.
+   */
+  router.get("/plugins/:pluginId/primitives", async (req, res) => {
+    assertBoardOrgAccess(req);
+    const { pluginId } = req.params;
+
+    const plugin = await resolvePlugin(registry, pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+
+    let jobs: PluginJobRecord[] = [];
+    if (jobDeps) {
+      try {
+        jobs = await jobDeps.jobStore.listJobs(plugin.id);
+      } catch {
+        jobs = [];
+      }
+    }
+
+    res.json(buildPluginPrimitiveCatalog(plugin, jobs));
+  });
+
+  /**
+   * GET /api/plugins/:pluginId/source?path=<relative-path>
+   *
+   * Read a single source file from the plugin package root for the primitive
+   * source viewer. Paths are package-relative, traversal is rejected, symlinks
+   * are resolved, and responses are capped.
+   */
+  router.get("/plugins/:pluginId/source", async (req, res) => {
+    assertBoardOrgAccess(req);
+    const { pluginId } = req.params;
+    const rawPath = typeof req.query.path === "string" ? req.query.path : "";
+
+    if (
+      !rawPath
+      || rawPath.startsWith("/")
+      || rawPath.includes("..")
+      || rawPath.includes("\\")
+      || rawPath.split("/").some((segment) => segment === "" || segment === ".")
+    ) {
+      res.status(400).json({ error: "path must be a safe package-relative file path" });
+      return;
+    }
+
+    const plugin = await resolvePlugin(registry, pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+
+    const packageRoot = resolvePluginPackageRoot(plugin, options.localPluginDir);
+    if (!packageRoot) {
+      res.status(404).json({ error: "Plugin package root is not available" });
+      return;
+    }
+
+    try {
+      const rootRealPath = await realpath(packageRoot);
+      const targetPath = path.resolve(rootRealPath, rawPath);
+      if (!targetPath.startsWith(`${rootRealPath}${path.sep}`)) {
+        res.status(400).json({ error: "path must stay inside the plugin package" });
+        return;
+      }
+
+      const targetRealPath = await realpath(targetPath);
+      if (!targetRealPath.startsWith(`${rootRealPath}${path.sep}`)) {
+        res.status(400).json({ error: "path must stay inside the plugin package" });
+        return;
+      }
+
+      const fileStat = await stat(targetRealPath);
+      if (!fileStat.isFile()) {
+        res.status(404).json({ error: "Source path is not a file" });
+        return;
+      }
+      if (fileStat.size > PLUGIN_SOURCE_MAX_BYTES) {
+        res.status(413).json({ error: "Source file is too large to display" });
+        return;
+      }
+
+      const content = await readFile(targetRealPath, "utf8");
+      res.json({
+        pluginId: plugin.id,
+        path: rawPath,
+        language: languageFromPath(rawPath),
+        size: fileStat.size,
+        content,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(404).json({ error: message || "Source file not found" });
+    }
   });
 
   /**

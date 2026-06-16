@@ -229,6 +229,9 @@ export const queryKeys = {
       ["plugins", pluginId, "companies", companyId, "local-folders"] as const,
     dashboard: (pluginId: string) => ["plugins", pluginId, "dashboard"] as const,
     logs: (pluginId: string) => ["plugins", pluginId, "logs"] as const,
+    primitives: (pluginId: string) => ["plugins", pluginId, "primitives"] as const,
+    sourceFile: (pluginId: string, sourcePath: string) =>
+      ["plugins", pluginId, "source", sourcePath] as const,
   },
   adapters: {
     all: ["adapters"] as const,

@@ -56,6 +56,10 @@ import type { PluginPerformActionContext } from "./protocol.js";
 export type {
   PaperclipPluginManifestV1,
   PluginJobDeclaration,
+  PluginPrimitiveDeclaration,
+  PluginPrimitiveKind,
+  PluginPrimitiveStatus,
+  PluginSourceReference,
   PluginWebhookDeclaration,
   PluginToolDeclaration,
   PluginEnvironmentDriverDeclaration,

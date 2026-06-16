@@ -37,6 +37,68 @@ describe("plugin manifest validators", () => {
 
     expect(parsed.capabilities).toEqual(["ui.dashboardWidget.register"]);
   });
+
+  it("preserves job source references and custom primitive declarations", () => {
+    const parsed = pluginManifestV1Schema.parse({
+      id: "paperclip.discord",
+      apiVersion: 1,
+      version: "0.1.0",
+      displayName: "Discord",
+      description: "Discord integration plugin.",
+      author: "Paperclip",
+      categories: ["automation"],
+      capabilities: ["jobs.schedule"],
+      entrypoints: {
+        worker: "./dist/worker.js",
+      },
+      jobs: [
+        {
+          jobKey: "digest",
+          displayName: "Digest",
+          schedule: "0 * * * *",
+          source: { path: "src/jobs/digest.ts", exportName: "registerDigestJob", line: 12 },
+        },
+      ],
+      primitives: [
+        {
+          primitiveKey: "discord-assignments",
+          kind: "assignment",
+          displayName: "Discord assignments",
+          description: "Regex-triggered Discord to agent routing.",
+          source: { path: "src/assignments.ts" },
+        },
+      ],
+    });
+
+    expect(parsed.jobs?.[0]?.source?.path).toBe("src/jobs/digest.ts");
+    expect(parsed.primitives?.[0]?.kind).toBe("assignment");
+  });
+
+  it("rejects primitive source path traversal", () => {
+    const parsed = pluginManifestV1Schema.safeParse({
+      id: "paperclip.bad-source",
+      apiVersion: 1,
+      version: "0.1.0",
+      displayName: "Bad Source",
+      description: "Invalid primitive source path.",
+      author: "Paperclip",
+      categories: ["automation"],
+      capabilities: [],
+      entrypoints: {
+        worker: "./dist/worker.js",
+      },
+      primitives: [
+        {
+          primitiveKey: "bad",
+          kind: "feature",
+          displayName: "Bad",
+          source: { path: "../secrets.env" },
+        },
+      ],
+    });
+
+    expect(parsed.success).toBe(false);
+  });
 });
 
 describe("plugin managed routine validators", () => {

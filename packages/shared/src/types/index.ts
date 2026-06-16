@@ -492,6 +492,10 @@ export type {
 export type {
   JsonSchema,
   PluginJobDeclaration,
+  PluginPrimitiveDeclaration,
+  PluginPrimitiveKind,
+  PluginPrimitiveStatus,
+  PluginSourceReference,
   PluginWebhookDeclaration,
   PluginToolDeclaration,
   PluginEnvironmentDriverDeclaration,

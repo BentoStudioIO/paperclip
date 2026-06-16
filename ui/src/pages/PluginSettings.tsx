@@ -1,12 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Puzzle, ArrowLeft, ShieldAlert, ActivitySquare, CheckCircle, XCircle, Loader2, Clock, Cpu, Webhook, CalendarClock, AlertTriangle, FolderOpen, Save } from "lucide-react";
+import { Puzzle, ArrowLeft, ShieldAlert, ActivitySquare, CheckCircle, XCircle, Loader2, Clock, Cpu, Webhook, CalendarClock, AlertTriangle, FolderOpen, Save, Code2, ExternalLink } from "lucide-react";
 import type { PluginLocalFolderDeclaration } from "@paperclipai/shared";
 import { useCompany } from "@/context/CompanyContext";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { Link, Navigate, useParams } from "@/lib/router";
 import { PluginSlotMount, usePluginSlots } from "@/plugins/slots";
-import { pluginsApi, type PluginLocalFolderStatus } from "@/api/plugins";
+import {
+  pluginsApi,
+  type PluginLocalFolderStatus,
+  type PluginPrimitiveCatalogItem,
+  type PluginPrimitiveSource,
+} from "@/api/plugins";
 import { queryKeys } from "@/lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -27,6 +32,8 @@ import {
   getDefaultValues,
   type JsonSchemaNode,
 } from "@/components/JsonSchemaForm";
+
+type PluginSettingsTab = "configuration" | "status" | "primitives";
 
 /**
  * PluginSettings page component.
@@ -63,7 +70,7 @@ export function PluginSettings() {
   const { selectedCompany, selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const { companyPrefix, pluginId } = useParams<{ companyPrefix?: string; pluginId: string }>();
-  const [activeTab, setActiveTab] = useState<"configuration" | "status">("configuration");
+  const [activeTab, setActiveTab] = useState<PluginSettingsTab>("configuration");
 
   const { data: plugin, isLoading: pluginLoading } = useQuery({
     queryKey: queryKeys.plugins.detail(pluginId!),
@@ -90,6 +97,12 @@ export function PluginSettings() {
     queryFn: () => pluginsApi.logs(pluginId!, { limit: 50 }),
     enabled: !!pluginId && plugin?.status === "ready",
     refetchInterval: 30000,
+  });
+
+  const { data: primitivesData, isLoading: primitivesLoading } = useQuery({
+    queryKey: queryKeys.plugins.primitives(pluginId!),
+    queryFn: () => pluginsApi.primitives(pluginId!),
+    enabled: !!pluginId && activeTab === "primitives",
   });
 
   // Fetch existing config for the plugin
@@ -172,15 +185,16 @@ export function PluginSettings() {
         </div>
       </div>
 
-      <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as "configuration" | "status")} className="space-y-6">
+      <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as PluginSettingsTab)} className="space-y-6">
         <PageTabBar
           align="start"
           items={[
             { value: "configuration", label: "Configuration" },
             { value: "status", label: "Status" },
+            { value: "primitives", label: "Primitives" },
           ]}
           value={activeTab}
-          onValueChange={(value) => setActiveTab(value as "configuration" | "status")}
+          onValueChange={(value) => setActiveTab(value as PluginSettingsTab)}
         />
 
         <TabsContent value="configuration" className="space-y-6">
@@ -564,7 +578,198 @@ export function PluginSettings() {
             </div>
           </div>
         </TabsContent>
+
+        <TabsContent value="primitives" className="space-y-6">
+          <PluginPrimitivesPanel
+            pluginId={pluginId!}
+            primitives={primitivesData?.primitives ?? []}
+            isLoading={primitivesLoading}
+          />
+        </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+function formatPrimitiveKind(kind: string): string {
+  return kind
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function primitiveStatusVariant(status: string | null): "default" | "secondary" | "destructive" | "outline" {
+  if (status === "active") return "default";
+  if (status === "failed" || status === "needs_config") return "destructive";
+  if (status === "paused" || status === "disabled" || status === "deprecated") return "secondary";
+  return "outline";
+}
+
+function metadataPreview(metadata: Record<string, unknown>): Array<[string, string]> {
+  return Object.entries(metadata)
+    .flatMap(([key, value]): Array<[string, string]> => {
+      if (value == null || value === "") return [];
+      if (Array.isArray(value)) return value.length > 0 ? [[key, `${value.length} item${value.length === 1 ? "" : "s"}`]] : [];
+      if (typeof value === "object") return [[key, "object"]];
+      return [[key, String(value)]];
+    })
+    .slice(0, 5);
+}
+
+function PluginPrimitivesPanel({
+  pluginId,
+  primitives,
+  isLoading,
+}: {
+  pluginId: string;
+  primitives: PluginPrimitiveCatalogItem[];
+  isLoading: boolean;
+}) {
+  const [selectedSource, setSelectedSource] = useState<PluginPrimitiveSource | null>(null);
+  const grouped = useMemo(() => {
+    const groups = new Map<string, PluginPrimitiveCatalogItem[]>();
+    for (const primitive of primitives) {
+      const rows = groups.get(primitive.kind) ?? [];
+      rows.push(primitive);
+      groups.set(primitive.kind, rows);
+    }
+    return [...groups.entries()].map(([kind, rows]) => ({
+      kind,
+      rows: rows.sort((left, right) => left.displayName.localeCompare(right.displayName)),
+    }));
+  }, [primitives]);
+
+  const sourceQuery = useQuery({
+    queryKey: selectedSource?.path
+      ? queryKeys.plugins.sourceFile(pluginId, selectedSource.path)
+      : ["plugins", pluginId, "source", "__none__"],
+    queryFn: () => pluginsApi.sourceFile(pluginId, selectedSource!.path),
+    enabled: Boolean(selectedSource?.path),
+  });
+
+  if (isLoading) {
+    return <div className="p-4 text-sm text-muted-foreground">Loading primitives...</div>;
+  }
+
+  if (primitives.length === 0) {
+    return (
+      <div className="rounded-md border border-border/60 bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
+        No primitives declared.
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.55fr)]">
+      <div className="space-y-6">
+        {grouped.map((group) => (
+          <section key={group.kind} className="space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-sm font-semibold">{formatPrimitiveKind(group.kind)}</h2>
+              <Badge variant="outline">{group.rows.length}</Badge>
+            </div>
+            <div className="grid gap-3">
+              {group.rows.map((primitive) => {
+                const metadata = metadataPreview(primitive.metadata);
+                return (
+                  <Card key={`${primitive.kind}:${primitive.key}`}>
+                    <CardContent className="space-y-3 p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-sm font-medium">{primitive.displayName}</h3>
+                            <code className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                              {primitive.key}
+                            </code>
+                          </div>
+                          {primitive.description ? (
+                            <p className="text-sm leading-5 text-muted-foreground">{primitive.description}</p>
+                          ) : null}
+                        </div>
+                        <div className="flex shrink-0 flex-wrap items-center gap-2">
+                          {primitive.status ? (
+                            <Badge variant={primitiveStatusVariant(primitive.status)}>
+                              {primitive.status}
+                            </Badge>
+                          ) : null}
+                          <Badge variant="outline">{primitive.origin}</Badge>
+                        </div>
+                      </div>
+
+                      {metadata.length > 0 ? (
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {metadata.map(([key, value]) => (
+                            <div key={key} className="min-w-0 rounded-md bg-muted/50 px-2 py-1.5 text-xs">
+                              <div className="text-muted-foreground">{formatPrimitiveKind(key)}</div>
+                              <div className="truncate font-mono" title={value}>{value}</div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+
+                      {primitive.source ? (
+                        <div className="flex flex-wrap items-center gap-2">
+                          {primitive.source.path ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setSelectedSource(primitive.source)}
+                            >
+                              <Code2 className="mr-1.5 h-3.5 w-3.5" />
+                              View source
+                            </Button>
+                          ) : null}
+                          {primitive.source.url ? (
+                            <Button variant="ghost" size="sm" asChild>
+                              <a href={primitive.source.url} target="_blank" rel="noreferrer">
+                                <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                                Open
+                              </a>
+                            </Button>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          </section>
+        ))}
+      </div>
+
+      <aside className="space-y-3">
+        <div className="rounded-md border border-border/60 bg-background">
+          <div className="border-b border-border/60 px-3 py-2">
+            <h2 className="text-sm font-semibold">Source</h2>
+            {selectedSource ? (
+              <div className="mt-1 min-w-0 truncate text-xs text-muted-foreground">
+                {selectedSource.path}
+                {selectedSource.line ? `:${selectedSource.line}` : ""}
+                {selectedSource.exportName ? ` · ${selectedSource.exportName}` : ""}
+              </div>
+            ) : null}
+          </div>
+          <div className="p-3">
+            {!selectedSource ? (
+              <p className="text-sm text-muted-foreground">Select a primitive source.</p>
+            ) : sourceQuery.isFetching ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading source...
+              </div>
+            ) : sourceQuery.data ? (
+              <pre className="max-h-[620px] overflow-auto rounded-md bg-muted/60 p-3 text-xs leading-5">
+                <code>{sourceQuery.data.content}</code>
+              </pre>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                {sourceQuery.error instanceof Error ? sourceQuery.error.message : "Source file is unavailable."}
+              </p>
+            )}
+          </div>
+        </div>
+      </aside>
     </div>
   );
 }

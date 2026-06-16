@@ -68,6 +68,17 @@ export type {
 // Manifest sub-types — nested declarations within PaperclipPluginManifestV1
 // ---------------------------------------------------------------------------
 
+export interface PluginSourceReference {
+  /** Relative path inside the plugin package. */
+  path: string;
+  /** Optional exported function/component/symbol to orient source viewers. */
+  exportName?: string;
+  /** Optional 1-based line number for direct source viewers. */
+  line?: number;
+  /** Optional external repository URL when the file is not packaged locally. */
+  url?: string;
+}
+
 /**
  * Declares a scheduled job a plugin can run.
  *
@@ -82,6 +93,8 @@ export interface PluginJobDeclaration {
   description?: string;
   /** Cron expression for the schedule (e.g. "star/15 star star star star" or "0 * * * *"). */
   schedule?: string;
+  /** Optional source pointer used by the Paperclip primitive catalog. */
+  source?: PluginSourceReference;
 }
 
 /**
@@ -116,6 +129,48 @@ export interface PluginToolDeclaration {
   description: string;
   /** JSON Schema describing the tool's input parameters. */
   parametersSchema: JsonSchema;
+}
+
+export type PluginPrimitiveKind =
+  | "agent"
+  | "api_route"
+  | "assignment"
+  | "cli"
+  | "feature"
+  | "intelligence"
+  | "job"
+  | "local_folder"
+  | "project"
+  | "routine"
+  | "skill"
+  | "tool"
+  | "ui"
+  | "webhook"
+  | "workflow";
+
+export type PluginPrimitiveStatus =
+  | "active"
+  | "paused"
+  | "disabled"
+  | "needs_config"
+  | "experimental"
+  | "deprecated";
+
+export interface PluginPrimitiveDeclaration {
+  /** Stable identifier for this primitive, unique within the plugin. */
+  primitiveKey: string;
+  /** Broad class for filtering and grouping in the host UI. */
+  kind: PluginPrimitiveKind;
+  /** Human-readable name shown in the operator UI. */
+  displayName: string;
+  /** Optional description of what this primitive does. */
+  description?: string;
+  /** Optional declared status independent of runtime state. */
+  status?: PluginPrimitiveStatus;
+  /** Optional source pointer for code viewers. */
+  source?: PluginSourceReference;
+  /** Optional links to native declarations or plugin-specific related objects. */
+  related?: Array<{ kind: string; key: string }>;
 }
 
 /**
@@ -548,6 +603,8 @@ export interface PaperclipPluginManifestV1 {
   webhooks?: PluginWebhookDeclaration[];
   /** Agent tools this plugin contributes. Requires `agent.tools.register` capability. */
   tools?: PluginToolDeclaration[];
+  /** Extra operator-visible primitives not covered by native manifest fields. */
+  primitives?: PluginPrimitiveDeclaration[];
   /** Restricted plugin-owned database namespace declaration. */
   database?: PluginDatabaseDeclaration;
   /** Scoped JSON API routes mounted under `/api/plugins/:pluginId/api/*`. */
