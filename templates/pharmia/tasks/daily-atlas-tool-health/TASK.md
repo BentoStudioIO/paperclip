@@ -43,8 +43,8 @@ issues are created.
 
 ## Remediation policy
 
-- **Fix in-run, no approval (docs + tooling ONLY):** Outline/corpus docs, `~/.local/bin` CLIs, paperclip SSOT, dashboards. Fix at source, verify, list under **Remediated**.
-- **Ask first (anything in the PharmaMate repo):** apps/packages/tooling, prompts, model/routing, evals, render menders. Back with a failing→green repro/eval, list under **Needs approval**, stop. NEVER push a Pharmia branch from this task.
+- **Fix in-run, no approval (docs ONLY):** Outline/corpus docs and local health-report files. Fix at source, verify, list under **Remediated**.
+- **Ask first — propose, do NOT ship (code/config/tooling):** any repo, script, CLI wrapper, dashboard, prompt/model/routing, eval, render mender, deploy, or app change — including `PharmaMate`, Paperclip SSOT, and `~/.local/bin`. Back with a failing→green repro/eval, list under **Needs approval**, stop. NEVER push a branch, open a PR, deploy, or mutate live config from this task.
 
 ## Output — STANDARD + CONCISE
 

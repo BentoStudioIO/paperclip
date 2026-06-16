@@ -9,17 +9,17 @@ intentionally omitted.
 ## CLI Maintenance
 
 The custom CLIs (`loki`, `tempo`, `prom`, `pyro`, `pg`, `twenty`, `ol`, `langfuse`, `comp`,
-`autumn`, `threads`, `shlink`, `cfdns`, `dokploy`, `pharmia-*`) are bash/curl/jq wrappers and
-**SHOULD be proactively improved** when you hit a rough edge — broken output parsing, missing
-flags, auth failures, confusing UX. Their SSOT is `templates/pharmia/cli/bin/` in the Paperclip
-repo — fix the file there, not the installed symlink. Always leave the CLI easier to use for the
-next zero-context agent (add subcommands, improve help text, fix flag names). Compiled binaries
-(`gh`, `bx`, `oha`, `gitleaks`) are NOT editable here — bump their pinned version in the Dockerfile.
+`autumn`, `threads`, `shlink`, `cfdns`, `dokploy`, `pharmia-*`) are bash/curl/jq wrappers. Their
+SSOT is `templates/pharmia/cli/bin/` in the Paperclip repo. If you hit a rough edge — broken output
+parsing, missing flags, auth failures, confusing UX — record the exact wrapper, proposed patch, and
+validation command under **Needs approval** unless the current issue explicitly authorizes code/config
+edits. Do not edit the installed symlink or the SSOT wrapper autonomously. Compiled binaries (`gh`,
+`bx`, `oha`, `gitleaks`) are NOT editable here — propose a pinned-version bump in the Dockerfile.
 
 **Gap-driven improvement rule.** If you ran a CLI and had to reach for another tool (a raw API
-call, raw SQL, web search, …) to answer the question, that's a gap in the first CLI. Fix it in the
-same task so the next zero-context agent gets the answer from one invocation. The default
-invocation should answer the headline question without follow-up calls.
+call, raw SQL, web search, …) to answer the question, that's a gap in the first CLI. File the
+one-invocation improvement as a proposed code/config change with validation evidence; do not ship it
+without approval.
 
 ## Secrets & Vaults
 

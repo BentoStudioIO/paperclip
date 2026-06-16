@@ -31,8 +31,8 @@ after the report is posted and any follow-up issues are created.
 
 ## Remediation policy
 
-- **Proactive — fix in-run, no approval (docs + tooling ONLY):** CLI scripts in `~/.local/bin` (`prom`/`loki`/`grr` gaps), Grafana dashboards-as-code via `grr`, runbook/memory notes. Fix at source, verify, list under **Remediated**.
-- **Ask first — propose, do NOT ship (any `PharmaMate` change):** `rules.yaml`, relay/app code, anything in the repo. Back it with the relevant validation (`render-alerting.sh` + `promtool check rules` for alert rules), route through the validator skill, list under **Needs approval**, stop. NEVER push a Pharmia branch or open a PR from this task.
+- **Fix in-run, no approval (docs ONLY):** Outline/runbook/memory notes and local health-report files. Fix at source, verify, list under **Remediated**.
+- **Ask first — propose, do NOT ship (code/config/tooling):** any repo, script, CLI wrapper, Grafana dashboard/rule/provisioning, prompt/model/routing, deploy, or app change — including `PharmaMate`, Paperclip SSOT, `~/.local/bin`, and `rules.yaml`. Back it with the relevant validation (`render-alerting.sh` + `promtool check rules` for alert rules), route through the validator skill, list under **Needs approval**, stop. NEVER push a branch, open a PR, deploy, or mutate live config from this task.
 
 ## Output — terse, bullets only, omit empty sections
 
