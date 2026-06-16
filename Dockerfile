@@ -3,7 +3,7 @@ FROM node:lts-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 \
+  && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 python3-pip \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable
 
@@ -88,6 +88,7 @@ COPY --chown=node:node --from=build /app /app
 RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai langfuse-cli \
   && apt-get update \
   && apt-get install -y --no-install-recommends openssh-client jq \
+  && python3 -m pip install --no-cache-dir --break-system-packages "curl_cffi==0.13.0" \
   && LOGCLI_VERSION="3.7.2" \
   && curl -fsSL "https://github.com/grafana/loki/releases/download/v${LOGCLI_VERSION}/logcli_${LOGCLI_VERSION}_amd64.deb" \
        -o /tmp/logcli.deb \
@@ -102,6 +103,7 @@ RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/cod
 COPY tools/clis/git-credential-github-app /usr/local/bin/
 RUN chmod +x /usr/local/bin/git-credential-github-app \
   && CLI_INSTALL_DIR=/usr/local/bin sh /app/templates/pharmia/cli/install.sh \
+  && python3 -c "import curl_cffi" \
   && command -v opq-verify >/dev/null
 
 # Configure git to use the GitHub App credential helper for github.com clones.
