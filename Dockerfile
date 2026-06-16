@@ -55,6 +55,7 @@ WORKDIR /app
 COPY --from=deps /app /app
 COPY . .
 RUN pnpm --filter @paperclipai/ui build
+RUN pnpm --filter @paperclipai/adapter-utils build
 RUN pnpm --filter @paperclipai/plugin-sdk build
 # Bundled in-repo plugins: build their dist/ so the running server can install
 # them from /app/packages/plugins/<name> via a local-path install. Depends on
