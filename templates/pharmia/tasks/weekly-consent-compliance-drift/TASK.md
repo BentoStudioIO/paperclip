@@ -18,8 +18,8 @@ Run the WEEKLY CONSENT COMPLIANCE DRIFT CHECK now.
 
 ## Remediation policy
 
-- Fix in-run only for Paperclip task/runbook/CLI gaps.
-- Any `PharmaMate` consent, audit, prompt, or legal copy change must be listed under **Needs approval** with validation steps.
+- Fix in-run only for Outline/runbook non-code docs and local report files.
+- Any code/config/tooling change — including `PharmaMate`, Paperclip task/skill SSOT, CLI wrappers, consent, audit, prompt, legal copy, deploys, or live config — must be listed under **Needs approval** with validation steps. Do not ship it without approval.
 
 ## Output
 

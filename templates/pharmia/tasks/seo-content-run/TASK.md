@@ -37,8 +37,8 @@ This routine is the **content-production engine that feeds the Weekly Growth Bri
 
 ## Remediation policy
 
-- **Proactive — fix in-run, no approval (docs + tooling ONLY):** the paperclip SEO skill/task SSOT (a stale feed URL, a broken CSS selector, a dead `bx`/`wp` query), CLI scripts in `~/.local/bin`. Fix at source, verify (200 / feed parses / query runs), list under **Remediated**.
-- **Ask first — propose, do NOT ship:** any `wp` publish (anything beyond a DRAFT), any LinkedIn post, any `PharmaMate` repo change. List under **Needs approval** and stop. NEVER publish, post, or push a branch from this task — every artifact this routine creates is a draft awaiting the human.
+- **Fix in-run, no approval (docs ONLY):** Outline/non-code content docs and local draft/report files. Fix at source, verify (200 / feed parses / query runs), list under **Remediated**.
+- **Ask first — propose, do NOT ship:** any code/config/tooling change — including Paperclip SEO skill/task SSOT, feed selectors, `bx`/`wp` query code, CLI wrappers, `PharmaMate` repo changes, deploys, or live config — plus any `wp` publish (anything beyond a DRAFT) or LinkedIn post. List under **Needs approval** and stop. NEVER publish, post, push a branch, deploy, or mutate live config from this task — every artifact this routine creates is a draft awaiting the human.
 
 ## Output — Discord candidates + a terse cache summary
 

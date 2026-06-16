@@ -63,8 +63,8 @@ Output:
 
 ## Remediation policy
 
-- **Proactive — fix in-run, no approval (docs/config ONLY):** this TASK.md (rules, channel map clarity). List under **Remediated**.
-- **Ask first — propose, do NOT ship:** extending the branch→channel map (new branch or channel), changing tone/sections, or any PharmaMate repo touch. This routine REPORTS. Put the proposal in your run note and stop. NEVER edit the repo, never enable an untracked branch on your own.
+- **Fix in-run, no approval (docs ONLY):** local report/draft files. List under **Remediated**.
+- **Ask first — propose, do NOT ship:** any code/config/tooling change — including this TASK.md, branch→channel map changes, tone/section changes, Paperclip SSOT, CLI wrappers, deploys, live config, or any PharmaMate repo touch. This routine REPORTS. Put the proposal in your run note and stop. NEVER edit the repo, push a branch, deploy, mutate live config, or enable an untracked branch on your own.
 
 ## Output
 

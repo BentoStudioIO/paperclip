@@ -18,8 +18,8 @@ Run the WEEKLY MODEL RING REVIEW now, against canary.
 
 ## Remediation policy
 
-- Fix in-run only for Paperclip task/runbook/CLI gaps.
-- Any model, provider, timeout, or routing change must be listed under **Needs approval** with the required eval evidence.
+- Fix in-run only for Outline/runbook non-code docs and local report files.
+- Any code/config/tooling change — including Paperclip task/skill SSOT, CLI wrappers, model, provider, timeout, routing, prompt, deploy, or live config — must be listed under **Needs approval** with the required eval evidence. Do not ship it without approval.
 
 ## Output
 

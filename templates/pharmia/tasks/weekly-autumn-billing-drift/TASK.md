@@ -18,8 +18,8 @@ Run the WEEKLY AUTUMN BILLING DRIFT CHECK now.
 
 ## Remediation policy
 
-- Fix in-run only for Paperclip task/runbook/CLI gaps.
-- Any Autumn config push, Pharmia code change, or production billing mutation must be listed under **Needs approval** with validation steps.
+- Fix in-run only for Outline/runbook non-code docs and local report files.
+- Any code/config/tooling change — including Paperclip task/skill SSOT, CLI wrappers, Autumn config pushes, Pharmia code changes, deploys, live config, or production billing mutations — must be listed under **Needs approval** with validation steps. Do not ship it without approval.
 
 ## Output
 

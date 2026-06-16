@@ -18,8 +18,8 @@ Run the WEEKLY AUTHZ REGRESSION AUDIT now.
 
 ## Remediation policy
 
-- Fix in-run only for Paperclip task/runbook/CLI gaps.
-- Any `PharmaMate` code or test change must be listed under **Needs approval** with the exact failing test or repro to add.
+- Fix in-run only for Outline/runbook non-code docs and local report files.
+- Any code/config/tooling change — including `PharmaMate`, Paperclip task/skill SSOT, CLI wrappers, tests, prompts, deploys, or live config — must be listed under **Needs approval** with the exact failing test or repro to add. Do not ship it without approval.
 
 ## Output
 

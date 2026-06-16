@@ -18,8 +18,8 @@ Run the DAILY CONSULTATION FLOW HEALTH CHECK now, against canary.
 
 ## Remediation policy
 
-- Fix in-run only for Paperclip task/runbook/CLI gaps.
-- For any `PharmaMate` code, prompt, eval, or schema change, report the exact file and validation path under **Needs approval**. Do not push a Pharmia branch.
+- Fix in-run only for Outline/runbook non-code docs and local health-report files.
+- For any code/config/tooling change — including `PharmaMate`, Paperclip task/skill SSOT, CLI wrappers, prompts, evals, schemas, deploys, or live config — report the exact file/change and validation path under **Needs approval**. Do not push a branch, open a PR, deploy, or mutate live config.
 
 ## Output
 

@@ -18,8 +18,8 @@ Run the MONTHLY REGULATORY DRIFT CHECK now.
 
 ## Remediation policy
 
-- Fix in-run only for Paperclip legal/task/runbook source-list gaps.
-- Any product, legal-policy, pharmacy-content, or code change must be listed under **Needs approval** with source citations.
+- Fix in-run only for Outline/legal source-list docs, runbook non-code notes, and local report files.
+- Any product, legal-policy, pharmacy-content, code/config/tooling, Paperclip task/skill SSOT, CLI wrapper, deploy, or live-config change must be listed under **Needs approval** with source citations. Do not ship it without approval.
 
 ## Output
 

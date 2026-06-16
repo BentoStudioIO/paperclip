@@ -18,8 +18,8 @@ Run the WEEKLY EVAL DRIFT CHECK now.
 
 ## Remediation policy
 
-- Fix in-run only for Paperclip task/runbook/CLI gaps.
-- Prompt/model/eval changes go through model-config-gate with before/after evidence and must be listed under **Needs approval**.
+- Fix in-run only for Outline/runbook non-code docs and local report files.
+- Any code/config/tooling change — including Paperclip task/skill SSOT, CLI wrappers, prompt/model/eval changes, deploys, or live config — goes through model-config-gate with before/after evidence and must be listed under **Needs approval**. Do not ship it without approval.
 
 ## Output
 

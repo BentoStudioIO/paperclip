@@ -40,8 +40,8 @@ Always state: `currentVersion → newVersion`, `ageDays`, and the one-line *why 
 
 ## Remediation policy
 
-- **Proactive — fix in-run, no approval (docs/tooling ONLY):** this TASK.md, CLI gaps in `~/.local/bin`. List under **Remediated**.
-- **Ask first — propose, do NOT ship:** ANY dependency bump, `package.json`/lockfile edit, or service redeploy. This routine REPORTS. Real bumps go through the branch + `docker-lockfile-preflight` + review path. Put ADOPT/ACT-NOW as a recommendation in the Discord post and stop. NEVER push a branch or edit a manifest from this task.
+- **Fix in-run, no approval (docs ONLY):** local report files and non-code release notes. List under **Remediated**.
+- **Ask first — propose, do NOT ship:** any code/config/tooling change — including this TASK.md, CLI wrappers, dependency bumps, `package.json`/lockfile edits, manifests, service redeploys, Paperclip SSOT, or live config. This routine REPORTS. Real bumps go through the branch + `docker-lockfile-preflight` + review path. Put ADOPT/ACT-NOW as a recommendation in the Discord post and stop. NEVER push a branch, edit a manifest, deploy, or mutate live config from this task.
 
 ## Output — Discord, one verdict per fire
 

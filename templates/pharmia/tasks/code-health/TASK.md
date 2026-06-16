@@ -26,8 +26,8 @@ Score by `severity × confidence`; surface only high-confidence. GROUP findings 
 
 ## Remediation policy
 
-- **Proactive — fix in-run, no approval (docs + tooling ONLY):** unused-import/dead-export removal with per-file verify + rollback-on-failure (`npm run check-types` green), dashboard-as-code via `grr`, CLI scripts in `~/.local/bin`, paperclip task SSOT. List under **Remediated**.
-- **Ask first — propose, do NOT ship (anything in the Pharmia repo touching behavior):** source logic, i18n string moves, alert `rules.yaml`, test additions. Back with a failing→green repro; route alert edits through alert-rule-change-validator, model/prompt edits through model-config-gate. List under **Needs approval** and stop. NEVER push a Pharmia branch or open a PR from this task.
+- **Fix in-run, no approval (docs ONLY):** local report files and non-code runbook notes. List under **Remediated**.
+- **Ask first — propose, do NOT ship (code/config/tooling):** any repo, source, test, i18n, alert `rules.yaml`, dashboard-as-code, CLI wrapper, Paperclip task/skill SSOT, prompt/model, deploy, or live-config change. Back with a failing→green repro; route alert edits through alert-rule-change-validator, model/prompt edits through model-config-gate. List under **Needs approval** and stop. NEVER push a branch, open a PR, deploy, or mutate live config from this task.
 
 ## Output — terse, one line per item (no prose paragraphs; omit empty sections)
 

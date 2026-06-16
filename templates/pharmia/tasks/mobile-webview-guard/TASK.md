@@ -18,8 +18,8 @@ Run the MOBILE WEBVIEW GUARD for the triggering change.
 
 ## Remediation policy
 
-- Fix in-run only for Paperclip task/runbook/CLI gaps.
-- Any product code/test change must be listed under **Needs approval** with the failing test or repro.
+- Fix in-run only for Outline/runbook non-code docs and local report files.
+- Any code/config/tooling change — including product code/tests, Paperclip task/skill SSOT, CLI wrappers, deploys, or live config — must be listed under **Needs approval** with the failing test or repro. Do not ship it without approval.
 
 ## Output
 

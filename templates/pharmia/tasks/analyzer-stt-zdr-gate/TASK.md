@@ -18,8 +18,8 @@ Run the ANALYZER/STT/ZDR GATE for the triggering change.
 
 ## Remediation policy
 
-- Fix in-run only for Paperclip task/runbook/CLI gaps.
-- Any code/config change must be listed under **Needs approval** with the exact validation required.
+- Fix in-run only for Outline/runbook non-code docs and local report files.
+- Any code/config/tooling change — including Paperclip task/skill SSOT, CLI wrappers, deploys, or live config — must be listed under **Needs approval** with the exact validation required. Do not ship it without approval.
 
 ## Output
 

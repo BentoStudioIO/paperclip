@@ -18,8 +18,8 @@ Run the DAILY AUTH INTEGRITY CHECK now, against canary.
 
 ## Remediation policy
 
-- Fix in-run only for Paperclip task/runbook/CLI gaps.
-- For any `PharmaMate` router, auth, audit-log, or alert-rule change, list the exact file and validation under **Needs approval**. Do not push a Pharmia branch.
+- Fix in-run only for Outline/runbook non-code docs and local health-report files.
+- For any code/config/tooling change — including `PharmaMate`, Paperclip task/skill SSOT, CLI wrappers, routers, auth, audit logs, alert rules, deploys, or live config — list the exact file/change and validation under **Needs approval**. Do not push a branch, open a PR, deploy, or mutate live config.
 
 ## Output
 
