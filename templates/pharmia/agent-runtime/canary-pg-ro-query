@@ -2,7 +2,14 @@
 # Read-only canary Postgres query path for Paperclip agents.
 # Used by the prod-ro SSH forced command. Reads SQL on stdin, rejects psql
 # backslash meta-commands, and routes only to approved read-only DB targets.
+# Prod authorized_keys must preserve SSH_ORIGINAL_COMMAND through sudo; OpenSSH
+# forced commands receive the requested `-- --db mastra` command there, not argv.
 set -euo pipefail
+
+if [[ $# -eq 0 && -n "${SSH_ORIGINAL_COMMAND:-}" ]]; then
+  read -r -a ORIGINAL_ARGS <<< "$SSH_ORIGINAL_COMMAND"
+  set -- "${ORIGINAL_ARGS[@]}"
+fi
 
 DB="app"
 while [[ $# -gt 0 ]]; do
