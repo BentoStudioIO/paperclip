@@ -44,6 +44,15 @@ INPUT: the triggering Discord message is provided in the wake prompt under [Trig
 - description: "**Réservé par**\n<Nom complet>\n<EMAIL>"
 - fields: Start, End, Organizer, Attendees, Location (lien Meet)
 
+FALLBACK INPUT (OBLIGATOIRE SI [Triggering message] EST VIDE / `-` / SANS EMBED DE RÉSERVATION):
+1. Ne crée PAS d'issue et ne bloque PAS tout de suite. Récupère `channelId` et `messageId` depuis la ligne `[Discord context]`.
+2. Lis le message exact via Discord REST, avec le token du bot via env ou Vault:
+   `TOKEN="${DISCORD_BOT_TOKEN:-$(vault-secret discord_bot_token 2>/dev/null)}"; curl -fsS -H "Authorization: Bot $TOKEN" "https://discord.com/api/v10/channels/<channelId>/messages/<messageId>"`
+3. Si le `messageId` exact est absent/inaccessible, lis les 10 derniers messages du channel et prends le plus récent embed dont le titre commence par "📅 New Booking:" ou "🔄 Moved/Updated:":
+   `curl -fsS -H "Authorization: Bot $TOKEN" "https://discord.com/api/v10/channels/<channelId>/messages?limit=10"`
+4. Sérialise l'embed récupéré comme l'input normal (title, description, fields), puis continue le workflow complet ci-dessous. Le lookup Twenty étape A empêche les doublons si le même booking est rejoué.
+5. Seulement si le channel/message ET la lecture Discord échouent: poste UNE ligne de blocage via `discord-post <channelId> "Booking Ingest: impossible de récupérer l'embed de réservation (input manquant + lecture Discord échouée)."` puis arrête.
+
 ROUTING:
 - "🔄 Moved/Updated" → trouve l'Opportunity existante (stage MEETING ou plus avancé) et mets à jour closeDate + Note. Ne crée PAS de duplicate.
 - "📅 New Booking" → flow complet (lookup, create/update Person, create Opportunity).
