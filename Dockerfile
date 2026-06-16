@@ -97,17 +97,12 @@ RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/cod
   && mkdir -p /paperclip \
   && chown node:node /paperclip
 
-# Copy Pharmia HTTP-API CLIs into the image
-COPY tools/clis/ /usr/local/bin/
-RUN chmod +x /usr/local/bin/loki \
-              /usr/local/bin/tempo \
-              /usr/local/bin/prom \
-              /usr/local/bin/langfuse \
-              /usr/local/bin/autumn \
-              /usr/local/bin/cfdns \
-              /usr/local/bin/ol \
-              /usr/local/bin/shlink \
-              /usr/local/bin/git-credential-github-app
+# Install the Pharmia/Bento CLI toolkit (SSOT = templates/pharmia/cli) onto PATH.
+# The GitHub App credential helper is still image-local.
+COPY tools/clis/git-credential-github-app /usr/local/bin/
+RUN chmod +x /usr/local/bin/git-credential-github-app \
+  && CLI_INSTALL_DIR=/usr/local/bin sh /app/templates/pharmia/cli/install.sh \
+  && command -v opq-verify >/dev/null
 
 # Configure git to use the GitHub App credential helper for github.com clones.
 # Use --system so the config lands in /etc/gitconfig and applies to all users
