@@ -19,22 +19,23 @@ Twenty; the **human sends the DMs**.
 
 ## Source 1 — OPQ repertoire (the ICP universe)
 ```
-curl -s 'https://www.opq.org/wp-content/uploads/pharmacist-search/pharmacists_index.json' \
-  | jq '[.[] | select(.isStudent==false)]'
+opq-verify index | jq '[.[] | select(.isStudent==false and .licenseNumber)]'
 ```
 JSON array: `id, fullName, licenseNumber, studentLicenseNumber, city, isStudent`. Filter to licensed
 non-students. OPQ does NOT flag ownership — infer **pharmacien-propriétaire** by cross-referencing web /
 LinkedIn / known pharmacy names (the repertoire is the universe, ownership is the qualifier).
-**Gotcha:** the endpoint WAFs default agents (403) — send a browser `User-Agent` header. **OPQ is also the
-lead-QUALITY GATE**: only capture a web/LinkedIn-sourced name if it matches a licensed OPQ pharmacist
-(token-subset of a 2-4-token OPQ name) — this rejects pharma execs / wrong-country / non-pharmacist noise.
+**Gotcha:** the endpoint WAFs some agent runtimes (403/Imunify360). Do not raw-`curl` it; `opq-verify`
+handles cache, browser impersonation, optional `OPQ_VERIFY_PROXY`, and Camofox fallback when available.
+**OPQ is also the lead-QUALITY GATE**: only capture a web/LinkedIn-sourced name if
+`opq-verify classify "<name>" --json` returns a licensed match — this rejects pharma execs /
+wrong-country / non-pharmacist noise.
 
 ## Source 2 — Twenty (dedupe + write)
 - Discover schema: `twenty objects`, `twenty fields person`, `twenty fields company`.
 - Dedupe: Twenty `name` is a COMPOSITE (`{firstName,lastName}`), not a flat string —
   `twenty gql '{ people(filter:{name:{lastName:{ilike:"%Tremblay%"}}}) { edges { node { id name { firstName lastName } } } } }'`
   — never DM someone already in an active opportunity.
-- Verify license/city against OPQ before writing (avoid wrong-person).
+- Verify license/city with `opq-verify classify "<name>" --json` before writing (avoid wrong-person).
 
 ## Source 3 — online-activity signal (`linkedin-signals` CLI, cookieless)
 Primary tool: **`linkedin-signals`** (`~/.local/bin/linkedin-signals`, Apify-actor-backed, NO cookie/login —

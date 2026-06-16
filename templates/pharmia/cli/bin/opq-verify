@@ -8,6 +8,7 @@ Usage:
   opq-verify --json                      # machine-readable output
   opq-verify --strict                    # exit 1 on warnings too (default: only errors)
 
+  opq-verify index                        # print the OPQ pharmacist index JSON
   opq-verify classify <name-or-license>  # classify a pharmacist against the OPQ index
   opq-verify --classify <name-or-license>
       --human                            # also print a one-line summary to stdout
@@ -35,7 +36,7 @@ OPQ index cache: ~/.cache/opq-index/pharmacists_index.json (TTL 7 days)
 Config:          ~/.config/outline-cli/config.json (api_token, base_url)
 """
 from __future__ import annotations
-import argparse, json, os, re, subprocess, sys, time, unicodedata
+import argparse, json, os, re, shutil, subprocess, sys, time, unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.request import Request, urlopen
@@ -429,6 +430,106 @@ def _norm(s: str) -> str:
     return re.sub(r'\s+', ' ', stripped).strip().lower()
 
 
+def _parse_opq_index(raw: bytes, source: str) -> List[Dict]:
+    data = json.loads(raw)
+    if not isinstance(data, list):
+        raise ValueError(f'{source} returned {type(data).__name__}, expected list')
+    if data and not isinstance(data[0], dict):
+        raise ValueError(f'{source} returned non-object entries')
+    return data
+
+
+def _fetch_opq_index_urlopen() -> Tuple[bytes, str]:
+    req = Request(OPQ_INDEX_URL, headers={
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+                      '(KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'Accept': 'application/json,text/plain,*/*',
+    }, method='GET')
+    with urlopen(req, timeout=30) as resp:
+        return resp.read(), 'urlopen'
+
+
+def _fetch_opq_index_curl_cffi() -> Tuple[bytes, str]:
+    try:
+        from curl_cffi import requests as curl_requests  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f'curl_cffi unavailable: {e}') from e
+
+    proxy = (
+        os.environ.get('OPQ_VERIFY_PROXY')
+        or os.environ.get('HTTPS_PROXY')
+        or os.environ.get('HTTP_PROXY')
+    )
+    kwargs: Dict[str, object] = {
+        'impersonate': os.environ.get('OPQ_VERIFY_IMPERSONATE', 'chrome124'),
+        'timeout': 30,
+    }
+    if proxy:
+        kwargs['proxies'] = {'http': proxy, 'https': proxy}
+    resp = curl_requests.get(OPQ_INDEX_URL, **kwargs)
+    if resp.status_code >= 400:
+        raise RuntimeError(f'HTTP {resp.status_code}')
+    return bytes(resp.content), 'curl_cffi'
+
+
+def _camofox_text_from_output(stdout: str) -> str:
+    text = stdout.strip()
+    if not text:
+        return ''
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, dict):
+        for key in ('result', 'value', 'text', 'stdout'):
+            value = payload.get(key)
+            if isinstance(value, str):
+                return value
+    return text
+
+
+def _run_camofox(camofox: str, args: List[str], timeout: int) -> str:
+    proc = subprocess.run([camofox, *args], capture_output=True, text=True, timeout=timeout)
+    if proc.returncode == 0:
+        return proc.stdout
+    detail = (proc.stderr or proc.stdout).strip()
+    raise RuntimeError(f'camofox {args[0]} failed: {detail or f"exit {proc.returncode}"}')
+
+
+def _fetch_opq_index_camofox() -> Tuple[bytes, str]:
+    camofox = shutil.which('camofox') or shutil.which('agent-browser')
+    if not camofox:
+        raise RuntimeError('camofox unavailable')
+
+    _run_camofox(camofox, ['start'], timeout=45)
+    tab_stdout = _run_camofox(camofox, ['tab', OPQ_INDEX_URL], timeout=90)
+    tab_id = tab_stdout.strip().splitlines()[-1].strip()
+    if not tab_id:
+        raise RuntimeError('camofox did not return a tab id')
+    try:
+        _run_camofox(camofox, ['wait', tab_id, '--timeout', '30000'], timeout=45)
+        expr = 'document.body ? document.body.innerText : document.documentElement.innerText'
+        text = _camofox_text_from_output(_run_camofox(camofox, ['eval', tab_id, expr], timeout=45))
+        if not text:
+            raise RuntimeError('camofox returned empty page text')
+        return text.encode(), 'camofox'
+    finally:
+        subprocess.run([camofox, 'close', tab_id], check=False, capture_output=True, text=True, timeout=10)
+
+
+def _fetch_opq_index() -> Tuple[List[Dict], str]:
+    errors: List[str] = []
+    for fetch in (_fetch_opq_index_urlopen, _fetch_opq_index_curl_cffi, _fetch_opq_index_camofox):
+        try:
+            raw, source = fetch()
+            return _parse_opq_index(raw, source), source
+        except Exception as e:
+            errors.append(f'{fetch.__name__}: {e}')
+    raise RuntimeError('; '.join(errors))
+
+
 def load_opq_index(refresh: bool = False) -> List[Dict]:
     """Return the OPQ pharmacist index, refetching when cache is missing/stale."""
     if 'opq_index' in _CACHE and not refresh:
@@ -445,13 +546,15 @@ def load_opq_index(refresh: bool = False) -> List[Dict]:
             return data
         except (json.JSONDecodeError, OSError):
             pass  # corrupt cache → refetch
-    # Fetch and cache
+    # Fetch and cache. OPQ sometimes blocks plain server-side HTTP from agent
+    # sandboxes (Imunify360). Keep the cheap direct path first, then fall back to
+    # curl_cffi Chrome impersonation, then to the baked Camoufox anti-detect
+    # browser. OPQ_VERIFY_PROXY can point curl_cffi at a residential proxy.
     try:
-        req = Request(OPQ_INDEX_URL, headers={'User-Agent': 'opq-verify/1.0'}, method='GET')
-        with urlopen(req, timeout=30) as resp:
-            raw = resp.read()
-        data = json.loads(raw)
-    except (HTTPError, URLError, json.JSONDecodeError, OSError) as e:
+        data, source = _fetch_opq_index()
+        raw = json.dumps(data, ensure_ascii=False).encode()
+        print(f'[opq-verify] fetched OPQ index via {source}', file=sys.stderr)
+    except (HTTPError, URLError, json.JSONDecodeError, OSError, RuntimeError, ValueError) as e:
         # Network failed — fall back to a stale cache if we have one
         if OPQ_CACHE_FILE.exists():
             try:
@@ -574,9 +677,21 @@ def run_classify(query: str, as_json: bool, human: bool, refresh: bool) -> int:
     return 0 if r['class'] != 'unknown' else 1
 
 
+def run_index(refresh: bool) -> int:
+    print(json.dumps(load_opq_index(refresh=refresh), ensure_ascii=False))
+    return 0
+
+
 def main() -> int:
-    # `classify` subcommand (positional) — keep it out of the mutually-exclusive doc group.
+    # `classify`/`index` subcommands — keep them out of the mutually-exclusive doc group.
     argv = sys.argv[1:]
+    if argv and argv[0] == 'index':
+        sub = argparse.ArgumentParser(prog='opq-verify index',
+                                      description='Print the OPQ pharmacist index JSON.')
+        sub.add_argument('--refresh', action='store_true', help='Force-refetch the OPQ index')
+        a = sub.parse_args(argv[1:])
+        return run_index(a.refresh)
+
     if argv and argv[0] == 'classify':
         sub = argparse.ArgumentParser(prog='opq-verify classify',
                                       description='Classify an OPQ pharmacist (single home for triage).')

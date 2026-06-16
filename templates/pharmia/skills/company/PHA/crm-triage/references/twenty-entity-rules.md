@@ -53,12 +53,13 @@ Classify: student → `group=null`, jobTitle="Étudiant(e) en pharmacie - <uni>"
 - **Propriété**: PHARMACIST_OWNER of [pharmacies] + source (banner site / REQ / web), or "non-proprio confirmé", or "N/A".
 - **Compte**: signup_source, attribution, locale, onboarding state.
 
-## OPQ classify (raw — `opq-verify` is NOT on the runtime)
+## OPQ classify/index
 ```
-curl -s 'https://www.opq.org/wp-content/uploads/pharmacist-search/pharmacists_index.json' \
-  | jq '[.[] | select(.fullName | test("<name>";"i"))]'
+opq-verify classify "<name-or-license>" --json
+opq-verify index | jq '[.[] | select(.isStudent==false and .licenseNumber)]'
 ```
 Fields: id, fullName, licenseNumber, studentLicenseNumber, city, isStudent. Empty match ≠ "not a pharmacist" → run the identity-enrichment block.
+`opq-verify` owns the OPQ cache plus anti-bot fallbacks: browser User-Agent direct fetch, `curl_cffi` Chrome impersonation, optional `OPQ_VERIFY_PROXY`, then Camofox when available.
 
 ## Write authorization — interactive vs autonomous
 - **Interactive / batch / destructive** (operator-run triage, cohort reconcile, reward claw-back, deletes): **confirm before writing.**
@@ -71,6 +72,6 @@ Fields: id, fullName, licenseNumber, studentLicenseNumber, city, isStudent. Empt
 - **Setting the new fields**: `signals` / `atlasUsage` aren't on `twenty person upsert` yet → set via `twenty gql` `updatePerson`/`createPerson` `data:{signals:["PLG_SIGNUP"], atlasUsage:ACTIVE}` (signals = string array; atlasUsage = bare enum).
 - **field-create for a RELATION field**: extras must be `{"relationCreationPayload":{"type":"MANY_TO_ONE","targetObjectMetadataId":"<id>","targetFieldLabel":"..","targetFieldIcon":".."}}` (the CLI sends it as a variable) — NOT flat `relationType`/`targetObjectMetadataId`.
 - **`pg` CLI takes NO psql flags** (`pg <env> <db> "<sql>"` only). For parseable output, concatenate columns with a rare delimiter inside the SQL (e.g. `col1||'~|~'||col2`) and split in the consumer.
-- **OPQ index needs a browser User-Agent** (`curl`/`urllib` default → 403). Send `User-Agent: Mozilla/5.0 ...`.
+- **OPQ endpoint may WAF agent runtimes** (403/Imunify360). Use `opq-verify`, not raw `curl`; it handles cache, browser impersonation, `OPQ_VERIFY_PROXY`, and Camofox fallback when available.
 - **`createNote`/`notes` suddenly 500s** = stale `RICH_TEXT_V2` fieldMetadata rows vs the running Twenty enum (recurs after a `latest`-tag image redeploy). Recovery is a Twenty-DB fix (flip the field back to `RICH_TEXT` + restart server/worker) — **escalate to devops/operator, don't retry the mutation.** Mitigated by pinning the image tag (the `v2.9.4-sso` patched build).
 - **Bulk owner-detection**: per-name Brave/web search is TOO NOISY for mass owner-vs-staff classification (wrong-country, wrong same-name person, parse errors) → use it per-record during interactive triage only. For bulk, trust derivable signals: de-mangled owner records, name-in-company-name, LinkedIn-as-propriétaire, and PROVENANCE (a scouted contact linked to a pharmacy was qualified as an owner when added → `PHARMACIST_OWNER`). PLG self-signups stay `PHARMACIST` (owner/staff-mixed, not reliably classifiable).

@@ -55,7 +55,9 @@ Knowledge / compliance:
 - `ol ...` — Outline wiki (`search`, `doc get|update|create|list`, `verify`, `linkcheck`, `collections`, `tree`).
 - `ol-verify` — Outline doc validator (URL liveness, shallow-url, cross-refs); companion to `ol verify`.
 - `comp ...` — Comp AI GRC (policies/controls/frameworks/tasks/evidence; `sql` escape hatch). **prod-capable.**
-- `opq-verify` — OPQ/RAMQ primary-source verifier.
+- `opq-verify` — OPQ/RAMQ primary-source verifier; `classify` resolves one pharmacist,
+  `index` prints the OPQ repertoire JSON. It handles the OPQ index cache plus
+  browser impersonation, optional `OPQ_VERIFY_PROXY`, and Camofox fallback when available.
 
 Services / misc:
 - `twenty gql '...'` / `twenty objects|fields` — Twenty CRM (auto-JWT).
@@ -63,7 +65,7 @@ Services / misc:
 - `shlink` — Shlink short links + visit analytics + QR.
 - `cfdns` — Cloudflare DNS (always `proxied:false`). **prod-capable.**
 - `search-ai-sessions "query"` — search prior Claude/OpenCode sessions.
-- `camofox` — anti-detect Firefox (Camoufox) REST wrapper (`start`/`tab`/`snap`/`click`/`screenshot`). Honors `$CAMOFOX_DIR` (the agent image sets it to the baked `/opt/camofox-browser`).
+- `camofox` — anti-detect Firefox (Camoufox) REST wrapper (`start`/`tab`/`snap`/`click`/`screenshot`). Honors `$CAMOFOX_DIR`; browser-enabled images point it at the baked server directory.
 
 ## Daytona image bake (snippet)
 

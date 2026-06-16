@@ -44,8 +44,8 @@ skill is runtime-self-contained — it does NOT depend on `~/.claude/rules/`.
 
 Resolve the name/license against the live OPQ repertoire → student | licensed | unknown.
 
-- If `opq-verify` is installed: `opq-verify classify "<name-or-license>" --json` (authoritative class + confidence).
-- Otherwise (e.g. the agents-VPS runtime — `opq-verify` is NOT there): use the raw OPQ index — see the OPQ block in [`references/twenty-entity-rules.md`](references/twenty-entity-rules.md).
+- Use `opq-verify classify "<name-or-license>" --json` (authoritative class + confidence).
+- Do not raw-`curl` the OPQ endpoint. `opq-verify` owns cache, browser impersonation, proxy, and Camofox fallback when available for runtime WAF blocks.
 
 A weak/unknown match means you do **not** have a confident match — an empty OPQ
 result is NOT "not a pharmacist". Run the identity-enrichment procedure (LinkedIn
@@ -106,5 +106,5 @@ Every grant or claw-back is a CRM-affecting write → **confirm before applying*
 ## DRY Pointers (single source of truth)
 
 - CRM entity model, enums, ownership/identity procedures, write-authorization → [`references/twenty-entity-rules.md`](references/twenty-entity-rules.md) (the runtime SSOT; keep in sync with the human-side `~/.claude/rules/twenty-crm.md`)
-- OPQ index → raw curl (in the references file); `opq-verify` if installed
+- OPQ index/classification → `opq-verify` (`classify` for one person, `index` for bulk joins)
 - Reward / cohort definitions + Autumn surface → `autumn --help`

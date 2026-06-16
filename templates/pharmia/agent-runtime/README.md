@@ -10,12 +10,11 @@ Beyond the CLI toolkit + coding agents, the image bakes:
 
 - **Research/security binaries** — `gh` (GitHub), `gitleaks` (secret scan), `oha` (load test),
   `bx` (Brave Search), plus `curl_cffi` (Python TLS-fingerprint HTTP client to bypass WAFs).
-- **Two browser engines, intentionally** — **Camoufox** (`camofox` / `agent-browser`, which is a
-  shim delegating to camofox) for anti-detect scraping of bot-protected sites, vendored from MIT
-  `@askjo/camofox-browser@1.5.2` with the Camoufox binary pre-baked at `~/.cache/camoufox`; and
-  **Chromium via Playwright** (pinned to PharmaMate's resolved version) for the e2e suite.
-  ⚠️ **4 GB RAM ceiling per sandbox** (`daytona-compose.yml`) — do NOT run both engines heavy in
-  parallel. Camoufox uses Xvfb (a virtual display) for full anti-detection.
+- **Browser engines are optional** — the default Coder image intentionally skips Camoufox and
+  Chromium to stay lean. Build/provision with `WITH_BROWSERS=1` when an agent needs
+  **Camoufox** (`camofox` / `agent-browser`) for anti-detect scraping or **Chromium via
+  Playwright** for e2e. **4 GB RAM ceiling per sandbox** (`daytona-compose.yml`) — do not
+  run both engines heavy in parallel. Camoufox uses Xvfb for full anti-detection.
 - The trimmed agent-sandbox [`environment-bindings.md`](../rules/environment-bindings.md) is baked
   to `/home/agent/.claude/rules/` (SSOT = `templates/pharmia/rules/`, synced to the host via
   `scripts/sync-claude-rules.mjs`).
