@@ -645,6 +645,20 @@ describe("renderPaperclipWakePrompt", () => {
     expect(prompt).toContain("named unblock owner/action");
   });
 
+  it("renders plugin session messages that are not issue/comment wakes", () => {
+    const prompt = renderPaperclipWakePrompt({
+      reason: "Discord assignment asn_booking_001 on #1423469520437252157",
+      message: "[Discord context: channelId=1423469520437252157, messageId=booking-msg-1]\n[Triggering message]\nNew Booking",
+    });
+
+    expect(prompt).toContain("## Paperclip Plugin Wake");
+    expect(prompt).toContain("Treat this plugin message as the current task");
+    expect(prompt).toContain("Discord assignment asn_booking_001");
+    expect(prompt).toContain("messageId=booking-msg-1");
+    expect(prompt).toContain("[Triggering message]");
+    expect(prompt).toContain("New Booking");
+  });
+
   it("preserves Chinese, Japanese, and Hindi issue and comment text in scoped wake prompts", () => {
     const title = "验证中文任务";
     const commentBody = [

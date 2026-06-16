@@ -419,6 +419,7 @@ type PaperclipWakeTreeHoldSummary = {
 
 type PaperclipWakePayload = {
   reason: string | null;
+  message: string | null;
   issue: PaperclipWakeIssue | null;
   checkedOutByHarness: boolean;
   dependencyBlockedInteraction: boolean;
@@ -593,6 +594,7 @@ function normalizePaperclipWakeExecutionStage(value: unknown): PaperclipWakeExec
 
 export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayload | null {
   const payload = parseObject(value);
+  const message = asString(payload.message, "").trim() || null;
   const comments = Array.isArray(payload.comments)
     ? payload.comments
         .map((entry) => normalizePaperclipWakeComment(entry))
@@ -624,12 +626,13 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
     : [];
 
   const activeTreeHold = normalizePaperclipWakeTreeHoldSummary(payload.activeTreeHold);
-  if (comments.length === 0 && commentIds.length === 0 && childIssueSummaries.length === 0 && unresolvedBlockerIssueIds.length === 0 && unresolvedBlockerSummaries.length === 0 && !activeTreeHold && !executionStage && !continuationSummary && !livenessContinuation && !normalizePaperclipWakeIssue(payload.issue)) {
+  if (!message && comments.length === 0 && commentIds.length === 0 && childIssueSummaries.length === 0 && unresolvedBlockerIssueIds.length === 0 && unresolvedBlockerSummaries.length === 0 && !activeTreeHold && !executionStage && !continuationSummary && !livenessContinuation && !normalizePaperclipWakeIssue(payload.issue)) {
     return null;
   }
 
   return {
     reason: asString(payload.reason, "").trim() || null,
+    message,
     issue: normalizePaperclipWakeIssue(payload.issue),
     checkedOutByHarness: asBoolean(payload.checkedOutByHarness, false),
     dependencyBlockedInteraction: asBoolean(payload.dependencyBlockedInteraction, false),
@@ -678,6 +681,28 @@ export function renderPaperclipWakePrompt(
   if (!normalized) return "";
   const resumedSession = options.resumedSession === true;
   const executionStage = normalized.executionStage;
+  const hasIssueScopedPayload = Boolean(
+    normalized.issue
+      || normalized.comments.length > 0
+      || normalized.commentIds.length > 0
+      || normalized.childIssueSummaries.length > 0
+      || normalized.unresolvedBlockerIssueIds.length > 0
+      || normalized.unresolvedBlockerSummaries.length > 0
+      || normalized.activeTreeHold
+      || normalized.executionStage
+      || normalized.continuationSummary
+      || normalized.livenessContinuation,
+  );
+  if (!hasIssueScopedPayload && normalized.message) {
+    return [
+      "## Paperclip Plugin Wake",
+      "",
+      "Treat this plugin message as the current task and answer it directly.",
+      `- reason: ${normalized.reason ?? "plugin_message"}`,
+      "",
+      normalized.message,
+    ].join("\n");
+  }
   const principalLabel = (principal: PaperclipWakeExecutionPrincipal | null) => {
     if (!principal || !principal.type) return "unknown";
     if (principal.type === "agent") return principal.agentId ? `agent ${principal.agentId}` : "agent";
@@ -746,6 +771,9 @@ export function renderPaperclipWakePrompt(
         "- accepted-plan continuation: you may create child implementation issues from the approved plan, but must not start implementation work on the planning issue itself",
       );
     }
+  }
+  if (normalized.message) {
+    lines.push("", "Plugin wake message:", normalized.message);
   }
   if (normalized.checkedOutByHarness) {
     lines.push("- checkout: already claimed by the harness for this run");

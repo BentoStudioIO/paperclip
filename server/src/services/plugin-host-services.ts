@@ -2650,6 +2650,10 @@ export function buildHostServices(
             taskKey: session.taskKey,
             wakeSource: "automation",
             wakeTriggerDetail: "system",
+            paperclipWake: {
+              reason: params.reason ?? "plugin_session_message",
+              message: params.prompt,
+            },
           },
           requestedByActorType: "system",
           requestedByActorId: pluginId,
