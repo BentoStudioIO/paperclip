@@ -117,10 +117,10 @@ ssh devops "docker restart devops-gatus-v53po5-gatus-1"
 
 When deploying a new service, complete ALL steps in order:
 
-1. **Create compose project** — `dokploy <instance> compose.create`, then `compose.update` with `sourceType: "raw"` and compose file
+1. **Create compose project** — `dokploy <instance> compose create`, then `dokploy <instance> compose update --sourceType raw --composeFile "$compose_file" --json`
 2. **Add DNS record** — `cfdns add <zone> A <subdomain> <ip>` (no wildcard — every subdomain needs an explicit record)
-3. **Add domain in Dokploy** — `dokploy <instance> domain.create` with host, HTTPS, letsencrypt
-4. **Redeploy** — `dokploy <instance> compose.deploy` (Traefik labels are injected at deploy time)
+3. **Add domain in Dokploy** — `dokploy <instance> domain create --host <host> --path / --https --certificateType letsencrypt --composeId <id> --serviceName <service> --port <port> --json`
+4. **Redeploy** — `dokploy <instance> compose deploy --composeId <id> --title "deploy" --json` (Traefik labels are injected at deploy time)
 5. **Add to Gatus** — append entry to `/etc/dokploy/compose/devops-gatus-v53po5/files/config/config.yaml` on devops, then `ssh devops "docker restart devops-gatus-v53po5-gatus-1"`
 6. **Add to Homepage** — append entry to `/etc/dokploy/compose/bento-homepage-upqrol/files/config/services.yaml` on bento (auto-reloads, no restart needed)
 
@@ -160,24 +160,32 @@ ovhcloud vps reboot vps-XXXXXXXX.vps.ovh.ca   # Reboot crashed server (~1-2 min)
 
 ## Adding a Pharmia Tenant
 
-When adding a new tenant (e.g., a client demo pharmacy), follow these steps in order. Do NOT hardcode SQL or schemas — always read the actual DB schema and existing rows first to match the current structure.
+Use `pharmia-tenant` as the single entrypoint for normal tenant provisioning. Do NOT hand-roll Postgres inserts, DNS records, Dokploy domains, or redeploys for a new tenant; the CLI already provisions DNS + Dokploy domain + DB tenant/user/membership and writes an audit log.
 
-1. **Create tenant in Postgres** — SSH into the target server, find the Pharmia DB container (`docker ps | grep db`), exec into it, and INSERT a new row into the `tenant` table. Read the table schema (`\d tenant`) and existing rows first to match columns and conventions.
+```bash
+pharmia-tenant status --env qa --slug <slug>
+pharmia-tenant create --env qa --slug <slug> \
+  --company-name "<Company>" \
+  --owner-email <email> \
+  --owner-first-name <first> \
+  --owner-last-name <last> \
+  --template-tenant <existing-slug> \
+  --dry-run --check-live
+pharmia-tenant create --env qa --slug <slug> \
+  --company-name "<Company>" \
+  --owner-email <email> \
+  --owner-first-name <first> \
+  --owner-last-name <last> \
+  --template-tenant <existing-slug>
+```
 
-2. **Create owner user in Postgres** — INSERT into `ba_user` with the owner's email, name, the tenant slug, and role `tenantadministrator` (the highest tenant-level role). Read existing users first to confirm the column structure.
+For prod/canary tenant provisioning, use `--env prod`; every mutating prod command MUST include `--confirm-prod`. `--env qa` creates `<slug>.qa.pharmia.ca`; `--env prod` creates `<slug>.pharmia.ca`.
 
-3. **Add DNS A record** — `cfdns add pharmia.ca A <slug>.<env>.pharmia.ca <server-ip>`. Use the correct server IP for the environment.
-
-4. **Attach domain in Dokploy** — Use `dokploy <instance> domain.create` with host, HTTPS/letsencrypt, serviceName `web`, port `5173`, and the compose ID. Find the compose ID with `dokploy <instance> compose.one` or `project.all`. **NEVER add Traefik labels directly to the compose file** — always use the Dokploy domain API so it appears in the UI and survives redeploys.
-
-5. **Redeploy the compose** — `dokploy <instance> compose.deploy '{"composeId":"..."}'` to provision the SSL certificate and attach the new domain to Traefik. Poll deployment status until done.
-
-### Environment naming
-- Client demo tenants use `demo` (e.g., `fphx-029.demo.pharmia.ca`), not `qa`
+Use `pg`, `cfdns`, or `dokploy` directly only when `pharmia-tenant status` or `create` reports a partial/failure state that the wrapper cannot repair. In that case, run `pharmia-tenant status --env <env> --slug <slug> --debug` first and make the smallest idempotent repair to the missing subsystem only.
 
 ## Troubleshooting
 
-- **Compose file updates**: Use `dokploy <instance> compose.update '{"composeId":"...","composeFile":"..."}'` — MCP `compose-update` doesn't expose `composeFile` field
-- **Registry auth**: Call `dokploy <instance> registry.testRegistry` to force `docker login` before deploying private images
+- **Compose file updates**: Use `dokploy <instance> compose update --composeId "..." --composeFile "$compose_file" --sourceType raw --json`
+- **Registry auth**: Call `dokploy <instance> registry test-registry-by-id --registryId <id> --json` to force `docker login` before deploying private images
 - **Dokploy strips** `mem_limit`/`cpus` from compose YAML — use host-mount configs or `docker update` post-deploy
 - **Swap on devops**: 12GB total (`/swapfile` 4GB + `/swapfile2` 8GB), 7.6GB RAM
