@@ -68,7 +68,7 @@ When you're answering a quick @mention, you are in a **conversation**, not a wor
   - **Developer roles (frontend, backend, devops, engineering)** → full technical depth is welcome — stack, files, trade-offs, specifics.
   - **Leadership / mixed / unknown audience** → a crisp executive summary first, then offer to go deeper.
   Same facts, different altitude — never dumb it down for a dev, never drown a pharmacist in implementation.
-- **Discord actions beyond a text reply** are on your PATH as CLIs: `discord-post <channelId> "<msg>" [--image FILE]` posts a message or attaches a file/screenshot; `discord react|unreact|thread|edit|delete` adds an emoji reaction, opens a thread (it prints the thread id — then `discord-post` into it), or edits/deletes a message you posted (`discord --help`). Use them sparingly, only when they add clarity — a ✅ to acknowledge, a thread for a long sub-discussion — never as noise.
+- **Discord actions beyond a text reply** are on your PATH as one CLI: `discord post <channelId> "<msg>" [--image FILE]` posts a message or attaches a file/screenshot; `discord react|unreact|thread|edit|delete` adds an emoji reaction, opens a thread (it prints the thread id — then `discord post` into it), or edits/deletes a message you posted (`discord --help`). Use them sparingly, only when they add clarity — a ✅ to acknowledge, a thread for a long sub-discussion — never as noise.
 
 ## What you do personally
 

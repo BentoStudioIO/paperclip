@@ -15,7 +15,7 @@
 #   FORGEJO_TOKEN              (bentoadmin site-admin token — required)
 #   AGENT_GATEWAY_TOKEN        (LiteLLM virtual key for Claude Code + Codex gateway auth)
 #   PG_DEV_PASSWORD PG_QA_PASSWORD LOKI_DEV_TOKEN LOKI_QA_TOKEN LOKI_CANARY_TOKEN
-#   DISCORD_BOT_TOKEN          (Paperclip Discord bot token for `discord-post` back-posts;
+#   DISCORD_BOT_TOKEN          (Paperclip Discord bot token for `discord post` back-posts;
 #                              SAME bot 1515174537153482843 as the plugin — so awoken
 #                              assignment agents reply from the Paperclip bot)
 #   GRAFANA_TOKEN_DEV GRAFANA_TOKEN_QA OUTLINE_API_TOKEN CLOUDFLARE_API_TOKEN  (optional)
@@ -148,7 +148,7 @@ fi
 # 2026-06-15 leak fix: the tool secrets (PG_*, LOKI_*, GRAFANA_TOKEN_*, OUTLINE_API_TOKEN,
 # CLOUDFLARE_API_TOKEN, DISCORD_BOT_TOKEN) are NO LONGER injected into the agent env — an
 # `env`/`printenv` dump used to persist them verbatim into run transcripts. The wrapper CLIs
-# (pg/loki/prom/ol/cfdns/discord-post) now fetch each value ON DEMAND from HashiCorp Vault
+# (pg/loki/prom/ol/cfdns/discord) now fetch each value ON DEMAND from HashiCorp Vault
 # secret/agents/* via `vault-secret`, so the env carries none of them. See §6c for the
 # bootstrap (read-only agents-ro AppRole creds) + the deny-hook. To rotate a value, update
 # Vault (secret/agents/<name>), NOT this file. GH_TOKEN/GITHUB_PERSONAL_ACCESS_TOKEN remain
@@ -178,7 +178,7 @@ CLI_SRC="$(cd "$SCRIPT_DIR/../cli/bin" 2>/dev/null && pwd)"
 if [ -n "$CLI_SRC" ]; then
   sudo install -d -m 755 /opt/bento-cli/bin
   sudo install -m 755 "$CLI_SRC"/* /opt/bento-cli/bin/ 2>/dev/null \
-    && log "installed CLI toolkit (incl vault-secret + Vault-fallback pg/loki/prom/ol/cfdns/discord-post) into /opt/bento-cli/bin"
+    && log "installed CLI toolkit (incl vault-secret + Vault-fallback pg/loki/prom/ol/cfdns/discord) into /opt/bento-cli/bin"
 fi
 # agents-ro Vault creds (read-only). role_id/secret_id sourced from escrow env before provisioning.
 if [ -n "${AGENT_VAULT_RO_ROLE_ID:-}" ] && [ -n "${AGENT_VAULT_RO_SECRET_ID:-}" ]; then

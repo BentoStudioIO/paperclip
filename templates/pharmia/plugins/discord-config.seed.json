@@ -56,7 +56,7 @@
       "channelId": "1485869100952588309",
       "pattern": "New signup",
       "agentName": "Signup Ingest",
-      "prompt": "A new Pharmia signup notification was just posted in the Atlas live feed (see the triggering message below). Run your full signup-ingest process on it: identify the user in canary (pg canary app, ba_user), enrich (OPQ + LinkedIn/web), detect ownership, create or update the Twenty Person plus a signup Note, then post your concise summary (max 5 lines) back to this same channel (id 1485869100952588309) using the discord-post CLI.",
+      "prompt": "A new Pharmia signup notification was just posted in the Atlas live feed (see the triggering message below). Run your full signup-ingest process on it: identify the user in canary (pg canary app, ba_user), enrich (OPQ + LinkedIn/web), detect ownership, create or update the Twenty Person plus a signup Note, then post your concise summary (max 5 lines) back to this same channel (id 1485869100952588309) using the `discord post` CLI.",
       "cooldownSeconds": 120,
       "enabled": true,
       "createdBy": "managed-discord-config"
@@ -66,7 +66,7 @@
       "channelId": "1423469520437252157",
       "pattern": "New Booking|Moved/Updated",
       "agentName": "Booking Ingest",
-      "prompt": "A Pharmia meeting booking was just posted in this channel (the booking embed with booker name, email, start/end and organizer is in the [Triggering message], already serialized). Run your full booking-ingest contract on it: look up / upsert the Twenty Person by the booker email, create or update the idempotent MEETING Opportunity (check Twenty for an existing active Opportunity before creating, no duplicates), attach a booking Note, then post ONE concise summary (max 5 lines) back to this same channel with the discord-post CLI.",
+      "prompt": "A Pharmia meeting booking was just posted in this channel (the booking embed with booker name, email, start/end and organizer is in the [Triggering message], already serialized). Run your full booking-ingest contract on it: look up / upsert the Twenty Person by the booker email, create or update the idempotent MEETING Opportunity (check Twenty for an existing active Opportunity before creating, no duplicates), attach a booking Note, then post ONE concise summary (max 5 lines) back to this same channel with the `discord post` CLI.",
       "cooldownSeconds": 120,
       "enabled": true,
       "createdBy": "managed-discord-config"

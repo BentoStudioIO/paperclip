@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# discord — outbound Discord actions for Paperclip agents: react, thread, edit, delete.
+# discord — outbound Discord actions for Paperclip agents: post, react, thread, edit, delete.
 #
-# Companion to `discord-post` (which posts messages + file attachments). These are
-# the other actions an agent may need: add/remove an emoji reaction, open a thread,
-# or edit/delete a message the bot posted. Post into a thread by passing the thread
-# id (printed by `discord thread`) to `discord-post`.
+# The single bot surface: post messages + file attachments (the back-post path for
+# assignment-awoken agents — `ctx.agents.invoke` is fire-and-forget, so results
+# come back to the channel through here), add/remove an emoji reaction, open a
+# thread, or edit/delete a message the bot posted. Post into a thread by passing
+# the thread id (printed by `discord thread`) to `discord post`.
+# (`discord-post` remains as a deprecated shim that forwards to `discord post`.)
 #
 # Auth: reads the bot token from $DISCORD_BOT_TOKEN (NEVER hardcoded — wired by
-# provision-agent-identity.sh). Fail-closed: exits non-zero if the token is unset.
+# provision-agent-identity.sh), with a vault-secret fallback. Fail-closed: exits
+# non-zero if no token can be resolved.
 set -euo pipefail
 
 API="https://discord.com/api/v10"
@@ -15,6 +18,8 @@ API="https://discord.com/api/v10"
 usage() {
   cat <<'EOF'
 Usage:
+  discord post    <channelId> "<message>"                    Post a message ("-" reads stdin; >2000 chars auto-chunked)
+  discord post    <channelId> "<caption>" --image <path>     Post with file attachment(s) (--image/--file, repeatable)
   discord react   <channelId> <messageId> <emoji>            Add an emoji reaction (👍 or name:id)
   discord unreact <channelId> <messageId> <emoji>            Remove the bot's reaction
   discord thread  <channelId> "<name>" [--message <msgId>]   Open a thread; prints the new thread id
@@ -22,7 +27,7 @@ Usage:
   discord delete  <channelId> <messageId>                    Delete a message
 
 Auth: requires $DISCORD_BOT_TOKEN (the Paperclip bot token). Fail-closed.
-Ids must be numeric snowflakes. Post into a new thread with: discord-post <threadId> "..."
+Ids must be numeric snowflakes. Post into a new thread with: discord post <threadId> "..."
 EOF
   exit "${1:-1}"
 }
@@ -31,7 +36,7 @@ EOF
 command -v jq   >/dev/null || { echo "discord: jq is required" >&2; exit 2; }
 command -v curl >/dev/null || { echo "discord: curl is required" >&2; exit 2; }
 
-TOKEN="${DISCORD_BOT_TOKEN:-}"
+TOKEN="${DISCORD_BOT_TOKEN:-$(vault-secret discord_bot_token 2>/dev/null || true)}"
 [[ -n "$TOKEN" ]] || { echo "discord: \$DISCORD_BOT_TOKEN is not set — cannot authenticate as the bot" >&2; exit 1; }
 
 # _api METHOD PATH [curl-args...] — call the Discord API; on non-2xx print the error
@@ -53,6 +58,80 @@ _snow() { [[ "$1" =~ ^[0-9]+$ ]] || { echo "discord: ${2:-id} '$1' is not a nume
 
 cmd="${1:-}"; shift || true
 case "$cmd" in
+  post)
+    # Post a message (chunked at Discord's 2000-char cap) with optional file
+    # attachments. Absorbed from the former standalone `discord-post` CLI.
+    LIMIT=2000
+    ch="${1:-}"; shift || true
+    imgs=(); msgarg=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --image|--file)
+          shift
+          [[ -n "${1:-}" ]] || { echo "discord: --image needs a path" >&2; exit 1; }
+          [[ -f "$1" ]]     || { echo "discord: attachment not found: $1" >&2; exit 1; }
+          imgs+=("$1") ;;
+        --help|-h) usage 0 ;;
+        *) msgarg="$1" ;;
+      esac
+      shift || true
+    done
+    [[ -n "$ch" ]] || usage 1
+    _snow "$ch" channelId
+    # Message: explicit "-" reads stdin; may be empty when an attachment carries the post.
+    if [[ "$msgarg" == "-" ]]; then msg="$(cat)"; else msg="$msgarg"; fi
+    if [[ -z "$msg" && ${#imgs[@]} -eq 0 ]]; then
+      echo "discord: empty message (and no --image attachment)" >&2; exit 1
+    fi
+
+    # One multipart POST carrying the chunk plus every attachment. curl's -F
+    # builds multipart/form-data; payload_json carries the (escaped) content.
+    _post_multipart() {
+      local chunk="$1" body="/tmp/discord.$$" code i=0
+      local cargs=(-sS -o "$body" -w '%{http_code}' -X POST "$API/channels/$ch/messages"
+                   -H "Authorization: Bot $TOKEN"
+                   -F "payload_json=$(jq -nc --arg c "$chunk" '{content: $c}')")
+      for img in "${imgs[@]}"; do
+        cargs+=(-F "files[$i]=@$img"); i=$((i + 1))
+      done
+      code="$(curl "${cargs[@]}")"
+      if [[ "$code" != 2* ]]; then
+        echo "discord: post (attachments) failed (HTTP $code): $(cat "$body" 2>/dev/null)" >&2
+        rm -f "$body"; exit 1
+      fi
+      rm -f "$body"
+    }
+
+    # Split into <=LIMIT-char chunks (break at the last newline in the window
+    # when possible, else hard-split); attachments ride on the first post.
+    posted=0; first=1; rest="$msg"
+    while [[ -n "$rest" ]]; do
+      if (( ${#rest} <= LIMIT )); then
+        chunk="$rest"; rest=""
+      else
+        chunk="${rest:0:LIMIT}"
+        [[ "$chunk" == *$'\n'* ]] && chunk="${chunk%$'\n'*}"
+        rest="${rest:${#chunk}}"
+        rest="${rest#$'\n'}"
+      fi
+      if [[ $first -eq 1 && ${#imgs[@]} -gt 0 ]]; then
+        _post_multipart "$chunk"
+      else
+        _api POST "/channels/$ch/messages" \
+          --data "$(jq -nc --arg c "$chunk" '{content:$c}')" >/dev/null
+      fi
+      first=0; posted=$((posted + 1))
+    done
+    # Attachment(s) with no text caption: still post them once.
+    if [[ $posted -eq 0 && ${#imgs[@]} -gt 0 ]]; then
+      _post_multipart ""; posted=1
+    fi
+    if [[ ${#imgs[@]} -gt 0 ]]; then
+      echo "discord: posted $posted message(s) with ${#imgs[@]} attachment(s) to channel $ch"
+    else
+      echo "discord: posted $posted message(s) to channel $ch"
+    fi
+    ;;
   react|unreact)
     ch="${1:-}"; msg="${2:-}"; emoji="${3:-}"
     [[ -n "$ch" && -n "$msg" && -n "$emoji" ]] || usage 1
