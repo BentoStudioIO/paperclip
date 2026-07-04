@@ -49,7 +49,6 @@ Pharmia dev / ops:
 - `pharmia-rc` — host Remote Control (systemd `claude-rc-pharmamate`): `status`/`up`/`restart`/`doctor`.
 - `pharmia-tenant create --env qa|prod ...` — tenant provisioning. **prod-capable.**
 - `dokploy <instance> ...` — Dokploy ops (`apps`, `status`, `logs`, `env-set`/`env-backup`/`env-rollback`). **prod/devops instances are prod-capable.**
-- `dokploy-audit` — Dokploy config drift audit.
 
 Knowledge / compliance:
 - `ol ...` — Outline wiki (`search`, `doc get|update|create|list`, `verify`, `linkcheck`, `collections`, `tree`).
