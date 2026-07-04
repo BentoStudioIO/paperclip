@@ -128,7 +128,7 @@ When analysis reveals a novel, reusable integration pattern that future agents w
 
 Pattern capture is a secondary output — do not prioritize it over instruction improvements. Capture only when a pattern emerges naturally from the analysis.
 
-## Nightly / Long-Horizon Mode
+## Sweep / Long-Horizon Mode
 
 When dispatched for a comprehensive audit (e.g., weekly review of the agent/skill ecosystem), the goal is to improve the system that builds the product, not the product itself.
 
@@ -137,7 +137,7 @@ Focus areas beyond standard analysis:
 - **Coverage gaps** — what failure modes have no gate catching them? Cross-reference recent session logs and eval results against agent instructions.
 - **Prompt quality** — are agent instructions clear, concise, and actionable? Flag vague instructions ("be careful with X") that should be specific checks. Instructions that start with "always" or "never" but have no evolution marker probably weren't derived from evidence. A skill file over 200 lines probably has sections that should be in agent prompts instead.
 
-Overfit audit and pattern capture are standard (already in main workflow) — run them with broader scope in nightly mode (all files, not just the ones related to the current task).
+Overfit audit and pattern capture are standard (already in main workflow) — run them with broader scope in an exploration sweep (all files, not just the ones related to the current task).
 
 Output proposals with exact diffs. Do not apply — human approves all changes.
 

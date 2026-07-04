@@ -9,9 +9,9 @@ description: >
   change so it stays signal, not a daily repeat of slow-moving findings.
 ---
 
-Run the WEEKLY CODE-HEALTH CHECK now, autonomously, on `PharmaMate`. Use the deletion-bias, testing-intelligence, and duplication-detect skills. Read `~/.claude/rules/environment-bindings.md` for tools.
+Run the WEEKLY CODE-HEALTH CHECK now, autonomously, on `PharmaMate`. Use the deletion-bias and testing-intelligence skills. Read `~/.claude/rules/environment-bindings.md` for tools.
 
-**Scope to the week's change** — `git -C ~/Documents/PharmaMate log --since='7 days ago' --oneline` and `git diff --stat <7d-ago-sha>..HEAD`. The four dimensions below are kept BECAUSE they move week-to-week and tie to a diff. The standing architectural scans (DRY/coupling/blast-radius/extensibility/construction-defects) are DROPPED from this routine — they are slow-moving and repeat as noise at frequency; run them ON-DEMAND only (when explicitly asked or via the `nightly` skill), not on a recurring cadence.
+**Scope to the week's change** — `git -C ~/Documents/PharmaMate log --since='7 days ago' --oneline` and `git diff --stat <7d-ago-sha>..HEAD`. The four dimensions below are kept BECAUSE they move week-to-week and tie to a diff. The standing architectural scans (DRY/coupling/blast-radius/extensibility/construction-defects) are DROPPED from this routine — they are slow-moving and repeat as noise at frequency; run them ON-DEMAND only (when explicitly asked or via a broad exploration sweep), not on a recurring cadence.
 
 ## Steps (scoped to the last 7 days of commits)
 

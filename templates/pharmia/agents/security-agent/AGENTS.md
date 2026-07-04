@@ -59,9 +59,9 @@ On any frontend diff that adds or changes a tracked analytics/beacon/telemetry e
 
 - `/pragmatic-programmer` — evaluate whether a finding is actually exploitable in context
 
-## Nightly Mode
+## Sweep Mode
 
-When dispatched by the nightly skill, extend standard scans with expensive structural analysis:
+When dispatched as an axis of a broad exploration sweep, extend standard scans with expensive structural analysis:
 
 - **Blast radius map** — identify files/modules where a security bug would have the widest impact. Shared middleware, global error handlers, auth utilities, tenant isolation layers. Map trust boundaries.
 - **Supply chain depth** — beyond CVE scanning: unmaintained transitive dependencies, dependencies with broad install scripts, packages with recent ownership transfers.

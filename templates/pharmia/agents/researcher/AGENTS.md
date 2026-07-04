@@ -3,7 +3,6 @@ name: "Researcher"
 title: "Research Agent"
 reportsTo: "engineering-lead"
 skills:
-  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/search-first"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/researcher-workflow"
 ---
 
@@ -64,7 +63,7 @@ Search for existing solutions and understand the codebase before planning or imp
    - Singular vs plural.
    - Current ask vs adjacent requirement already visible in code/docs.
 
-## Nightly Mode
+## Sweep Mode
 
 When dispatched proactively, find high-ROI ways to delete or avoid custom code:
 

@@ -65,11 +65,6 @@ When adding a new tenant (e.g., a client demo pharmacy), follow these steps in o
 ### Environment naming
 - Client demo tenants use `demo` (e.g., `fphx-029.demo.pharmia.ca`), not `qa`.
 
-## Skills
-
-- `/monitoring-expert` — verify monitoring/health checks after deployments
-- `/sre-engineer` — incident management if deployment causes issues
-
 ## Troubleshooting
 
 - **Compose file updates**: use `dokploy <instance> compose.update` with the `composeFile` field — the MCP `compose-update` doesn't expose it.

@@ -34,9 +34,7 @@
 | code-review-excellence | Master effective code review practices to provide constructive feedback, catch bugs early, and foster knowledge sharing while maintaining team morale. Use when reviewing pull requests, establishing review standards, or mentoring developers. | catalog |
 | context7-mcp | This skill should be used when the user asks about libraries, frameworks, API references, or needs code examples. Activates for setup questions, code generation involving libraries, or mentions of specific frameworks like React, Vue, Next.js, Prisma, Supabase, etc. | catalog |
 | critique | Evaluate design effectiveness from a UX perspective. Assesses visual hierarchy, information architecture, emotional resonance, and overall design quality with actionable feedback. | catalog |
-| debugging-wizard | Use when investigating errors, analyzing stack traces, or finding root causes of unexpected behavior. Invoke for error investigation, troubleshooting, log analysis, root cause analysis. | catalog |
 | deletion-bias | Use during implementation — enforces minimal code, net-negative LOC, and prevents over-engineering and premature abstraction | catalog |
-| duplication-detect | Find and eliminate code duplication with DRY refactoring strategies | catalog |
 | frontend-design | Create distinctive, production-grade frontend interfaces with high design quality. Use this skill when the user asks to build web components, pages, artifacts, posters, or applications. Generates creative, polished code that avoids generic AI aesthetics. | catalog |
 | harden | Improve interface resilience through better error handling, i18n support, text overflow handling, and edge case management. Makes interfaces robust and production-ready. | catalog |
 | json-render-core | json-render @json-render/core API: schemas, catalogs, SpecStream compilers, validateSpec/autoFixSpec, diffToPatches, createStateStore. Use when working with the backend catalog or fence-extraction pipeline. | catalog |
@@ -51,7 +49,6 @@
 | receiving-code-review | Use when receiving code review feedback, before implementing suggestions, especially if feedback seems unclear or technically questionable - requires technical rigor and verification, not performative agreement or blind implementation | catalog |
 | researcher-workflow | Use before building anything new — enforces library doc verification, existing solution search, and capability verification before writing custom code | catalog |
 | review-protocol | Use after implementation is complete — 8-phase verification protocol covering build, types, lint, tests, security, diff review, acceptance criteria, and final verdict | catalog |
-| search-first | Research-before-coding workflow. Search for existing tools, libraries, and patterns before writing custom code. Invokes the researcher agent. | catalog |
 | spec-miner | Use when understanding legacy or undocumented systems, creating documentation for existing code, or extracting specifications from implementations. Invoke for legacy analysis, code archaeology, undocumented features. | catalog |
 | systematic-debugging | Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes | catalog |
 | testing-intelligence | Use when writing tests, reviewing test quality, or deciding what to test — enforces prioritization, quality rules, and mutation testing standards | catalog |

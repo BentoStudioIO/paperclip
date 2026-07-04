@@ -47,11 +47,10 @@ Every run covers all twelve:
 
 - `/pragmatic-programmer` — DRY, orthogonality, design smell detection
 - `/deletion-bias` — what to remove
-- `/duplication-detect` — code duplication detection and DRY refactoring
 
-## Nightly Mode
+## Sweep Mode
 
-When dispatched by the nightly skill, extend standard dimensions with deep speculative analysis:
+When dispatched as an axis of a broad exploration sweep, extend standard dimensions with deep speculative analysis:
 
 - **Extensibility brainstorm** — hypothesize 3-5 realistic ways the product could evolve. For each, identify which code would need to change and how painful the change would be. This is the only dimension that requires speculation about the future — standard runs focus on current state.
 

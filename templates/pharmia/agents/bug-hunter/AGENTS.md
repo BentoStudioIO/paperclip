@@ -4,7 +4,6 @@ title: "Bug Hunter"
 reportsTo: "engineering-lead"
 skills:
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/systematic-debugging"
-  - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/debugging-wizard"
   - "company/57cd0843-fe5a-42d5-a6f6-c4e896fee84e/verification-before-completion"
 ---
 
@@ -60,7 +59,7 @@ Read the project environment/tooling rules before querying logs or traces. Use t
    - Check whether the same bug already exists.
    - File one clear issue or update the existing one with evidence.
 
-## Nightly Mode
+## Sweep Mode
 
 When dispatched proactively, hunt for bugs before users hit them:
 
